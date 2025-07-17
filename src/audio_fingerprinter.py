@@ -9,18 +9,16 @@ import numpy as np
 import librosa
 import matplotlib.pyplot as plt
 from scipy.signal import find_peaks
+from skimage.feature import peak_local_max
 from typing import List, Tuple, Dict, Optional
 import hashlib
 import sqlite3
 from dataclasses import dataclass
 import pickle
-import multiprocessing as mp
-from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
+
 import logging
 import time
 from .adaptive_parameters import AdaptiveParameterTuner, PerformanceMonitor
-from .parallel_processing import ParallelAudioProcessor, MemoryOptimizer
-from . import parallel_processing
 from .database_base import Fingerprint
 
 
@@ -102,7 +100,8 @@ class SpectrogramAnalyzer:
             return mask, adaptive_threshold
         
         return mask, min_amplitude
-    
+
+
     def _find_local_maxima(self, magnitude: np.ndarray, mask: np.ndarray, 
                           frequencies: np.ndarray, times: np.ndarray,
                           peak_neighborhood_size: int, debug: bool) -> List[Peak]:
@@ -110,31 +109,25 @@ class SpectrogramAnalyzer:
         logger = logging.getLogger(__name__)
         
         peaks = []
-        search_range_t = range(peak_neighborhood_size, magnitude.shape[1] - peak_neighborhood_size)
-        search_range_f = range(peak_neighborhood_size, magnitude.shape[0] - peak_neighborhood_size)
-        
-        candidates_found = 0
-        
-        for t_idx in search_range_t:
-            for f_idx in search_range_f:
-                if not mask[f_idx, t_idx]:
-                    continue
-                
-                candidates_found += 1
-                
-                # この点が局所最大値かどうかをチェック
-                neighborhood = magnitude[
-                    f_idx - peak_neighborhood_size:f_idx + peak_neighborhood_size + 1,
-                    t_idx - peak_neighborhood_size:t_idx + peak_neighborhood_size + 1
-                ]
-                
-                if magnitude[f_idx, t_idx] == np.max(neighborhood):
-                    peak = Peak(
-                        time=times[t_idx],
-                        frequency=frequencies[f_idx],
-                        amplitude=magnitude[f_idx, t_idx]
-                    )
-                    peaks.append(peak)
+        # 局所最大値の座標を取得
+        coords = peak_local_max(
+            magnitude,
+            min_distance=peak_neighborhood_size,
+            threshold_abs=None  # マスクで閾値制御
+        )
+        # マスクを適用
+        coords = coords[mask[coords[:, 0], coords[:, 1]]]
+        candidates_found = coords.shape[0]
+        # 有効範囲外の座標を削除
+        valid = []
+        f_start, f_end = peak_neighborhood_size, magnitude.shape[0] - peak_neighborhood_size
+        t_start, t_end = peak_neighborhood_size, magnitude.shape[1] - peak_neighborhood_size
+        for f_idx, t_idx in coords:
+            if f_start <= f_idx < f_end and t_start <= t_idx < t_end:
+                valid.append((f_idx, t_idx))
+        # Peakオブジェクトを作成
+        peaks = [Peak(time=times[t], frequency=frequencies[f], amplitude=magnitude[f, t])
+                 for f, t in valid]
         
         if debug:
             logger.info(f"Candidate points: {candidates_found}")
@@ -219,6 +212,7 @@ class SpectrogramAnalyzer:
             plt.legend()
         
         plt.show()
+    
 
 
 class HashGenerator:
@@ -472,8 +466,6 @@ class AudioFingerprinter:
                  min_amplitude: float = -60,
                  peak_neighborhood_size: int = 10,
                  enable_adaptive_params: bool = True,
-                 enable_parallel_processing: bool = False,
-                 max_workers: Optional[int] = None,
                  audible_only: bool = False):
         """
         音声フィンガープリンターを初期化
@@ -485,8 +477,6 @@ class AudioFingerprinter:
             min_amplitude: ピーク検出の最小振幅閾値
             peak_neighborhood_size: 局所最大値検出の近傍サイズ
             enable_adaptive_params: 適応的パラメータ調整を有効にする
-            enable_parallel_processing: 並列処理を有効にする
-            max_workers: 並列処理の最大ワーカー数
             audible_only: 可聴域(20Hz-20kHz)のみを使う場合True
         """
         self.spectrogram_analyzer = SpectrogramAnalyzer(n_fft, hop_length, sr)
@@ -495,7 +485,6 @@ class AudioFingerprinter:
         self.min_amplitude = min_amplitude
         self.peak_neighborhood_size = peak_neighborhood_size
         self.enable_adaptive_params = enable_adaptive_params
-        self.enable_parallel_processing = enable_parallel_processing
         self.audible_only = audible_only
         
         # 適応的パラメータ調整器
@@ -506,13 +495,7 @@ class AudioFingerprinter:
             self.parameter_tuner = None
             self.performance_monitor = None
         
-        # 並列処理管理
-        if enable_parallel_processing:
-            self.parallel_processor = ParallelAudioProcessor(max_workers=max_workers)
-            self.memory_optimizer = MemoryOptimizer()
-        else:
-            self.parallel_processor = None
-            self.memory_optimizer = None
+
     
     def load_audio(self, file_path: str) -> np.ndarray:
         """
@@ -568,19 +551,8 @@ class AudioFingerprinter:
             min_amplitude = self.min_amplitude
             peak_neighborhood_size = self.peak_neighborhood_size
         
-        # 並列処理またはストリーミング処理の判定
-        if (self.enable_parallel_processing and self.parallel_processor and 
-            self.memory_optimizer and self.memory_optimizer.should_use_streaming(audio)):
-            
-            if debug:
-                logger.info("Using parallel processing for large audio file")
-            
-            fingerprints = self._process_audio_parallel(audio, min_amplitude, 
-                                                      peak_neighborhood_size, debug)
-        else:
-            # 通常の処理
-            fingerprints = self._process_audio_sequential(audio, min_amplitude, 
-                                                        peak_neighborhood_size, debug)
+
+        fingerprints = self._process_audio_sequential(audio, min_amplitude, peak_neighborhood_size, debug)
         
         # パフォーマンス監視
         processing_time = time.time() - start_time
@@ -622,36 +594,7 @@ class AudioFingerprinter:
         fingerprints = self.hash_generator.generate_hashes(peaks, debug)
         return fingerprints
     
-    def _process_audio_parallel(self, audio: np.ndarray, min_amplitude: float,
-                              peak_neighborhood_size: int, debug: bool) -> List[Fingerprint]:
-        """音声を並列処理"""
-        logger = logging.getLogger(__name__)
-        
-        # 音声をチャンクに分割
-        chunks = self.parallel_processor.split_audio_into_chunks(audio, self.sr)
-        
-        if debug:
-            logger.info(f"Split into {len(chunks)} chunks for parallel processing")
-        
-        # 並列処理用のパラメータ
-        processing_kwargs = {
-            'n_fft': self.spectrogram_analyzer.n_fft,
-            'hop_length': self.spectrogram_analyzer.hop_length,
-            'sr': self.sr,
-            'min_amplitude': min_amplitude,
-            'peak_neighborhood_size': peak_neighborhood_size
-        }
-        
-        # 並列処理実行
-        if parallel_processing:
-            results = self.parallel_processor.process_chunks_parallel(
-                chunks, parallel_processing.parallel_fingerprint_worker, **processing_kwargs
-            )
-        
-        # 結果をマージ
-        fingerprints = self.parallel_processor.merge_fingerprint_results(results)
-        
-        return fingerprints
+
     
     def _retry_with_relaxed_parameters(self, magnitude: np.ndarray, frequencies: np.ndarray,
                                      times: np.ndarray, debug: bool, logger) -> List[Peak]:

@@ -983,8 +983,7 @@ class TestMimizamPerformanceIntegration(TestAudioMixin, unittest.TestCase):
                     'max_results': 10,
                     'scoring_method': 'hybrid'
                 },
-                enable_adaptive_params=False,
-                enable_parallel_processing=False
+                enable_adaptive_params=False
             )
             
             try:

@@ -9,6 +9,7 @@ ffmpeg-python>=0.2.0
 #hashlib2
 pytest>=6.2.0
 jupyter>=1.0.0
+scikit-image
 
 # 性能テスト用追加依存関係
 testcontainers>=3.7.0

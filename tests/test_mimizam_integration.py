@@ -68,8 +68,7 @@ class TestMimizamSQLite(unittest.TestCase):
                 'max_results': 10,
                 'scoring_method': 'hybrid'
             },
-            enable_adaptive_params=False,  # テストの一貫性のため無効化
-            enable_parallel_processing=False
+            enable_adaptive_params=False  # テストの一貫性のため無効化
         )
     
     def tearDown(self):

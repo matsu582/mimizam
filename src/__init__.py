@@ -17,7 +17,6 @@ from .database_base import Fingerprint, Song, DatabaseConfig
 from .fingerprint_database import FingerprintDatabase, FingerprintMatcher
 from .database_base import DatabaseConfig, Song, Fingerprint
 from .adaptive_parameters import AdaptiveParameterTuner
-from .parallel_processing import ParallelAudioProcessor
 
 __all__ = [
     'Mimizam',
@@ -35,5 +34,4 @@ __all__ = [
     'Song',
     'DatabaseConfig',
     'AdaptiveParameterTuner',
-    'ParallelAudioProcessor',
 ]

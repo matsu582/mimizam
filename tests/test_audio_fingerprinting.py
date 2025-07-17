@@ -276,8 +276,7 @@ class TestMimizamIntegration(unittest.TestCase):
                 'max_results': 5,
                 'scoring_method': 'hybrid'
             },
-            enable_adaptive_params=False,  # テストの一貫性のため無効化
-            enable_parallel_processing=False
+            enable_adaptive_params=False  # テストの一貫性のため無効化
         )
         
         # テスト用音声データを生成

@@ -723,8 +723,7 @@ Examples:
         # 指紋生成器設定を作成
         fingerprinter_config = {
             'enable_adaptive_params': not args.disable_adaptive,
-            'audible_only': args.audible_only,
-            'enable_parallel_processing': False
+            'audible_only': args.audible_only
         }
         
         # マッチャー設定を作成

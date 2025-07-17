@@ -212,10 +212,7 @@ def main():
         print(f"   - {song.title} by {song.artist} (ID: {song.id})")
     
     print("\n✅ Demo completed!")
-    print("\nTo use with real audio files:")
-    print("1. Place your audio files in the ../data/ directory")
-    print("2. Use supported formats: WAV, MP3, FLAC, etc.")
-    print("3. Run the fingerprinter on your files")
+
 
 
 if __name__ == "__main__":

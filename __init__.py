@@ -23,7 +23,6 @@ from .src.audio_fingerprinter import AudioFingerprinter, Peak, SpectrogramAnalyz
 from .src.fingerprint_database import FingerprintDatabase, FingerprintMatcher
 from .src.database_base import DatabaseConfig, Song, Fingerprint
 from .src.adaptive_parameters import AdaptiveParameterTuner
-from .src.parallel_processing import ParallelAudioProcessor
 
 __version__ = "1.0.0"
 
@@ -50,5 +49,4 @@ __all__ = [
     
     # 高度な機能
     'AdaptiveParameterTuner',
-    'ParallelAudioProcessor',
 ]

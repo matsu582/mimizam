@@ -53,8 +53,6 @@ def create_mimizam_instance(args) -> Mimizam:
     # 指紋生成器の設定を準備
     fingerprinter_config = {
         'enable_adaptive_params': determine_adaptive_setting(args),
-        'enable_parallel_processing': args.enable_parallel,
-        'max_workers': args.max_workers,
         'audible_only': getattr(args, 'audible_only', False)
     }
     
@@ -314,9 +312,6 @@ def initialize_fingerprinter(args) -> Mimizam:
     # 設定をログ出力
     enable_adaptive = determine_adaptive_setting(args)
     logger.info(f"Adaptive parameters: {'ON' if enable_adaptive else 'OFF'}")
-    logger.info(f"Parallel processing: {'ON' if args.enable_parallel else 'OFF'}")
-    if args.enable_parallel:
-        logger.info(f"Max workers: {args.max_workers}")
     
     return mimizam
 
@@ -415,9 +410,8 @@ def main():
   python video_fingerprinter.py /path/to/videos
   python video_fingerprinter.py /path/to/videos --database custom.db
   python video_fingerprinter.py /path/to/videos --recursive --verbose
-  python video_fingerprinter.py /path/to/videos --enable-parallel --max-workers 8
   python video_fingerprinter.py /path/to/videos --no-adaptive --verbose
-  python video_fingerprinter.py /path/to/videos --no-adaptive --enable-parallel
+  python video_fingerprinter.py /path/to/videos --no-adaptive
         """
     )
     
@@ -495,18 +489,7 @@ def main():
         help='Use only audible frequency range (20Hz-20kHz) for fingerprinting'
     )
     
-    parser.add_argument(
-        '--enable-parallel',
-        action='store_true',
-        help='Enable parallel processing for large files'
-    )
     
-    parser.add_argument(
-        '--max-workers',
-        type=int,
-        default=4,
-        help='Maximum number of parallel workers (default: 4)'
-    )
     
     parser.add_argument(
         '--list-only',

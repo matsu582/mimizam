@@ -25,7 +25,7 @@ def setup_logging():
 def demo_basic_usage():
     """基本的な使用方法のデモ"""
     print("🎵 Mimizam基本使用デモ")
-    print("=" * 50)
+    print("============================================================")
     
     # SQLiteを使用してMimizamインスタンスを作成
     with create_mimizam_sqlite("demo_music.db") as mimizam:
@@ -93,7 +93,7 @@ def demo_basic_usage():
 def demo_advanced_usage():
     """高度な使用方法のデモ"""
     print("\n🔧 Mimizam高度な使用デモ")
-    print("=" * 50)
+    print("============================================================")
     
     # カスタム設定でMimizamを作成
     custom_config = DatabaseConfig(
@@ -104,8 +104,7 @@ def demo_advanced_usage():
     fingerprinter_config = {
         'n_fft': 4096,  # より高い解像度
         'hop_length': 256,  # より細かい時間解像度
-        'min_amplitude': -50,  # より敏感な検出
-        'enable_parallel_processing': True
+        'min_amplitude': -50  # より敏感な検出
     }
     
     with Mimizam(custom_config, fingerprinter_config) as mimizam:
@@ -138,15 +137,14 @@ def demo_advanced_usage():
         print("       'n_fft': 2048,           # FFTウィンドウサイズ")
         print("       'hop_length': 512,       # フレーム間隔")
         print("       'sr': 22050,             # サンプルレート")
-        print("       'min_amplitude': -60,    # 検出閾値")
-        print("       'enable_parallel_processing': True")
+        print("       'min_amplitude': -60    # 検出閾値")
         print("   }")
 
 
 def demo_batch_processing():
     """バッチ処理のデモ"""
     print("\n📦 Mimizamバッチ処理デモ")
-    print("=" * 50)
+    print("============================================================")
     
     # 音楽ディレクトリ内の全ファイルを処理する例
     music_dir = Path("test_media")
@@ -196,9 +194,9 @@ def main():
     setup_logging()
     
     print("🎵 Mimizam デモンストレーション")
-    print("=" * 60)
+    print("============================================================")
     print("Shazam風音響フィンガープリンティングシステム")
-    print("=" * 60)
+    print("============================================================")
     
     try:
         # 基本使用方法
@@ -211,10 +209,6 @@ def main():
         demo_batch_processing()
         
         print("\n🎉 デモ完了！")
-        print("\n💡 ヒント:")
-        print("   - test_media/ディレクトリに音声ファイルを配置してより詳細なテストを実行できます")
-        print("   - カスタム設定でさまざまなデータベースバックエンドを試すことができます")
-        print("   - 並列処理を有効にして大量ファイルの処理速度を向上させることができます")
         
     except Exception as e:
         print(f"❌ デモ実行中にエラーが発生しました: {e}")

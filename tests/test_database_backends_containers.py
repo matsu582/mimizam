@@ -418,8 +418,7 @@ class TestMimizamCrossBackendIntegration(unittest.TestCase):
                 'max_results': 10,
                 'scoring_method': 'hybrid'
             },
-            enable_adaptive_params=False,  # テストの一貫性のため
-            enable_parallel_processing=False
+            enable_adaptive_params=False  # テストの一貫性のため
         )
         
         try:
@@ -521,7 +520,6 @@ class TestMimizamCrossBackendIntegration(unittest.TestCase):
             'n_fft': 1024,
             'hop_length': 256,
             'enable_adaptive_params': False,
-            'enable_parallel_processing': False,
             'audible_only': True
         }
         

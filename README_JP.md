@@ -177,8 +177,7 @@ fingerprinter.visualize_analysis(audio, title="song.wav")
 fingerprinter = AudioFingerprinter(
     n_fft=4096,           # より高い周波数解像度
     hop_length=256,       # より細かい時間解像度
-    min_amplitude=-50,    # より敏感な検出
-    enable_parallel_processing=True
+    min_amplitude=-50     # より敏感な検出
 )
 ```
 

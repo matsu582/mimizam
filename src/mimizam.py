@@ -43,8 +43,6 @@ class Mimizam:
             'min_amplitude': -60,
             'peak_neighborhood_size': 10,
             'enable_adaptive_params': True,
-            'enable_parallel_processing': True,
-            'max_workers': None,
             'audible_only': False
         }
         

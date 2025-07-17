@@ -78,8 +78,7 @@ def compare_audio_fingerprinters(audio_path):
         from src.audio_fingerprinter import AudioFingerprinter
         
         conservative_fp = AudioFingerprinter(
-            enable_adaptive_params=False,
-            enable_parallel_processing=False
+            enable_adaptive_params=False
         )
         result = measure_fingerprinter_performance(
             conservative_fp, audio_path, "AudioFingerprinter（保守的）"
@@ -90,22 +89,6 @@ def compare_audio_fingerprinters(audio_path):
     except Exception as e:
         logger.error(f"AudioFingerprinter（保守的）初期化エラー: {e}")
     
-    # 標準AudioFingerprinter（並列処理有効）
-    try:
-        from src.audio_fingerprinter import AudioFingerprinter
-        
-        parallel_fp = AudioFingerprinter(
-            enable_adaptive_params=True,
-            enable_parallel_processing=True
-        )
-        result = measure_fingerprinter_performance(
-            parallel_fp, audio_path, "AudioFingerprinter（並列処理）"
-        )
-        if result:
-            results.append(result)
-            
-    except Exception as e:
-        logger.error(f"AudioFingerprinter（並列処理）初期化エラー: {e}")
     
     # 結果表示
     display_comparison_results(results, audio_path)
@@ -118,14 +101,14 @@ def display_comparison_results(results, audio_path):
     
     print("\n" + "="*80)
     print("🚀 AudioFingerprinter 速度比較結果")
-    print("="*80)
+    print("============================================================")
     print(f"📁 テストファイル: {Path(audio_path).name}")
-    print("-" * 80)
-    
+    print("------------------------------------------------------------")
+
     # ヘッダー
     print(f"{'実装':<30} {'時間(秒)':<10} {'高速化率':<10} {'FP数':<10} {'FP/秒':<10}")
-    print("-" * 80)
-    
+    print("------------------------------------------------------------")
+
     # 基準となる保守的実装
     conservative_result = None
     for result in results:
@@ -144,9 +127,9 @@ def display_comparison_results(results, audio_path):
               f"{speedup:<10} "
               f"{result['fingerprints']:<10} "
               f"{result['fps_per_sec']:<10.0f}")
-    
-    print("="*80)
-    
+
+    print("============================================================")
+
     # 分析
     if conservative_result:
         default_result = None
