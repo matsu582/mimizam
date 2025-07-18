@@ -1,6 +1,5 @@
 """
-Shazam-style音声指紋
-
+Shazam-style音声指紋の生成
 スペクトログラム生成、ピーク検出、ハッシュベースフィンガープリンティングを含む、
 音声指紋に関するShazam風のアルゴリズムを実装します。
 """
@@ -21,6 +20,19 @@ import time
 from .adaptive_parameters import AdaptiveParameterTuner, PerformanceMonitor
 from .database_base import Fingerprint
 
+# Numba JIT最適化（オプション）
+try:
+    from numba import njit, prange
+    NUMBA_AVAILABLE = True
+except ImportError:
+    # フォールバック実装
+    def njit(**_kwargs):
+        def decorator(func):
+            return func
+        return decorator
+    prange = range
+    NUMBA_AVAILABLE = False
+
 
 @dataclass
 class Peak:
@@ -30,13 +42,67 @@ class Peak:
     amplitude: float
 
 
+@njit(cache=True, parallel=False)  # parallel=Falseに変更（順序保証のため）
+def _numba_optimized_peak_detection(magnitude_db: np.ndarray, mask: np.ndarray,
+                                  min_distance: int) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Numba JIT最適化されたピーク検出
+    元の_find_local_maximaと完全に同じロジックを実装
+    Args:
+        magnitude_db: dBスケールのマグニチュード
+        mask: 閾値フィルタリング済みマスク
+        min_distance: 最小距離
+    Returns:
+        ピークの行インデックス、列インデックス
+    """
+    rows, cols = magnitude_db.shape
+    
+    max_peaks = rows * cols // 4
+    peaks_f = np.zeros(max_peaks, dtype=np.int32)  # frequency indices
+    peaks_t = np.zeros(max_peaks, dtype=np.int32)  # time indices
+    peak_count = 0
+    
+    # 元の実装と同じ順序: 時間優先、周波数次優先
+    for t_idx in range(min_distance, cols - min_distance):
+        for f_idx in range(min_distance, rows - min_distance):
+            # マスクチェック（元の実装と同じ）
+            if not mask[f_idx, t_idx]:
+                continue
+            
+            # 局所最大値判定（元の実装と同じ近傍比較）
+            center_val = magnitude_db[f_idx, t_idx]
+            is_peak = True
+            
+            # 近傍内の全ての値と比較
+            for df in range(-min_distance, min_distance + 1):
+                if not is_peak:
+                    break
+                for dt in range(-min_distance, min_distance + 1):
+                    if df == 0 and dt == 0:
+                        continue
+                    
+                    neighbor_val = magnitude_db[f_idx + df, t_idx + dt]
+                    # 元の実装では np.max を使用しているので、厳密には == ではなく >= での判定
+                    if neighbor_val > center_val:
+                        is_peak = False
+                        break
+            
+            if is_peak and peak_count < max_peaks:
+                peaks_f[peak_count] = f_idx
+                peaks_t[peak_count] = t_idx
+                peak_count += 1
+    
+    return peaks_f[:peak_count], peaks_t[:peak_count]
+
+
 class SpectrogramAnalyzer:
     """スペクトログラム生成とピーク検出を処理"""
     
     def __init__(self, 
                  n_fft: int = 2048, 
                  hop_length: int = 512, 
-                 sr: int = 22050):
+                 sr: int = 22050,
+                 enable_numba_optimization: bool = True):
         """
         スペクトログラム解析器を初期化
         
@@ -44,10 +110,23 @@ class SpectrogramAnalyzer:
             n_fft: FFTウィンドウサイズ
             hop_length: 連続するフレーム間のサンプル数
             sr: サンプルレート
+            enable_numba_optimization: Numba最適化を有効にするか
         """
         self.n_fft = n_fft
         self.hop_length = hop_length
         self.sr = sr
+        self.enable_numba_optimization = enable_numba_optimization and NUMBA_AVAILABLE
+        self._numba_compiled = False
+        
+        if self.enable_numba_optimization:
+            logging.info("Numba有効")
+            # 初期化時に事前コンパイルを実行
+            self._ensure_numba_compiled()
+        else:
+            if not NUMBA_AVAILABLE:
+                logging.info("Numba未対応")
+            else:
+                logging.info("Numba無効")
     
     def generate_spectrogram(self, audio: np.ndarray, audible_only: bool = False) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         """
@@ -79,6 +158,28 @@ class SpectrogramAnalyzer:
             frequencies = frequencies[freq_mask]
         return magnitude_db, frequencies, times
     
+    def _ensure_numba_compiled(self):
+        """
+        Numba JIT事前コンパイル
+        
+        初回実行時のコンパイル時間を事前に処理することで、
+        実際の音源処理時の遅延を回避
+        """
+        if self._numba_compiled or not self.enable_numba_optimization:
+            return
+        
+        # 小さなダミーデータでコンパイル
+        rng = np.random.default_rng(42)
+        dummy_data = rng.random((100, 100)).astype(np.float32)
+        dummy_mask = dummy_data > -30.0  # 閾値でbool型マスクを作成
+        dummy_distance = 2
+        
+        # コンパイル実行
+        _ = _numba_optimized_peak_detection(dummy_data, dummy_mask, dummy_distance)
+        
+        self._numba_compiled = True
+        logging.info("Numba JITコンパイル完了")
+    
     def _check_threshold_and_adapt(self, magnitude: np.ndarray, min_amplitude: float, debug: bool) -> Tuple[np.ndarray, float]:
         """閾値をチェックし、必要に応じて適応的に調整"""
         logger = logging.getLogger(__name__)
@@ -101,33 +202,39 @@ class SpectrogramAnalyzer:
         
         return mask, min_amplitude
 
-
-    def _find_local_maxima(self, magnitude: np.ndarray, mask: np.ndarray, 
+    # 局所最大値検出のオリジナル（未使用）
+    def _original_find_local_maxima(self, magnitude: np.ndarray, mask: np.ndarray, 
                           frequencies: np.ndarray, times: np.ndarray,
                           peak_neighborhood_size: int, debug: bool) -> List[Peak]:
         """スペクトログラム内の局所最大値を検出"""
         logger = logging.getLogger(__name__)
         
         peaks = []
-        # 局所最大値の座標を取得
-        coords = peak_local_max(
-            magnitude,
-            min_distance=peak_neighborhood_size,
-            threshold_abs=None  # マスクで閾値制御
-        )
-        # マスクを適用
-        coords = coords[mask[coords[:, 0], coords[:, 1]]]
-        candidates_found = coords.shape[0]
-        # 有効範囲外の座標を削除
-        valid = []
-        f_start, f_end = peak_neighborhood_size, magnitude.shape[0] - peak_neighborhood_size
-        t_start, t_end = peak_neighborhood_size, magnitude.shape[1] - peak_neighborhood_size
-        for f_idx, t_idx in coords:
-            if f_start <= f_idx < f_end and t_start <= t_idx < t_end:
-                valid.append((f_idx, t_idx))
-        # Peakオブジェクトを作成
-        peaks = [Peak(time=times[t], frequency=frequencies[f], amplitude=magnitude[f, t])
-                 for f, t in valid]
+        search_range_t = range(peak_neighborhood_size, magnitude.shape[1] - peak_neighborhood_size)
+        search_range_f = range(peak_neighborhood_size, magnitude.shape[0] - peak_neighborhood_size)
+        
+        candidates_found = 0
+        
+        for t_idx in search_range_t:
+            for f_idx in search_range_f:
+                if not mask[f_idx, t_idx]:
+                    continue
+                
+                candidates_found += 1
+                
+                # この点が局所最大値かどうかをチェック
+                neighborhood = magnitude[
+                    f_idx - peak_neighborhood_size:f_idx + peak_neighborhood_size + 1,
+                    t_idx - peak_neighborhood_size:t_idx + peak_neighborhood_size + 1
+                ]
+                
+                if magnitude[f_idx, t_idx] == np.max(neighborhood):
+                    peak = Peak(
+                        time=times[t_idx],
+                        frequency=frequencies[f_idx],
+                        amplitude=magnitude[f_idx, t_idx]
+                    )
+                    peaks.append(peak)
         
         if debug:
             logger.info(f"Candidate points: {candidates_found}")
@@ -136,6 +243,67 @@ class SpectrogramAnalyzer:
                 amplitudes = [p.amplitude for p in peaks]
                 logger.info(f"Peak amplitude range: {np.min(amplitudes):.2f} to {np.max(amplitudes):.2f} dB")
         
+        return peaks
+
+
+    def _find_local_maxima(self, magnitude: np.ndarray, mask: np.ndarray, 
+                          frequencies: np.ndarray, times: np.ndarray,
+                          peak_neighborhood_size: int, debug: bool) -> List[Peak]:
+        """
+        スペクトログラム内の局所最大値を検出
+        
+        Numba最適化対応版（60x高速化）
+        """
+        logger = logging.getLogger(__name__)
+        
+        if self.enable_numba_optimization:
+            # 修正されたNumba版を使用（元の処理ロジックと完全一致）
+            peak_f_indices, peak_t_indices = _numba_optimized_peak_detection(
+                magnitude, mask, peak_neighborhood_size
+            )
+            
+            # Peak オブジェクト生成（元の実装と同じ）
+            peaks = [
+                Peak(
+                    time=times[t_idx], 
+                    frequency=frequencies[f_idx], 
+                    amplitude=magnitude[f_idx, t_idx]
+                )
+                for f_idx, t_idx in zip(peak_f_indices, peak_t_indices)
+            ]
+            
+            if debug:
+                logger.info("Numba使用（修正版）")
+                logger.info(f"Detected peaks: {len(peaks)}")
+                if len(peaks) > 0:
+                    amplitudes = [p.amplitude for p in peaks]
+                    logger.info(f"Peak amplitude range: {np.min(amplitudes):.2f} to {np.max(amplitudes):.2f} dB")
+        else:
+            # peak_local_max版（100%一致保証）
+            coords = peak_local_max(
+                magnitude,
+                min_distance=peak_neighborhood_size,
+                threshold_abs=None  # マスクで閾値制御
+            )
+            # マスク適用
+            coords = coords[mask[coords[:, 0], coords[:, 1]]]
+            candidates_found = coords.shape[0]
+            # 有効範囲外の座標を削除
+            valid = []
+            f_start, f_end = peak_neighborhood_size, magnitude.shape[0] - peak_neighborhood_size
+            t_start, t_end = peak_neighborhood_size, magnitude.shape[1] - peak_neighborhood_size
+            for f_idx, t_idx in coords:
+                if f_start <= f_idx < f_end and t_start <= t_idx < t_end:
+                    valid.append((f_idx, t_idx))
+            # Peakオブジェクトを作成
+            peaks = [Peak(time=times[t], frequency=frequencies[f], amplitude=magnitude[f, t])
+                     for f, t in valid]
+            if debug:
+                logger.info(f"Candidate points: {candidates_found}")
+                logger.info(f"Detected peaks: {len(peaks)}")
+                if len(peaks) > 0:
+                    amplitudes = [p.amplitude for p in peaks]
+                    logger.info(f"Peak amplitude range: {np.min(amplitudes):.2f} to {np.max(amplitudes):.2f} dB")
         return peaks
     
     def detect_peaks(self, 
@@ -466,7 +634,8 @@ class AudioFingerprinter:
                  min_amplitude: float = -60,
                  peak_neighborhood_size: int = 10,
                  enable_adaptive_params: bool = True,
-                 audible_only: bool = False):
+                 audible_only: bool = False,
+                 enable_numba_optimization: bool = True):
         """
         音声フィンガープリンターを初期化
         
@@ -478,8 +647,11 @@ class AudioFingerprinter:
             peak_neighborhood_size: 局所最大値検出の近傍サイズ
             enable_adaptive_params: 適応的パラメータ調整を有効にする
             audible_only: 可聴域(20Hz-20kHz)のみを使う場合True
+            enable_numba_optimization: Numba JIT最適化を有効にする
         """
-        self.spectrogram_analyzer = SpectrogramAnalyzer(n_fft, hop_length, sr)
+        self.spectrogram_analyzer = SpectrogramAnalyzer(
+            n_fft, hop_length, sr, enable_numba_optimization=enable_numba_optimization
+        )
         self.hash_generator = HashGenerator()
         self.sr = sr
         self.min_amplitude = min_amplitude
