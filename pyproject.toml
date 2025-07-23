@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mimizam"
-version = "1.0.1"
+version = "1.0.2"
 description = "Shazam風音声指紋システム - 音声指紋と識別のためのPython実装"
 readme = "README.md"
 license = "MIT"
