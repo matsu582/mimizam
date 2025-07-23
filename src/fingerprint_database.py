@@ -232,7 +232,7 @@ class FingerprintMatcher:
         t0 = time.perf_counter()
 
         if self.scoring_method == "hybrid":
-            results = self._find_matches_hybrid_new(query_fingerprints, adjusted_min_matches, top_k)
+            results = self._find_matches_hybrid(query_fingerprints, adjusted_min_matches, top_k)
         elif self.scoring_method == "histogram":
             results = self._find_matches_histogram(query_fingerprints, adjusted_min_matches, top_k)
         elif self.scoring_method == "detailed":
@@ -258,105 +258,7 @@ class FingerprintMatcher:
         
         return results
     
-    def _find_matches_hybrid(self, query_fingerprints: List[Fingerprint], 
-                           min_matches: int, top_k: int) -> List[Dict[str, Any]]:
-        """2段階判定: ヒストグラム分析で候補絞り→多面的スコアリング精査"""
-        
-        # 1段階目: 複数のスケールでヒストグラム候補抽出
-        candidate_scores = {}
-        
-        # 高速化のため限定的なスケールで候補を抽出
-        for time_scale in self.hybrid_fast_scales:
-            scaled_fingerprints = self._scale_fingerprints(query_fingerprints, time_scale, 1.0)
-            matches = self.database.search_fingerprints(scaled_fingerprints)
-            
-            for song_id, match_pairs in matches.items():
-                if len(match_pairs) >= min_matches:
-                    # ヒストグラム信頼度計算
-                    histogram_confidence = self._calculate_hybrid_histogram_confidence(
-                        match_pairs, time_scale
-                    )
-                    
-                    # 既存の候補よりも良いスコアの場合のみ更新
-                    if (song_id not in candidate_scores or 
-                        histogram_confidence > candidate_scores[song_id][0]):
-                        candidate_scores[song_id] = (histogram_confidence, time_scale, match_pairs)
-        
-        # 上位候補を抽出（histogram信頼度順）
-        top_candidates = sorted(candidate_scores.items(), 
-                              key=lambda x: x[1][0], reverse=True)[:top_k]
-        
-        # 2段階目: 多面的スコアリングで精査（改善版）
-        best_results = {}
-        for song_id, (hist_confidence, time_scale, match_pairs) in top_candidates:
-            # 重要: match_pairsではなく、新しくスケール探索を実行
-            song_best_result = {}
-            
-            # Detailed方式と同じ包括的探索
-            for test_time_scale in self.time_scale_factors:
-                for test_freq_scale in self.freq_scale_factors:
-                    # 新しくスケール調整してフィンガープリント検索
-                    scaled_fingerprints = self._scale_fingerprints(
-                        query_fingerprints, test_time_scale, test_freq_scale
-                    )
-                    test_matches = self.database.search_fingerprints(scaled_fingerprints)
-                    
-                    if song_id in test_matches and len(test_matches[song_id]) >= min_matches:
-                        test_confidence = self._calculate_confidence_score_with_scaling(
-                            test_matches[song_id], test_time_scale, test_freq_scale
-                        )
-                        
-                        # より良い結果の場合のみ更新
-                        if (not song_best_result or 
-                            test_confidence > song_best_result['confidence']):
-                            
-                            song_best_result = {
-                                'confidence': test_confidence,
-                                'match_pairs': test_matches[song_id],
-                                'time_scale': test_time_scale,
-                                'freq_scale': test_freq_scale
-                            }
-            
-            # 詳細探索結果を取得
-            if song_best_result:
-                best_detailed_confidence = song_best_result['confidence']
-                best_detailed_scale = song_best_result['time_scale']
-                best_detailed_freq_scale = song_best_result['freq_scale']
-                best_match_pairs = song_best_result['match_pairs']
-            else:
-                # 詳細探索で結果がない場合はhistogram結果を使用
-                best_detailed_confidence = 0.0
-                best_detailed_scale = time_scale
-                best_detailed_freq_scale = 1.0
-                best_match_pairs = match_pairs
-            
-            # 詳細スケール探索の結果を最終信頼度として使用
-            final_confidence = best_detailed_confidence
-            
-            if final_confidence >= self.min_confidence:
-                time_offset = self._calculate_time_offset(best_match_pairs)
-                
-                # 拡張指標を計算
-                alignment_ratio = self._calculate_alignment_ratio(best_match_pairs)
-                match_density = self._calculate_match_density(best_match_pairs)
-                
-                best_results[song_id] = {
-                    'song_id': song_id,
-                    'confidence': final_confidence,
-                    'match_count': len(best_match_pairs),
-                    'match_pairs': best_match_pairs,  # ソート時に使用
-                    'time_offset': time_offset,
-                    'time_scale': best_detailed_scale,  # 最適化されたスケールを使用
-                    'freq_scale': best_detailed_freq_scale,  # 最適化された周波数スケールを使用
-                    'alignment_ratio': alignment_ratio,  # 新指標
-                    'match_density': match_density,      # 新指標
-                    'histogram_confidence': hist_confidence,
-                    'detailed_confidence': best_detailed_confidence
-                }
-        
-        return self._sort_and_limit_results(best_results)
-
-    def _find_matches_hybrid_new(self, query_fingerprints: List[Fingerprint], min_matches: int, top_k: int) -> List[Dict[str, Any]]:
+    def _find_matches_hybrid(self, query_fingerprints: List[Fingerprint], min_matches: int, top_k: int) -> List[Dict[str, Any]]:
         """
         高速化版hybrid: 1段階目で全スケール・ピッチのマッチペアを集約し、2段階目はDBアクセスせずグルーピング＆スコア計算のみ
         """
