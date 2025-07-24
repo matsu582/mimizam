@@ -8,27 +8,16 @@ import sys
 import os
 from pathlib import Path
 
-# srcディレクトリをパスに追加
-sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'src'))
-
 try:
     from testcontainers.mysql import MySqlContainer
     TESTCONTAINERS_AVAILABLE = True
 except ImportError:
     TESTCONTAINERS_AVAILABLE = False
 
-from src.database_base import DatabaseConfig, Song
-from src.fingerprint_database import FingerprintDatabase
-from src.audio_fingerprinter import Fingerprint
-import sys
-import os
-sys.path.append(os.path.dirname(os.path.dirname(__file__)))
-
-from src.mimizam import create_mimizam_mysql
-
-# テストユーティリティをインポート
-import sys
-import os
+from mimizam import DatabaseConfig, Song
+from mimizam import FingerprintDatabase
+from mimizam import Fingerprint
+from mimizam import create_mimizam_mysql
 sys.path.append(os.path.dirname(__file__))
 from test_utils import TestAudioMixin
 

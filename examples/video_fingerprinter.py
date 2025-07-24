@@ -552,7 +552,8 @@ def main():
         logger.info("Operation cancelled by user")
         return 1
     except Exception as e:
-        logger.error(f"Unexpected error: {e}")
+        logger.exception("An unexpected error occurred")
+        # logger.error(f"Unexpected error: {e}")
         return 1
 
 

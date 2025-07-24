@@ -30,20 +30,15 @@ try:
 except ImportError:
     TESTCONTAINERS_AVAILABLE = False
 
-# テストユーティリティをインポート
-import sys
-import os
-sys.path.append(os.path.dirname(__file__))
-sys.path.append(os.path.dirname(os.path.dirname(__file__)))
-from test_utils import TestAudioMixin
-
-from src.database_base import DatabaseConfig, Song
-from src.fingerprint_database import FingerprintDatabase, FingerprintMatcher
-from src.audio_fingerprinter import AudioFingerprinter, Fingerprint
-from src.mimizam import (
+from mimizam import DatabaseConfig, Song
+from mimizam import FingerprintDatabase, FingerprintMatcher
+from mimizam import AudioFingerprinter, Fingerprint
+from mimizam import (
     Mimizam, create_mimizam_sqlite, create_mimizam_mysql,
     create_mimizam_postgresql, create_mimizam_elasticsearch
 )
+sys.path.append(os.path.dirname(__file__))
+from test_utils import TestAudioMixin
 
 
 class AudioDataGenerator:

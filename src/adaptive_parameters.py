@@ -2,6 +2,30 @@
 
 import numpy as np
 import librosa
+try:
+    from numba import njit
+    NUMBA_AVAILABLE = True
+except ImportError:
+    def njit(**_kwargs):
+        def decorator(func):
+            return func
+        return decorator
+    NUMBA_AVAILABLE = False
+@njit(cache=True)
+def numba_spectral_entropy(power_spectrum_norm):
+    entropy = 0.0
+    for i in range(power_spectrum_norm.shape[0]):
+        p = power_spectrum_norm[i]
+        entropy -= p * np.log2(p + 1e-10)
+    return entropy
+
+@njit(cache=True)
+def numba_zero_crossing_rate(audio):
+    count = 0
+    for i in range(1, audio.shape[0]):
+        if (audio[i-1] < 0 and audio[i] > 0) or (audio[i-1] > 0 and audio[i] < 0):
+            count += 1
+    return count / audio.shape[0]
 from typing import Dict, List, Tuple
 
 
@@ -9,8 +33,13 @@ class AdaptiveParameterTuner:
     """音声特性に基づいて動的にパラメータを調整するクラス"""
     
     def __init__(self):
-        """適応的パラメータチューナーを初期化"""
-        pass
+        """適応的パラメータチューナーを初期化（JITコンパイルを事前実行）"""
+        # ダミーデータでJITコンパイルを事前実行
+        if NUMBA_AVAILABLE:
+            dummy_power = np.ones(128, dtype=np.float32)
+            dummy_audio = np.zeros(2048, dtype=np.float32)
+            numba_spectral_entropy(dummy_power)
+            numba_zero_crossing_rate(dummy_audio)
     
     def analyze_audio_characteristics(self, audio: np.ndarray, sr: int) -> Dict[str, float]:
         """
@@ -31,17 +60,17 @@ class AdaptiveParameterTuner:
         characteristics['peak_amplitude'] = np.max(np.abs(audio))
         characteristics['silence_ratio'] = np.sum(np.abs(audio) < 0.001) / len(audio)
         
-        # スペクトルエントロピー（複雑さの指標）
+        # スペクトルエントロピー（Numba高速化）
         stft = librosa.stft(audio)
         magnitude = np.abs(stft)
         power_spectrum = np.mean(magnitude**2, axis=1)
         power_spectrum_norm = power_spectrum / np.sum(power_spectrum)
-        spectral_entropy = -np.sum(power_spectrum_norm * np.log2(power_spectrum_norm + 1e-10))
+        spectral_entropy = numba_spectral_entropy(power_spectrum_norm)
         characteristics['spectral_entropy'] = spectral_entropy
-        
-        # ゼロクロッシング率（音声の動的な特性）
-        zero_crossings = librosa.zero_crossings(audio)
-        characteristics['zero_crossing_rate'] = np.sum(zero_crossings) / len(audio)
+
+        # ゼロクロッシング率（Numba高速化）
+        zero_crossing_rate = numba_zero_crossing_rate(audio)
+        characteristics['zero_crossing_rate'] = zero_crossing_rate
         
         # テンポ推定
         try:

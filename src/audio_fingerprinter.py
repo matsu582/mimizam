@@ -119,15 +119,15 @@ class SpectrogramAnalyzer:
         self._numba_compiled = False
         
         if self.enable_numba_optimization:
-            logging.info("Numba有効")
+            logging.info("Numba enabled")
             # 初期化時に事前コンパイルを実行
             self._ensure_numba_compiled()
         else:
             if not NUMBA_AVAILABLE:
-                logging.info("Numba未対応")
+                logging.info("Numba not supported")
             else:
-                logging.info("Numba無効")
-    
+                logging.info("Numba disabled")
+
     def generate_spectrogram(self, audio: np.ndarray, audible_only: bool = False) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         """
         音声信号からスペクトログラムを生成
@@ -178,7 +178,7 @@ class SpectrogramAnalyzer:
         _ = _numba_optimized_peak_detection(dummy_data, dummy_mask, dummy_distance)
         
         self._numba_compiled = True
-        logging.info("Numba JITコンパイル完了")
+        logging.info("Numba JIT compilation complete")
     
     def _check_threshold_and_adapt(self, magnitude: np.ndarray, min_amplitude: float, debug: bool) -> Tuple[np.ndarray, float]:
         """閾値をチェックし、必要に応じて適応的に調整"""
@@ -252,7 +252,7 @@ class SpectrogramAnalyzer:
         """
         スペクトログラム内の局所最大値を検出
         
-        Numba最適化対応版（60x高速化）
+        Numba最適化対応
         """
         logger = logging.getLogger(__name__)
         
@@ -273,13 +273,13 @@ class SpectrogramAnalyzer:
             ]
             
             if debug:
-                logger.info("Numba使用（修正版）")
+                logger.info("use Numba:")
                 logger.info(f"Detected peaks: {len(peaks)}")
                 if len(peaks) > 0:
                     amplitudes = [p.amplitude for p in peaks]
                     logger.info(f"Peak amplitude range: {np.min(amplitudes):.2f} to {np.max(amplitudes):.2f} dB")
         else:
-            # peak_local_max版（100%一致保証）
+            # peak_local_max版
             coords = peak_local_max(
                 magnitude,
                 min_distance=peak_neighborhood_size,
@@ -471,6 +471,65 @@ class HashGenerator:
                                        valid_time_deltas, len(fingerprints), logger)
         
         return fingerprints
+    def _generate_hashes_from_peaks_numpy(self, sorted_peaks: List[Peak], debug: bool, logger) -> List[Fingerprint]:
+        """
+            NumPyベクトル化によるハッシュ生成
+                -ベンチの結果速度改善に優位がなかった為、採用しないけどとりあえず残しておく
+        """
+        fingerprints = []
+        seen_hashes = set()
+        anchor_count = 0
+        pairs_checked = 0
+        valid_time_deltas = []
+
+        # NumPy配列化
+        times = np.array([p.time for p in sorted_peaks])
+        freqs = np.array([p.frequency for p in sorted_peaks])
+        amps = np.array([p.amplitude for p in sorted_peaks])
+        N = len(sorted_peaks)
+
+        for i in range(N):
+            anchor_time = times[i]
+            anchor_freq = freqs[i]
+            anchor_amp = amps[i]
+            # ターゲット候補のインデックス
+            idx_start = i + 1
+            idx_end = min(i + 1 + self.target_zone_size, N)
+            if idx_start >= N:
+                continue
+            candidate_idx = np.arange(idx_start, idx_end)
+            time_deltas = times[candidate_idx] - anchor_time
+            valid_mask = (self.time_delta_range[0] <= time_deltas) & (time_deltas <= self.time_delta_range[1])
+            valid_idx = candidate_idx[valid_mask]
+            if len(valid_idx) > 0:
+                anchor_count += 1
+            for j in valid_idx:
+                target_time = times[j]
+                target_freq = freqs[j]
+                time_delta = target_time - anchor_time
+                valid_time_deltas.append(time_delta)
+                # ハッシュ生成（元のロジックと同じ）
+                f1_quantized = int(anchor_freq // 30) * 30
+                f2_quantized = int(target_freq // 30) * 30
+                if time_delta > 0:
+                    time_delta_q = int(time_delta * 20) * 5
+                else:
+                    time_delta_q = 0
+                primary_hash_input = f"{f1_quantized}|{f2_quantized}|{time_delta_q}"
+                hash_object = hashlib.sha256(primary_hash_input.encode())
+                hash_value = hash_object.hexdigest()
+                if hash_value not in seen_hashes:
+                    seen_hashes.add(hash_value)
+                    fingerprint = Fingerprint(
+                        hash_value=hash_value,
+                        time_offset=anchor_time
+                    )
+                    fingerprints.append(fingerprint)
+                pairs_checked += 1
+        if debug:
+            self._log_generation_summary(pairs_checked, anchor_count, N, valid_time_deltas, len(fingerprints), logger)
+        return fingerprints
+
     
     def _debug_anchor_info(self, i: int, anchor_peak: Peak, sorted_peaks: List[Peak], logger) -> None:
         """アンカー情報をデバッグ出力"""

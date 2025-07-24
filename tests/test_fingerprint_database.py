@@ -9,13 +9,13 @@ from unittest.mock import Mock, patch, MagicMock
 from typing import List, Dict, Any
 
 # テスト対象モジュールのインポート
-from mimizam.src.fingerprint_database import (
+from mimizam import (
     FingerprintDatabase, FingerprintMatcher,
     create_sqlite_config, create_mysql_config, 
     create_postgresql_config, create_elasticsearch_config
 )
-from mimizam.src.audio_fingerprinter import Fingerprint
-from mimizam.src.database_backends import DatabaseConfig, Song
+from mimizam import Fingerprint
+from mimizam import DatabaseConfig, Song
 
 
 class TestFingerprintDatabase(unittest.TestCase):

@@ -8,9 +8,9 @@ import sys
 import os
 from pathlib import Path
 
-from mimizam.src import Mimizam, create_mimizam_sqlite
-from mimizam.src import AudioFingerprinter, Fingerprint, Peak, SpectrogramAnalyzer, HashGenerator
-from mimizam.src import FingerprintDatabase, FingerprintMatcher, Song, DatabaseConfig
+from mimizam import Mimizam, create_mimizam_sqlite
+from mimizam import AudioFingerprinter, Fingerprint, Peak, SpectrogramAnalyzer, HashGenerator
+from mimizam import FingerprintDatabase, FingerprintMatcher, Song, DatabaseConfig
 
 
 class TestSpectrogramAnalyzer(unittest.TestCase):
@@ -482,18 +482,16 @@ class TestMimizamIntegration(unittest.TestCase):
 def create_test_suite():
     """全てのテストケースを含むテストスイートを作成"""
     suite = unittest.TestSuite()
-    
+    loader = unittest.TestLoader()
+
     # テストケースを追加
-    suite.addTest(unittest.makeSuite(TestSpectrogramAnalyzer))
-    suite.addTest(unittest.makeSuite(TestHashGenerator))
-    suite.addTest(unittest.makeSuite(TestAudioFingerprinter))
-    suite.addTest(unittest.makeSuite(TestFingerprintDatabase))
-    suite.addTest(unittest.makeSuite(TestFingerprintMatcher))
-    suite.addTest(unittest.makeSuite(TestSpectrogramAnalyzerAdvanced))
-    suite.addTest(unittest.makeSuite(TestHashGeneratorAdvanced))
-    suite.addTest(unittest.makeSuite(TestAudioFingerprintingIntegration))
-    suite.addTest(unittest.makeSuite(TestMimizamIntegration))
-    
+    suite.addTest(loader.loadTestsFromTestCase(TestSpectrogramAnalyzer))
+    suite.addTest(loader.loadTestsFromTestCase(TestHashGenerator))
+    suite.addTest(loader.loadTestsFromTestCase(TestAudioFingerprinter))
+    suite.addTest(loader.loadTestsFromTestCase(TestFingerprintDatabase))
+    suite.addTest(loader.loadTestsFromTestCase(TestFingerprintMatcher))
+    suite.addTest(loader.loadTestsFromTestCase(TestMimizamIntegration))
+
     return suite
 
 

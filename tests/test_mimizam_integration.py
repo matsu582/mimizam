@@ -21,8 +21,6 @@ import librosa
 from pathlib import Path
 from typing import List, Optional
 
-# srcディレクトリをパスに追加
-sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'src'))
 
 try:
     from testcontainers.elasticsearch import ElasticSearchContainer
@@ -40,15 +38,11 @@ except ImportError as e:
     class PostgresContainer:
         pass
 
-import sys
-import os
-sys.path.append(os.path.dirname(os.path.dirname(__file__)))
-
-from src.mimizam import (
+from mimizam import (
     Mimizam, create_mimizam_sqlite, create_mimizam_mysql,
     create_mimizam_postgresql, create_mimizam_elasticsearch
 )
-from src.database_base import DatabaseConfig
+from mimizam import DatabaseConfig
 
 
 class TestMimizamSQLite(unittest.TestCase):

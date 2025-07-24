@@ -19,9 +19,9 @@ try:
 except ImportError:
     TESTCONTAINERS_AVAILABLE = False
 
-from mimizam.src.database_base import DatabaseConfig, Song
-from mimizam.src.fingerprint_database import FingerprintDatabase
-from mimizam.src.audio_fingerprinter import Fingerprint
+from mimizam import DatabaseConfig, Song
+from mimizam import FingerprintDatabase
+from mimizam import Fingerprint
 
 
 @unittest.skipUnless(TESTCONTAINERS_AVAILABLE, "Testcontainersが利用できません")

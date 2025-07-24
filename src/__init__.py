@@ -14,9 +14,16 @@ from .mimizam import (
 
 from .audio_fingerprinter import AudioFingerprinter, Peak, SpectrogramAnalyzer, HashGenerator
 from .database_base import Fingerprint, Song, DatabaseConfig
-from .fingerprint_database import FingerprintDatabase, FingerprintMatcher
+from .fingerprint_database import (
+    FingerprintDatabase, 
+    FingerprintMatcher, 
+    create_sqlite_config, 
+    create_mysql_config, 
+    create_postgresql_config, 
+    create_elasticsearch_config
+)
 from .database_base import DatabaseConfig, Song, Fingerprint
-from .adaptive_parameters import AdaptiveParameterTuner
+from .adaptive_parameters import AdaptiveParameterTuner, PerformanceMonitor
 
 __all__ = [
     'Mimizam',
@@ -27,6 +34,10 @@ __all__ = [
     'AudioFingerprinter',
     'FingerprintDatabase',
     'FingerprintMatcher',
+    'create_sqlite_config', 
+    'create_mysql_config', 
+    'create_postgresql_config', 
+    'create_elasticsearch_config',
     'Fingerprint',
     'Peak',
     'SpectrogramAnalyzer',
@@ -34,4 +45,5 @@ __all__ = [
     'Song',
     'DatabaseConfig',
     'AdaptiveParameterTuner',
+    'PerformanceMonitor'
 ]

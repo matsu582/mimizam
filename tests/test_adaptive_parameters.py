@@ -1,7 +1,7 @@
 import unittest
 import numpy as np
 
-from src.adaptive_parameters import AdaptiveParameterTuner, PerformanceMonitor
+from mimizam import AdaptiveParameterTuner, PerformanceMonitor
 
 class TestAdaptiveParameterTuner(unittest.TestCase):
     def setUp(self):

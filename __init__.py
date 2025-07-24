@@ -20,9 +20,16 @@ from .src.mimizam import (
 )
 
 from .src.audio_fingerprinter import AudioFingerprinter, Peak, SpectrogramAnalyzer, HashGenerator
-from .src.fingerprint_database import FingerprintDatabase, FingerprintMatcher
+from .src.fingerprint_database import (
+    FingerprintDatabase, 
+    FingerprintMatcher, 
+    create_sqlite_config, 
+    create_mysql_config, 
+    create_postgresql_config, 
+    create_elasticsearch_config
+)
 from .src.database_base import DatabaseConfig, Song, Fingerprint
-from .src.adaptive_parameters import AdaptiveParameterTuner
+from .src.adaptive_parameters import AdaptiveParameterTuner,PerformanceMonitor
 
 __version__ = "1.0.0"
 
@@ -46,7 +53,12 @@ __all__ = [
     'FingerprintMatcher',
     'Song',
     'DatabaseConfig',
+    'create_sqlite_config', 
+    'create_mysql_config', 
+    'create_postgresql_config', 
+    'create_elasticsearch_config',
     
     # 高度な機能
     'AdaptiveParameterTuner',
+    'PerformanceMonitor',
 ]
