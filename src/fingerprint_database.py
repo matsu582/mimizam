@@ -51,7 +51,7 @@ class FingerprintDatabase:
             if hasattr(self, 'backend') and self.backend:
                 self.backend.disconnect()
         except Exception:
-            pass  # デストラクタでの例外は無視
+            logging.warning("Failed to disconnect from database in destructor", exc_info=True)
     
     def disconnect(self) -> None:
         """データベース接続を明示的に切断"""

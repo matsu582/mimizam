@@ -6,6 +6,7 @@ Shazam-style音声指紋の生成
 
 import numpy as np
 import librosa
+from pydub import AudioSegment
 import matplotlib.pyplot as plt
 from scipy.signal import find_peaks
 from skimage.feature import peak_local_max
@@ -102,7 +103,7 @@ class SpectrogramAnalyzer:
                  n_fft: int = 2048, 
                  hop_length: int = 512, 
                  sr: int = 22050,
-                 enable_numba_optimization: bool = True):
+                 enable_numba_optimization: bool = False):
         """
         スペクトログラム解析器を初期化
         
@@ -726,7 +727,19 @@ class AudioFingerprinter:
             self.parameter_tuner = None
             self.performance_monitor = None
         
-
+    def load_audio_with_pydub(self, file_path: str ) -> np.ndarray:
+        audio = AudioSegment.from_file(file_path)
+        # モノラル化
+        audio = audio.set_channels(1)
+        # サンプリングレート変換
+        if self.sr and audio.frame_rate != self.sr:
+            audio = audio.set_frame_rate(self.sr)
+        # NumPy配列へ変換
+        samples = np.array(audio.get_array_of_samples()).astype(np.float32)
+        # 正規化（16bitの場合）
+        if audio.sample_width == 2:
+            samples /= 32768.0
+        return samples
     
     def load_audio(self, file_path: str) -> np.ndarray:
         """
@@ -739,6 +752,7 @@ class AudioFingerprinter:
             numpy配列としての音声信号
         """
         audio, _ = librosa.load(file_path, sr=self.sr)
+        #audio = self.load_audio_with_pydub(file_path)
         return audio
     
     def fingerprint_audio(self, audio: np.ndarray, debug: bool = False) -> List[Fingerprint]:
