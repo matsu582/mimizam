@@ -360,29 +360,10 @@ class HashGenerator:
                 time_delta = target_time - anchor_time
                 valid_time_deltas.append(time_delta)
                 # ハッシュ生成（元のロジックと同じ）
-                if anchor_freq < 1000:
-                    freq_bin_size = 10
-                elif anchor_freq < 4000:
-                    freq_bin_size = 20
-                else:
-                    freq_bin_size = 40
-                f1_quantized = int(anchor_freq // freq_bin_size) * freq_bin_size
-                
-                if target_freq < 1000:
-                    freq_bin_size = 10
-                elif target_freq < 4000:
-                    freq_bin_size = 20
-                else:
-                    freq_bin_size = 40
-                f2_quantized = int(target_freq // freq_bin_size) * freq_bin_size
+                f1_quantized = int(anchor_freq // 30) * 30
+                f2_quantized = int(target_freq // 30) * 30
                 if time_delta > 0:
-                    if time_delta < 0.5:
-                        time_bin_size = 0.01
-                    elif time_delta < 1.0:
-                        time_bin_size = 0.02
-                    else:
-                        time_bin_size = 0.05
-                    time_delta_q = int(time_delta / time_bin_size) * time_bin_size * 1000
+                    time_delta_q = int(time_delta * 20) * 5
                 else:
                     time_delta_q = 0
                 primary_hash_input = f"{f1_quantized}|{f2_quantized}|{time_delta_q}"
@@ -463,7 +444,7 @@ class HashGenerator:
     
     def _create_hash(self, anchor: Peak, target: Peak) -> str:
         """
-        適応的量子化を使用したロバストなハッシュ生成
+        広い速度変化に対する改良されたロバスト性を持つアンカー-ターゲットピークペアからハッシュを作成
         
         Args:
             anchor: アンカーピーク
@@ -472,40 +453,24 @@ class HashGenerator:
         Returns:
             ハッシュ文字列
         """
-        if anchor.frequency < 1000:
-            freq_bin_size = 10  # 低周波数域：10Hzビン
-        elif anchor.frequency < 4000:
-            freq_bin_size = 20  # 中周波数域：20Hzビン
-        else:
-            freq_bin_size = 40  # 高周波数域：40Hzビン
+        # より堅牢な周波数量子化 - 広い速度変化対応のため大きなビン
+        f1_quantized = int(anchor.frequency // 30) * 30  # 0.5x-2x速度変化対応のため大きなビン
+        f2_quantized = int(target.frequency // 30) * 30
         
-        f1_quantized = int(anchor.frequency // freq_bin_size) * freq_bin_size
-        
-        if target.frequency < 1000:
-            freq_bin_size = 10
-        elif target.frequency < 4000:
-            freq_bin_size = 20
-        else:
-            freq_bin_size = 40
-        
-        f2_quantized = int(target.frequency // freq_bin_size) * freq_bin_size
-        
+        # より広い速度範囲対応の適応的量子化を持つ時間差
         time_delta_raw = target.time - anchor.time
         
+        # 0.5x-2x範囲のより良いカバレッジのため対数時間量子化を使用
         if time_delta_raw > 0:
-            if time_delta_raw < 0.5:
-                time_bin_size = 0.01  # 10msビン
-            elif time_delta_raw < 1.0:
-                time_bin_size = 0.02  # 20msビン
-            else:
-                time_bin_size = 0.05  # 50msビン
-            
-            time_delta = int(time_delta_raw / time_bin_size) * time_bin_size * 1000  # ms単位
+            # より良い速度許容度のため50msビン（10msの代わり）に量子化
+            time_delta = int(time_delta_raw * 20) * 5  # センチ秒単位での50msビン
         else:
             time_delta = 0
         
+        # 速度変化に対する改良されたロバスト性を持つハッシュを作成
         primary_hash_input = f"{f1_quantized}|{f2_quantized}|{time_delta}"
         
+        # ハッシュを生成
         hash_object = hashlib.sha256(primary_hash_input.encode())
         return hash_object.hexdigest()
     
