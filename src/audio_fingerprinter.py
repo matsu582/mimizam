@@ -779,26 +779,45 @@ class AudioFingerprinter:
         logger = logging.getLogger(__name__)
         
         # スペクトログラムを生成
+        spec_start = time.time()
         magnitude, frequencies, times = self.spectrogram_analyzer.generate_spectrogram(audio, audible_only=self.audible_only)
+        spec_time = time.time() - spec_start
         
         if debug:
             logger.info(f"Spectrogram generated successfully. Shape: {magnitude.shape}")
+            logger.info(f"Spectrogram generation time: {spec_time:.3f}s")
         
         # ピークを検出
+        peak_start = time.time()
         peaks = self.spectrogram_analyzer.detect_peaks(
             magnitude, frequencies, times,
             min_amplitude, peak_neighborhood_size, debug
         )
+        peak_time = time.time() - peak_start
         
         if len(peaks) == 0:
+            retry_start = time.time()
             peaks = self._retry_with_relaxed_parameters(magnitude, frequencies, times, debug, logger)
+            retry_time = time.time() - retry_start
+            if debug:
+                logger.info(f"Peak retry time: {retry_time:.3f}s")
+        
+        if debug:
+            logger.info(f"Peak detection time: {peak_time:.3f}s")
         
         # パフォーマンス監視
         if self.performance_monitor:
             self.performance_monitor.record_peak_count(len(peaks))
         
         # ハッシュを生成
+        hash_start = time.time()
         fingerprints = self.hash_generator.generate_hashes(peaks, debug)
+        hash_time = time.time() - hash_start
+        
+        if debug:
+            logger.info(f"Hash generation time: {hash_time:.3f}s")
+            logger.info(f"Total breakdown - Spec: {spec_time:.3f}s, Peaks: {peak_time:.3f}s, Hash: {hash_time:.3f}s")
+        
         return fingerprints
     
 
