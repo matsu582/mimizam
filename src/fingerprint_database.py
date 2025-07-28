@@ -1027,13 +1027,20 @@ class FingerprintMatcher:
         offsets = [(db_time - query_time)/time_scale for query_time, db_time in match_pairs]
         offsets = np.array(offsets)
         
-        # 軽量化されたビン幅計算
-        std_dev = np.std(offsets)
-        bin_width = max(0.1, min(std_dev / 2, 0.5))  # 0.1-0.5秒の範囲
+        # 安定化されたビン幅計算（Freedman-Diaconis rule）
+        q75, q25 = np.percentile(offsets, [75, 25])
+        iqr = q75 - q25
+        if iqr > 0:
+            bin_width = 2 * iqr / (len(offsets) ** (1/3))
+        else:
+            bin_width = 0.1
         
-        # 適応的レンジ（軽量版）
-        offset_range = max(5, std_dev * 3)
-        offset_mean = np.mean(offsets)
+        bin_width = max(0.05, min(bin_width, 0.5))  # 0.05-0.5秒の範囲で制限
+        
+        offset_median = np.median(offsets)
+        mad = np.median(np.abs(offsets - offset_median))  # Median Absolute Deviation
+        offset_range = max(3, mad * 3)  # MADベースの範囲設定
+        offset_mean = offset_median
         
         bins = int((2 * offset_range) / bin_width)
         bins = max(10, min(bins, 50))  # ビン数を制限（軽量化）
