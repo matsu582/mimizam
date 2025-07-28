@@ -69,12 +69,6 @@ class MySQLBackend(DatabaseBackend):
             self.logger.error(f"MySQL connection error: {e}")
             return False
     
-    def _ensure_connection(self) -> bool:
-        """接続状態を確認し、必要に応じて再接続"""
-        if self.connection is None:
-            return self.connect()
-        return True
-    
     def disconnect(self) -> None:
         """MySQLデータベースから切断"""
         if self.connection and self.connection.is_connected():
@@ -83,8 +77,6 @@ class MySQLBackend(DatabaseBackend):
     
     def create_tables(self) -> bool:
         """MySQLテーブルを作成"""
-        if not self._ensure_connection():
-            return False
         try:
             cursor = self.connection.cursor()
             
@@ -145,8 +137,6 @@ class MySQLBackend(DatabaseBackend):
     
     def add_song(self, song: Song) -> bool:
         """MySQLに楽曲を追加"""
-        if not self._ensure_connection():
-            return False
         try:
             cursor = self.connection.cursor()
             cursor.execute("""
@@ -164,8 +154,6 @@ class MySQLBackend(DatabaseBackend):
     
     def add_fingerprints(self, song_id: str, fingerprints: List[Fingerprint]) -> bool:
         """MySQLにフィンガープリントを追加"""
-        if not self._ensure_connection():
-            return False
         try:
             cursor = self.connection.cursor()
             
@@ -195,8 +183,6 @@ class MySQLBackend(DatabaseBackend):
         if not query_fingerprints:
             return matches
         
-        if not self._ensure_connection():
-            return matches
         try:
             cursor = self.connection.cursor(buffered=True)
             
@@ -230,8 +216,6 @@ class MySQLBackend(DatabaseBackend):
 
     def get_song(self, song_id: str) -> Optional[Song]:
         """MySQLから楽曲情報を取得"""
-        if not self._ensure_connection():
-            return None
         try:
             cursor = self.connection.cursor()
             cursor.execute("""
@@ -251,8 +235,6 @@ class MySQLBackend(DatabaseBackend):
     def list_songs(self) -> List[Song]:
         """MySQLから全楽曲をリスト表示"""
         songs = []
-        if not self._ensure_connection():
-            return songs
         try:
             cursor = self.connection.cursor()
             cursor.execute("""
@@ -272,8 +254,6 @@ class MySQLBackend(DatabaseBackend):
         """MySQLデータベース統計を取得"""
         stats = {"songs": 0, "fingerprints": 0}
         
-        if not self._ensure_connection():
-            return stats
         try:
             cursor = self.connection.cursor()
             
@@ -290,8 +270,6 @@ class MySQLBackend(DatabaseBackend):
     
     def delete_song(self, song_id: str) -> bool:
         """MySQLから楽曲を削除"""
-        if not self._ensure_connection():
-            return False
         try:
             cursor = self.connection.cursor()
             
@@ -307,8 +285,6 @@ class MySQLBackend(DatabaseBackend):
         """指定した楽曲のフィンガープリントを取得"""
         fingerprints = []
         
-        if not self._ensure_connection():
-            return fingerprints
         try:
             cursor = self.connection.cursor()
             cursor.execute("""

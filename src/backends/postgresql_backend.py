@@ -71,12 +71,6 @@ class PostgreSQLBackend(DatabaseBackend):
             self.logger.error(f"PostgreSQL connection error: {e}")
             return False
     
-    def _ensure_connection(self) -> bool:
-        """接続状態を確認し、必要に応じて再接続"""
-        if self.connection is None:
-            return self.connect()
-        return True
-    
     def disconnect(self) -> None:
         """PostgreSQLデータベースから切断"""
         if self.connection:
@@ -85,8 +79,6 @@ class PostgreSQLBackend(DatabaseBackend):
     
     def create_tables(self) -> bool:
         """PostgreSQLテーブルを作成"""
-        if not self._ensure_connection():
-            return False
         try:
             cursor = self.connection.cursor()
             
@@ -155,8 +147,6 @@ class PostgreSQLBackend(DatabaseBackend):
     
     def add_song(self, song: Song) -> bool:
         """PostgreSQLに楽曲を追加"""
-        if not self._ensure_connection():
-            return False
         try:
             cursor = self.connection.cursor()
             cursor.execute("""
@@ -174,8 +164,6 @@ class PostgreSQLBackend(DatabaseBackend):
     
     def add_fingerprints(self, song_id: str, fingerprints: List[Fingerprint]) -> bool:
         """PostgreSQLにフィンガープリントを追加"""
-        if not self._ensure_connection():
-            return False
         try:
             cursor = self.connection.cursor()
             
@@ -205,8 +193,6 @@ class PostgreSQLBackend(DatabaseBackend):
         if not query_fingerprints:
             return matches
         
-        if not self._ensure_connection():
-            return matches
         try:
             cursor = self.connection.cursor()
             
@@ -240,8 +226,6 @@ class PostgreSQLBackend(DatabaseBackend):
     
     def get_song(self, song_id: str) -> Optional[Song]:
         """PostgreSQLから楽曲情報を取得"""
-        if not self._ensure_connection():
-            return None
         try:
             cursor = self.connection.cursor()
             cursor.execute("""
@@ -261,8 +245,6 @@ class PostgreSQLBackend(DatabaseBackend):
     def list_songs(self) -> List[Song]:
         """PostgreSQLから全楽曲をリスト表示"""
         songs = []
-        if not self._ensure_connection():
-            return songs
         try:
             cursor = self.connection.cursor()
             cursor.execute("""
@@ -282,8 +264,6 @@ class PostgreSQLBackend(DatabaseBackend):
         """PostgreSQLデータベース統計を取得"""
         stats = {"songs": 0, "fingerprints": 0}
         
-        if not self._ensure_connection():
-            return stats
         try:
             cursor = self.connection.cursor()
             
@@ -300,8 +280,6 @@ class PostgreSQLBackend(DatabaseBackend):
     
     def delete_song(self, song_id: str) -> bool:
         """PostgreSQLから楽曲を削除"""
-        if not self._ensure_connection():
-            return False
         try:
             cursor = self.connection.cursor()
             
@@ -317,8 +295,6 @@ class PostgreSQLBackend(DatabaseBackend):
         """指定した楽曲のフィンガープリントを取得"""
         fingerprints = []
         
-        if not self._ensure_connection():
-            return fingerprints
         try:
             cursor = self.connection.cursor()
             cursor.execute("""

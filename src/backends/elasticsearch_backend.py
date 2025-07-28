@@ -107,12 +107,6 @@ class ElasticsearchBackend(DatabaseBackend):
             self.logger.error(f"Stack trace: {traceback.format_exc()}")
             return False
     
-    def _ensure_connection(self) -> bool:
-        """接続状態を確認し、必要に応じて再接続"""
-        if self.client is None:
-            return self.connect()
-        return True
-    
     def disconnect(self) -> None:
         """Elasticsearchクラスターから切断"""
         if self.client:
@@ -121,8 +115,6 @@ class ElasticsearchBackend(DatabaseBackend):
     
     def create_tables(self) -> bool:
         """Elasticsearchインデックスを作成（Elasticsearch 8.x最適化版）"""
-        if not self._ensure_connection():
-            return False
         try:
             # 楽曲インデックスのマッピング
             songs_mapping = {
@@ -205,8 +197,6 @@ class ElasticsearchBackend(DatabaseBackend):
     
     def add_song(self, song: Song) -> bool:
         """Elasticsearchに楽曲を追加"""
-        if not self._ensure_connection():
-            return False
         try:
             song_doc = {
                 "id": song.id,
@@ -238,8 +228,6 @@ class ElasticsearchBackend(DatabaseBackend):
     
     def add_fingerprints(self, song_id: str, fingerprints: List[Fingerprint]) -> bool:
         """Elasticsearchにフィンガープリントを追加"""
-        if not self._ensure_connection():
-            return False
         try:
             # 既存フィンガープリントを削除
             delete_query = {
@@ -291,8 +279,6 @@ class ElasticsearchBackend(DatabaseBackend):
         if not query_fingerprints:
             return matches
 
-        if not self._ensure_connection():
-            return matches
         try:
             # 検索前にインデックスを明示的にリフレッシュ（最新データを確実に反映）
             try:
@@ -373,8 +359,6 @@ class ElasticsearchBackend(DatabaseBackend):
     
     def get_song(self, song_id: str) -> Optional[Song]:
         """Elasticsearchから楽曲情報を取得"""
-        if not self._ensure_connection():
-            return None
         try:
             # 検索前にインデックスを明示的にリフレッシュ（最新データを確実に反映）
             try:
@@ -400,8 +384,6 @@ class ElasticsearchBackend(DatabaseBackend):
     def list_songs(self) -> List[Song]:
         """Elasticsearchから全楽曲をリスト表示"""
         songs = []
-        if not self._ensure_connection():
-            return songs
         try:
             # 検索前にインデックスを明示的にリフレッシュ（最新データを確実に反映）
             try:
@@ -437,8 +419,6 @@ class ElasticsearchBackend(DatabaseBackend):
         """Elasticsearchデータベース統計を取得"""
         stats = {"songs": 0, "fingerprints": 0}
         
-        if not self._ensure_connection():
-            return stats
         try:
             # インデックスを明示的にリフレッシュ（最新データを確実に反映）
             try:
@@ -462,8 +442,6 @@ class ElasticsearchBackend(DatabaseBackend):
     
     def delete_song(self, song_id: str) -> bool:
         """Elasticsearchから楽曲を削除"""
-        if not self._ensure_connection():
-            return False
         try:
             # 楽曲を削除
             self.client.delete(index=self.songs_index, id=song_id)
@@ -485,8 +463,6 @@ class ElasticsearchBackend(DatabaseBackend):
         """指定した楽曲のフィンガープリントを取得"""
         fingerprints = []
         
-        if not self._ensure_connection():
-            return fingerprints
         try:
             # 楽曲に関連するフィンガープリントを検索（最適化クエリ）
             search_query = {
