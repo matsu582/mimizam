@@ -35,7 +35,6 @@ except ImportError:
     NUMBA_AVAILABLE = False
 
 
-
 @dataclass
 class Peak:
     """時間-周波数領域のスペクトルピークを表現"""
@@ -95,8 +94,6 @@ def _numba_optimized_peak_detection(magnitude_db: np.ndarray, mask: np.ndarray,
                 peak_count += 1
     
     return peaks_f[:peak_count], peaks_t[:peak_count]
-
-
 
 
 class SpectrogramAnalyzer:
@@ -162,6 +159,27 @@ class SpectrogramAnalyzer:
             frequencies = frequencies[freq_mask]
         return magnitude_db, frequencies, times
     
+    def _ensure_numba_compiled(self):
+        """
+        Numba JIT事前コンパイル
+        
+        初回実行時のコンパイル時間を事前に処理することで、
+        実際の音源処理時の遅延を回避
+        """
+        if self._numba_compiled or not self.enable_numba_optimization:
+            return
+        
+        # 小さなダミーデータでコンパイル
+        rng = np.random.default_rng(42)
+        dummy_data = rng.random((100, 100)).astype(np.float32)
+        dummy_mask = dummy_data > -30.0  # 閾値でbool型マスクを作成
+        dummy_distance = 2
+        
+        # コンパイル実行
+        _ = _numba_optimized_peak_detection(dummy_data, dummy_mask, dummy_distance)
+        
+        self._numba_compiled = True
+        logging.info("Numba JIT compilation complete")
     
     def _check_threshold_and_adapt(self, magnitude: np.ndarray, min_amplitude: float, debug: bool) -> Tuple[np.ndarray, float]:
         """閾値をチェックし、必要に応じて適応的に調整"""
@@ -185,28 +203,48 @@ class SpectrogramAnalyzer:
         
         return mask, min_amplitude
 
-    def _ensure_numba_compiled(self):
-        """
-        Numba JIT事前コンパイル
+    # 局所最大値検出のオリジナル（未使用）
+    def _original_find_local_maxima(self, magnitude: np.ndarray, mask: np.ndarray, 
+                          frequencies: np.ndarray, times: np.ndarray,
+                          peak_neighborhood_size: int, debug: bool) -> List[Peak]:
+        """スペクトログラム内の局所最大値を検出"""
+        logger = logging.getLogger(__name__)
         
-        初回実行時のコンパイル時間を事前に処理することで、
-        実際の音源処理時の遅延を回避
-        """
-        if self._numba_compiled or not self.enable_numba_optimization:
-            return
+        peaks = []
+        search_range_t = range(peak_neighborhood_size, magnitude.shape[1] - peak_neighborhood_size)
+        search_range_f = range(peak_neighborhood_size, magnitude.shape[0] - peak_neighborhood_size)
         
-        # 小さなダミーデータでコンパイル
-        rng = np.random.default_rng(42)
-        dummy_data = rng.random((100, 100)).astype(np.float32)
-        dummy_mask = dummy_data > -30.0  # 閾値でbool型マスクを作成
-        dummy_distance = 2
+        candidates_found = 0
         
-        # コンパイル実行
-        _ = _numba_optimized_peak_detection(dummy_data, dummy_mask, dummy_distance)
+        for t_idx in search_range_t:
+            for f_idx in search_range_f:
+                if not mask[f_idx, t_idx]:
+                    continue
+                
+                candidates_found += 1
+                
+                # この点が局所最大値かどうかをチェック
+                neighborhood = magnitude[
+                    f_idx - peak_neighborhood_size:f_idx + peak_neighborhood_size + 1,
+                    t_idx - peak_neighborhood_size:t_idx + peak_neighborhood_size + 1
+                ]
+                
+                if magnitude[f_idx, t_idx] == np.max(neighborhood):
+                    peak = Peak(
+                        time=times[t_idx],
+                        frequency=frequencies[f_idx],
+                        amplitude=magnitude[f_idx, t_idx]
+                    )
+                    peaks.append(peak)
         
-        self._numba_compiled = True
-        logging.info("Numba JIT compilation complete")
-
+        if debug:
+            logger.info(f"Candidate points: {candidates_found}")
+            logger.info(f"Detected peaks: {len(peaks)}")
+            if len(peaks) > 0:
+                amplitudes = [p.amplitude for p in peaks]
+                logger.info(f"Peak amplitude range: {np.min(amplitudes):.2f} to {np.max(amplitudes):.2f} dB")
+        
+        return peaks
 
 
     def _find_local_maxima(self, magnitude: np.ndarray, mask: np.ndarray, 
@@ -649,7 +687,7 @@ class HashGenerator:
 class AudioFingerprinter:
     """Shazam-styleアルゴリズムを使用した音声フィンガープリンティングのメインクラス"""
     
-    def __init__(self,
+    def __init__(self, 
                  n_fft: int = 2048,
                  hop_length: int = 512,
                  sr: int = 22050,
@@ -779,45 +817,26 @@ class AudioFingerprinter:
         logger = logging.getLogger(__name__)
         
         # スペクトログラムを生成
-        spec_start = time.time()
         magnitude, frequencies, times = self.spectrogram_analyzer.generate_spectrogram(audio, audible_only=self.audible_only)
-        spec_time = time.time() - spec_start
         
         if debug:
             logger.info(f"Spectrogram generated successfully. Shape: {magnitude.shape}")
-            logger.info(f"Spectrogram generation time: {spec_time:.3f}s")
         
         # ピークを検出
-        peak_start = time.time()
         peaks = self.spectrogram_analyzer.detect_peaks(
             magnitude, frequencies, times,
             min_amplitude, peak_neighborhood_size, debug
         )
-        peak_time = time.time() - peak_start
         
         if len(peaks) == 0:
-            retry_start = time.time()
             peaks = self._retry_with_relaxed_parameters(magnitude, frequencies, times, debug, logger)
-            retry_time = time.time() - retry_start
-            if debug:
-                logger.info(f"Peak retry time: {retry_time:.3f}s")
-        
-        if debug:
-            logger.info(f"Peak detection time: {peak_time:.3f}s")
         
         # パフォーマンス監視
         if self.performance_monitor:
             self.performance_monitor.record_peak_count(len(peaks))
         
         # ハッシュを生成
-        hash_start = time.time()
         fingerprints = self.hash_generator.generate_hashes(peaks, debug)
-        hash_time = time.time() - hash_start
-        
-        if debug:
-            logger.info(f"Hash generation time: {hash_time:.3f}s")
-            logger.info(f"Total breakdown - Spec: {spec_time:.3f}s, Peaks: {peak_time:.3f}s, Hash: {hash_time:.3f}s")
-        
         return fingerprints
     
 
