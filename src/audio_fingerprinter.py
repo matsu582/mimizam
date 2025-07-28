@@ -649,14 +649,15 @@ class HashGenerator:
 class AudioFingerprinter:
     """Shazam-styleアルゴリズムを使用した音声フィンガープリンティングのメインクラス"""
     
-    def __init__(self, 
+    def __init__(self,
                  n_fft: int = 2048,
                  hop_length: int = 512,
                  sr: int = 22050,
                  min_amplitude: float = -60,
                  peak_neighborhood_size: int = 10,
                  enable_adaptive_params: bool = True,
-                 audible_only: bool = False):
+                 audible_only: bool = False,
+                 enable_numba_optimization: bool = False):
         """
         音声フィンガープリンターを初期化
         
@@ -668,9 +669,10 @@ class AudioFingerprinter:
             peak_neighborhood_size: 局所最大値検出の近傍サイズ
             enable_adaptive_params: 適応的パラメータ調整を有効にする
             audible_only: 可聴域(20Hz-20kHz)のみを使う場合True
+            enable_numba_optimization: Numba JIT最適化を有効にする
         """
         self.spectrogram_analyzer = SpectrogramAnalyzer(
-            n_fft, hop_length, sr
+            n_fft, hop_length, sr, enable_numba_optimization=enable_numba_optimization
         )
         self.hash_generator = HashGenerator()
         self.sr = sr
