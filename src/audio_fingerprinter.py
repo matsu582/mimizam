@@ -693,7 +693,7 @@ class AudioFingerprinter:
                  sr: int = 22050,
                  min_amplitude: float = -60,
                  peak_neighborhood_size: int = 10,
-                 enable_adaptive_params: bool = True,
+                 enable_adaptive_params: bool = False,
                  audible_only: bool = False,
                  enable_numba_optimization: bool = False):
         """
