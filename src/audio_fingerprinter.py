@@ -266,9 +266,9 @@ class SpectrogramAnalyzer:
             # Peak オブジェクト生成（元の実装と同じ）
             peaks = [
                 Peak(
-                    time=times[t_idx], 
-                    frequency=frequencies[f_idx], 
-                    amplitude=magnitude[f_idx, t_idx]
+                    time=float(times[t_idx]), 
+                    frequency=float(frequencies[f_idx]), 
+                    amplitude=float(magnitude[f_idx, t_idx])
                 )
                 for f_idx, t_idx in zip(peak_f_indices, peak_t_indices)
             ]

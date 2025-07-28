@@ -26,7 +26,7 @@ def numba_zero_crossing_rate(audio):
         if (audio[i-1] < 0 and audio[i] > 0) or (audio[i-1] > 0 and audio[i] < 0):
             count += 1
     return count / audio.shape[0]
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Any
 
 
 class AdaptiveParameterTuner:
@@ -88,7 +88,7 @@ class AdaptiveParameterTuner:
         
         return characteristics
     
-    def adjust_parameters(self, characteristics: Dict[str, float]) -> Dict[str, any]:
+    def adjust_parameters(self, characteristics: Dict[str, float]) -> Dict[str, Any]:
         """
         音声特性に基づいてパラメータを調整
         
@@ -108,7 +108,7 @@ class AdaptiveParameterTuner:
         
         return params
     
-    def _get_default_parameters(self) -> Dict[str, any]:
+    def _get_default_parameters(self) -> Dict[str, Any]:
         """デフォルトパラメータを取得"""
         return {
             'min_amplitude': -60,
@@ -119,14 +119,14 @@ class AdaptiveParameterTuner:
             'time_delta_range': (0.1, 2.0)
         }
     
-    def _adjust_for_silence(self, params: Dict[str, any], characteristics: Dict[str, float]) -> Dict[str, any]:
+    def _adjust_for_silence(self, params: Dict[str, Any], characteristics: Dict[str, float]) -> Dict[str, Any]:
         """静寂に基づいてパラメータを調整"""
         if characteristics['silence_ratio'] > 0.5:
             params['min_amplitude'] = -70
             params['max_peaks_per_second'] = 10
         return params
     
-    def _adjust_for_complexity(self, params: Dict[str, any], characteristics: Dict[str, float]) -> Dict[str, any]:
+    def _adjust_for_complexity(self, params: Dict[str, Any], characteristics: Dict[str, float]) -> Dict[str, Any]:
         """複雑さに基づいてパラメータを調整"""
         if characteristics['spectral_entropy'] > 7:
             params['min_amplitude'] = -50
@@ -137,7 +137,7 @@ class AdaptiveParameterTuner:
             params['max_peaks_per_second'] = 20
         return params
     
-    def _adjust_for_amplitude(self, params: Dict[str, any], characteristics: Dict[str, float]) -> Dict[str, any]:
+    def _adjust_for_amplitude(self, params: Dict[str, Any], characteristics: Dict[str, float]) -> Dict[str, Any]:
         """振幅に基づいてパラメータを調整"""
         if characteristics['rms'] < 0.01:
             params['min_amplitude'] = -75
@@ -145,7 +145,7 @@ class AdaptiveParameterTuner:
             params['min_amplitude'] = -45
         return params
     
-    def _adjust_for_tempo(self, params: Dict[str, any], characteristics: Dict[str, float]) -> Dict[str, any]:
+    def _adjust_for_tempo(self, params: Dict[str, Any], characteristics: Dict[str, float]) -> Dict[str, Any]:
         """テンポに基づいてパラメータを調整"""
         if characteristics['tempo'] > 140:
             params['max_peaks_per_second'] = 20
@@ -155,7 +155,7 @@ class AdaptiveParameterTuner:
             params['min_peak_separation'] = 0.03
         return params
     
-    def _adjust_for_duration(self, params: Dict[str, any], characteristics: Dict[str, float]) -> Dict[str, any]:
+    def _adjust_for_duration(self, params: Dict[str, Any], characteristics: Dict[str, float]) -> Dict[str, Any]:
         """継続時間に基づいてパラメータを調整"""
         if characteristics['duration'] < 10:
             params['max_peaks_per_second'] = 25
@@ -164,7 +164,7 @@ class AdaptiveParameterTuner:
             params['target_zone_size'] = 3
         return params
     
-    def _adjust_for_spectral_characteristics(self, params: Dict[str, any], characteristics: Dict[str, float]) -> Dict[str, any]:
+    def _adjust_for_spectral_characteristics(self, params: Dict[str, Any], characteristics: Dict[str, float]) -> Dict[str, Any]:
         """スペクトル特性に基づいてパラメータを調整"""
         # 高い周波数成分が多い音声（音楽）
         if characteristics['spectral_centroid_mean'] > 3000:
@@ -177,7 +177,7 @@ class AdaptiveParameterTuner:
         
         return params
     
-    def get_parameter_summary(self, characteristics: Dict[str, float], adjusted_params: Dict[str, any]) -> str:
+    def get_parameter_summary(self, characteristics: Dict[str, float], adjusted_params: Dict[str, Any]) -> str:
         """
         パラメータ調整の概要を文字列で返す
         
