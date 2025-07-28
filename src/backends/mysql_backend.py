@@ -68,7 +68,7 @@ class MySQLBackend(DatabaseBackend):
             self.logger.info(f"Connected to MySQL database: {self.config.host}:{self.config.port}")
             return True
         except MySQLError as e:
-            self.logger.error(f"MySQL connection error: {e}")
+            self._log_error("MySQL connection", e, {"host": self.config.host, "port": self.config.port})
             return False
     
     def disconnect(self) -> None:
@@ -135,7 +135,7 @@ class MySQLBackend(DatabaseBackend):
             
             return True
         except MySQLError as e:
-            self.logger.error(f"MySQL table creation error: {e}")
+            self._log_error("MySQL table creation", e)
             return False
     
     def add_song(self, song: Song) -> bool:
@@ -154,7 +154,7 @@ class MySQLBackend(DatabaseBackend):
             """, (song.id, song.title, song.artist, song.file_path, meta_json))
             return True
         except MySQLError as e:
-            self.logger.error(f"MySQL song addition error: {e}")
+            self._log_error("MySQL song addition", e, {"song_id": song.id})
             return False
     
     def add_fingerprints(self, song_id: str, fingerprints: List[Fingerprint]) -> bool:
@@ -178,7 +178,7 @@ class MySQLBackend(DatabaseBackend):
             
             return True
         except MySQLError as e:
-            self.logger.error(f"MySQL fingerprint addition error: {e}")
+            self._log_error("MySQL fingerprint addition", e, {"song_id": song_id, "count": len(fingerprints)})
             return False
     
     def search_fingerprints(self, query_fingerprints: List[Fingerprint]) -> Dict[str, List[Tuple[float, float]]]:
@@ -294,7 +294,7 @@ class MySQLBackend(DatabaseBackend):
             
             return True
         except MySQLError as e:
-            self.logger.error(f"MySQL song deletion error: {e}")
+            self._log_error("MySQL song deletion", e, {"song_id": song_id})
             return False
 
     def get_fingerprints_by_song(self, song_id: str) -> List[Fingerprint]:

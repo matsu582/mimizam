@@ -70,7 +70,7 @@ class PostgreSQLBackend(DatabaseBackend):
             self.logger.info(f"Connected to PostgreSQL database: {self.config.host}:{self.config.port}")
             return True
         except PostgresError as e:
-            self.logger.error(f"PostgreSQL connection error: {e}")
+            self._log_error("PostgreSQL connection", e, {"host": self.config.host, "port": self.config.port})
             return False
     
     def disconnect(self) -> None:
@@ -145,7 +145,7 @@ class PostgreSQLBackend(DatabaseBackend):
             
             return True
         except PostgresError as e:
-            self.logger.error(f"PostgreSQL table creation error: {e}")
+            self._log_error("PostgreSQL table creation", e)
             return False
     
     def add_song(self, song: Song) -> bool:
@@ -164,7 +164,7 @@ class PostgreSQLBackend(DatabaseBackend):
             """, (song.id, song.title, song.artist, song.file_path, meta_json))
             return True
         except PostgresError as e:
-            self.logger.error(f"PostgreSQL song addition error: {e}")
+            self._log_error("PostgreSQL song addition", e, {"song_id": song.id})
             return False
     
     def add_fingerprints(self, song_id: str, fingerprints: List[Fingerprint]) -> bool:
@@ -188,7 +188,7 @@ class PostgreSQLBackend(DatabaseBackend):
             
             return True
         except PostgresError as e:
-            self.logger.error(f"PostgreSQL fingerprint addition error: {e}")
+            self._log_error("PostgreSQL fingerprint addition", e, {"song_id": song_id, "count": len(fingerprints)})
             return False
     
     def search_fingerprints(self, query_fingerprints: List[Fingerprint]) -> Dict[str, List[Tuple[float, float]]]:
@@ -305,7 +305,7 @@ class PostgreSQLBackend(DatabaseBackend):
             
             return True
         except PostgresError as e:
-            self.logger.error(f"PostgreSQL song deletion error: {e}")
+            self._log_error("PostgreSQL song deletion", e, {"song_id": song_id})
             return False
 
     def get_fingerprints_by_song(self, song_id: str) -> List[Fingerprint]:
