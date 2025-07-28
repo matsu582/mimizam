@@ -5,7 +5,7 @@ mimizam統一例外クラス
 """
 
 import logging
-from typing import Optional, Any
+from typing import Optional, Any, NoReturn
 
 
 class MimizamError(Exception):
@@ -61,7 +61,7 @@ class ValidationError(MimizamError):
 
 def log_and_raise(logger: logging.Logger, exception_class: type, 
                   message: str, original_error: Optional[Exception] = None,
-                  context: Optional[dict] = None, level: str = "error") -> None:
+                  context: Optional[dict] = None, level: str = "error") -> NoReturn:
     """
     統一されたエラーログ出力と例外発生
     
