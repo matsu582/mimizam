@@ -103,8 +103,8 @@ class ElasticsearchBackend(DatabaseBackend):
                 return False
                 
         except Exception as e:
-            context = {"host": self.config.host, "port": self.config.port}
-            log_and_raise(self.logger, ConnectionError, f"Elasticsearch connection error", e, context)
+            self.logger.error(f"Elasticsearch connection error: {e}", extra={"host": self.config.host, "port": self.config.port})
+            return False
     
     def disconnect(self) -> None:
         """Elasticsearchクラスターから切断"""
@@ -192,7 +192,8 @@ class ElasticsearchBackend(DatabaseBackend):
             
             return True
         except ElasticsearchException as e:
-            log_and_raise(self.logger, QueryError, f"Elasticsearch index creation error", e)
+            self.logger.error(f"Elasticsearch index creation error: {e}")
+            return False
     
     def add_song(self, song: Song) -> bool:
         """Elasticsearchに楽曲を追加"""
@@ -223,7 +224,8 @@ class ElasticsearchBackend(DatabaseBackend):
                 return False
                 
         except ElasticsearchException as e:
-            log_and_raise(self.logger, QueryError, f"Elasticsearch song addition error", e)
+            self.logger.error(f"Elasticsearch song addition error: {e}")
+            return False
     
     def add_fingerprints(self, song_id: str, fingerprints: List[Fingerprint]) -> bool:
         """Elasticsearchにフィンガープリントを追加"""
@@ -268,7 +270,8 @@ class ElasticsearchBackend(DatabaseBackend):
             
             return True
         except Exception as e:
-            log_and_raise(self.logger, QueryError, f"Elasticsearch fingerprint addition error", e)
+            self.logger.error(f"Elasticsearch fingerprint addition error: {e}")
+            return False
 
     def search_fingerprints(self, query_fingerprints: List[Fingerprint]) -> Dict[str, List[Tuple[float, float]]]:
         """Elasticsearchでフィンガープリントを検索"""
@@ -458,7 +461,8 @@ class ElasticsearchBackend(DatabaseBackend):
             
             return True
         except ElasticsearchException as e:
-            log_and_raise(self.logger, QueryError, f"Elasticsearch song deletion error", e)
+            self.logger.error(f"Elasticsearch song deletion error: {e}")
+            return False
 
     def get_fingerprints_by_song(self, song_id: str) -> List[Fingerprint]:
         """指定した楽曲のフィンガープリントを取得"""

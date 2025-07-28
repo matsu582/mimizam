@@ -44,7 +44,8 @@ class SQLiteBackend(DatabaseBackend):
             self.logger.info(f"Connected to SQLite database with optimization settings: {self.db_path}")
             return True
         except Exception as e:
-            log_and_raise(self.logger, ConnectionError, f"SQLite connection error", e)
+            self.logger.error(f"SQLite connection error: {e}")
+            return False
     
     def disconnect(self) -> None:
         """SQLiteデータベースから切断"""
@@ -105,7 +106,8 @@ class SQLiteBackend(DatabaseBackend):
             self.connection.commit()
             return True
         except Exception as e:
-            log_and_raise(self.logger, QueryError, f"SQLite table creation error", e)
+            self.logger.error(f"SQLite table creation error: {e}")
+            return False
     
     def add_song(self, song: Song) -> bool:
         """SQLiteに楽曲を追加"""
@@ -119,7 +121,8 @@ class SQLiteBackend(DatabaseBackend):
             self.connection.commit()
             return True
         except Exception as e:
-            log_and_raise(self.logger, QueryError, f"SQLite song addition error", e)
+            self.logger.error(f"SQLite song addition error: {e}")
+            return False
     
     def add_fingerprints(self, song_id: str, fingerprints: List[Fingerprint]) -> bool:
         """SQLiteにフィンガープリントを追加"""
@@ -143,7 +146,8 @@ class SQLiteBackend(DatabaseBackend):
             self.connection.commit()
             return True
         except Exception as e:
-            log_and_raise(self.logger, QueryError, f"SQLite fingerprint addition error", e)
+            self.logger.error(f"SQLite fingerprint addition error: {e}")
+            return False
     
     def search_fingerprints(self, query_fingerprints: List[Fingerprint]) -> Dict[str, List[Tuple[float, float]]]:
         """SQLiteでフィンガープリントを検索"""
@@ -263,7 +267,8 @@ class SQLiteBackend(DatabaseBackend):
             self.connection.commit()
             return True
         except Exception as e:
-            log_and_raise(self.logger, QueryError, f"SQLite song deletion error", e)
+            self.logger.error(f"SQLite song deletion error: {e}")
+            return False
 
     def get_fingerprints_by_song(self, song_id: str) -> List[Fingerprint]:
         """指定した楽曲のフィンガープリントを取得"""

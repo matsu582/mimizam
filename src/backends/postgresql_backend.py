@@ -70,7 +70,8 @@ class PostgreSQLBackend(DatabaseBackend):
             self.logger.info(f"Connected to PostgreSQL database: {self.config.host}:{self.config.port}")
             return True
         except PostgresError as e:
-            log_and_raise(self.logger, ConnectionError, f"PostgreSQL connection error", e)
+            self.logger.error(f"PostgreSQL connection error: {e}")
+            return False
     
     def disconnect(self) -> None:
         """PostgreSQLデータベースから切断"""
@@ -144,7 +145,8 @@ class PostgreSQLBackend(DatabaseBackend):
             
             return True
         except PostgresError as e:
-            log_and_raise(self.logger, QueryError, f"PostgreSQL table creation error", e)
+            self.logger.error(f"PostgreSQL table creation error: {e}")
+            return False
     
     def add_song(self, song: Song) -> bool:
         """PostgreSQLに楽曲を追加"""
@@ -162,7 +164,8 @@ class PostgreSQLBackend(DatabaseBackend):
             """, (song.id, song.title, song.artist, song.file_path, meta_json))
             return True
         except PostgresError as e:
-            log_and_raise(self.logger, QueryError, f"PostgreSQL song addition error", e)
+            self.logger.error(f"PostgreSQL song addition error: {e}")
+            return False
     
     def add_fingerprints(self, song_id: str, fingerprints: List[Fingerprint]) -> bool:
         """PostgreSQLにフィンガープリントを追加"""
@@ -185,7 +188,8 @@ class PostgreSQLBackend(DatabaseBackend):
             
             return True
         except PostgresError as e:
-            log_and_raise(self.logger, QueryError, f"PostgreSQL fingerprint addition error", e)
+            self.logger.error(f"PostgreSQL fingerprint addition error: {e}")
+            return False
     
     def search_fingerprints(self, query_fingerprints: List[Fingerprint]) -> Dict[str, List[Tuple[float, float]]]:
         """PostgreSQLでフィンガープリントを検索"""
@@ -301,7 +305,8 @@ class PostgreSQLBackend(DatabaseBackend):
             
             return True
         except PostgresError as e:
-            log_and_raise(self.logger, QueryError, f"PostgreSQL song deletion error", e)
+            self.logger.error(f"PostgreSQL song deletion error: {e}")
+            return False
 
     def get_fingerprints_by_song(self, song_id: str) -> List[Fingerprint]:
         """指定した楽曲のフィンガープリントを取得"""
