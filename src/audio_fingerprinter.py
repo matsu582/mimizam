@@ -106,7 +106,7 @@ class SpectrogramAnalyzer:
                  n_fft: int = 2048, 
                  hop_length: int = 512, 
                  sr: int = 22050,
-                 enable_numba_optimization: bool = False):
+                 enable_numba_optimization: bool = True):
         """
         スペクトログラム解析器を初期化
         
@@ -657,7 +657,7 @@ class AudioFingerprinter:
                  peak_neighborhood_size: int = 10,
                  enable_adaptive_params: bool = True,
                  audible_only: bool = False,
-                 enable_numba_optimization: bool = False):
+                 enable_numba_optimization: bool = True):
         """
         音声フィンガープリンターを初期化
         
