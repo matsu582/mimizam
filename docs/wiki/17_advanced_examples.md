@@ -202,149 +202,82 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import time
 from typing import List, Dict, Any
 
-class HybridMimizamSystem:
-    """ハイブリッドmimizamシステム"""
+def compare_multiple_backends(file_path: str, title: str, artist: str):
+    """複数バックエンドでの楽曲追加と検索性能比較"""
     
-    def __init__(self):
-        self.backends = {}
-        self.primary_backend = None
-        self.cache_backend = None
-        self.archive_backend = None
-        
-    def setup_backends(self, config: Dict[str, Any]):
-        """バックエンド設定"""
-        
-        # 高速キャッシュ用SQLite
-        if 'cache' in config:
-            self.cache_backend = create_mimizam_sqlite(config['cache']['path'])
-            self.backends['cache'] = self.cache_backend
-        
-        # メインデータベース用MySQL
-        if 'primary' in config:
-            self.primary_backend = create_mimizam_mysql(**config['primary'])
-            self.backends['primary'] = self.primary_backend
-        
-        # アーカイブ用Elasticsearch
-        if 'archive' in config:
-            self.archive_backend = create_mimizam_elasticsearch(**config['archive'])
-            self.backends['archive'] = self.archive_backend
+    # SQLiteバックエンド
+    sqlite_mimizam = create_mimizam_sqlite("cache.db")
     
-    def add_song_distributed(self, file_path: str, title: str, artist: str) -> Dict[str, str]:
-        """分散楽曲追加"""
-        
-        results = {}
-        
-        # プライマリに追加
-        if self.primary_backend:
-            primary_id = self.primary_backend.add_song(file_path, title, artist)
-            results['primary'] = primary_id
-        
-        # キャッシュに追加（非同期）
-        if self.cache_backend:
-            cache_id = self.cache_backend.add_song(file_path, title, artist)
-            results['cache'] = cache_id
-        
-        # アーカイブに追加（バックグラウンド）
-        if self.archive_backend:
-            # 非同期でアーカイブに追加
-            def archive_task():
-                return self.archive_backend.add_song(file_path, title, artist)
-            
-            with ThreadPoolExecutor(max_workers=1) as executor:
-                future = executor.submit(archive_task)
-                # 結果は待たずに続行
-                results['archive_future'] = future
-        
-        return results
+    # MySQLバックエンド（利用可能な場合）
+    try:
+        mysql_mimizam = create_mimizam_mysql(
+            host="localhost",
+            database="music_main", 
+            username="user",
+            password="password"
+        )
+        mysql_available = True
+    except:
+        mysql_available = False
+        print("MySQL接続失敗 - SQLiteのみ使用")
     
-    def search_song_intelligent(self, query_path: str, min_confidence: float = 0.5) -> List[Dict[str, Any]]:
-        """インテリジェント検索"""
-        
-        search_results = []
-        
-        # 1. キャッシュから高速検索
-        if self.cache_backend:
-            start_time = time.time()
-            cache_results = self.cache_backend.search_song(query_path, min_confidence)
-            cache_time = time.time() - start_time
-            
-            if cache_results:
-                for result in cache_results:
-                    result['source'] = 'cache'
-                    result['response_time'] = cache_time
-                search_results.extend(cache_results)
-        
-        # 2. 十分な結果が得られない場合、プライマリを検索
-        if len(search_results) < 3 and self.primary_backend:
-            start_time = time.time()
-            primary_results = self.primary_backend.search_song(query_path, min_confidence)
-            primary_time = time.time() - start_time
-            
-            for result in primary_results:
-                result['source'] = 'primary'
-                result['response_time'] = primary_time
-                
-                # 重複除去
-                if not any(r['song']['id'] == result['song']['id'] for r in search_results):
-                    search_results.append(result)
-        
-        # 3. さらに結果が必要な場合、アーカイブを検索
-        if len(search_results) < 5 and self.archive_backend:
-            start_time = time.time()
-            archive_results = self.archive_backend.search_song(query_path, min_confidence * 0.8)  # 閾値を下げる
-            archive_time = time.time() - start_time
-            
-            for result in archive_results:
-                result['source'] = 'archive'
-                result['response_time'] = archive_time
-                
-                # 重複除去
-                if not any(r['song']['id'] == result['song']['id'] for r in search_results):
-                    search_results.append(result)
-        
-        # 信頼度でソート
-        search_results.sort(key=lambda x: x['confidence'], reverse=True)
-        
-        return search_results
+    results = {}
+    
+    # SQLiteに楽曲追加
+    start_time = time.time()
+    sqlite_id = sqlite_mimizam.add_song(file_path, title, artist)
+    sqlite_add_time = time.time() - start_time
+    results['sqlite'] = {
+        'song_id': sqlite_id,
+        'add_time': sqlite_add_time
+    }
+    
+    # MySQLに楽曲追加（利用可能な場合）
+    if mysql_available:
+        start_time = time.time()
+        mysql_id = mysql_mimizam.add_song(file_path, title, artist)
+        mysql_add_time = time.time() - start_time
+        results['mysql'] = {
+            'song_id': mysql_id,
+            'add_time': mysql_add_time
+        }
+    
+    # 検索性能比較
+    query_file = file_path  # 同じファイルで検索テスト
+    
+    # SQLiteで検索
+    start_time = time.time()
+    sqlite_results = sqlite_mimizam.search_song(query_file)
+    sqlite_search_time = time.time() - start_time
+    results['sqlite']['search_time'] = sqlite_search_time
+    results['sqlite']['search_results'] = len(sqlite_results)
+    
+    # MySQLで検索（利用可能な場合）
+    if mysql_available:
+        start_time = time.time()
+        mysql_results = mysql_mimizam.search_song(query_file)
+        mysql_search_time = time.time() - start_time
+        results['mysql']['search_time'] = mysql_search_time
+        results['mysql']['search_results'] = len(mysql_results)
+        mysql_mimizam.close()
+    
+    sqlite_mimizam.close()
+    return results
 
 # 使用例
-hybrid_system = HybridMimizamSystem()
-
-# バックエンド設定
-config = {
-    'cache': {
-        'path': 'cache.db'
-    },
-    'primary': {
-        'host': 'localhost',
-        'database': 'music_main',
-        'username': 'user',
-        'password': 'password'
-    },
-    'archive': {
-        'host': 'localhost',
-        'port': 9200,
-        'index': 'music_archive'
-    }
-}
-
-hybrid_system.setup_backends(config)
-
-# 分散楽曲追加
-add_results = hybrid_system.add_song_distributed(
-    "new_song.wav", 
+results = compare_multiple_backends(
+    "new_song.wav",
     "New Song", 
     "Artist Name"
 )
-print(f"追加結果: {add_results}")
 
-# インテリジェント検索
-search_results = hybrid_system.search_song_intelligent("query.wav")
-print(f"検索結果: {len(search_results)}件")
-
-for result in search_results:
-    print(f"  {result['song']['title']} (信頼度: {result['confidence']:.2f}, "
-          f"ソース: {result['source']}, 応答時間: {result['response_time']:.3f}秒)")
+print("バックエンド性能比較結果:")
+for backend, data in results.items():
+    print(f"{backend.upper()}:")
+    print(f"  楽曲ID: {data['song_id']}")
+    print(f"  追加時間: {data['add_time']:.3f}秒")
+    print(f"  検索時間: {data['search_time']:.3f}秒")
+    print(f"  検索結果数: {data['search_results']}件")
 ```
 
 ## 🚀 高性能バッチ処理
@@ -360,89 +293,68 @@ import time
 import logging
 from pathlib import Path
 
-class HighPerformanceBatchProcessor:
-    """高性能バッチ処理器"""
+def process_music_directory_batch(directory_path: str, file_patterns=None, batch_size=50):
+    """音楽ディレクトリのバッチ処理"""
     
-    def __init__(self, mimizam, max_workers=None):
-        self.mimizam = mimizam
-        self.max_workers = max_workers or multiprocessing.cpu_count()
-        self.setup_logging()
-        
-    def setup_logging(self):
-        """ログ設定"""
-        logging.basicConfig(
-            level=logging.INFO,
-            format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-            handlers=[
-                logging.FileHandler('batch_processing.log'),
-                logging.StreamHandler()
-            ]
-        )
-        self.logger = logging.getLogger(__name__)
+    if file_patterns is None:
+        file_patterns = ['*.wav', '*.mp3', '*.flac', '*.m4a']
     
-    def process_directory_parallel(self, directory_path: str, 
-                                 file_patterns: List[str] = None,
-                                 batch_size: int = 100) -> Dict[str, Any]:
-        """ディレクトリ並列処理"""
+    # ファイル一覧取得
+    all_files = []
+    for pattern in file_patterns:
+        all_files.extend(glob.glob(os.path.join(directory_path, '**', pattern), recursive=True))
+    
+    print(f"処理対象ファイル数: {len(all_files)}")
+    
+    # mimizamインスタンス作成
+    mimizam = create_mimizam_sqlite("batch_music.db")
+    
+    results = {
+        'total_files': len(all_files),
+        'processed_files': 0,
+        'failed_files': 0,
+        'processing_time': 0,
+        'errors': []
+    }
+    
+    start_time = time.time()
+    
+    # バッチ処理
+    for i in range(0, len(all_files), batch_size):
+        batch = all_files[i:i+batch_size]
+        batch_num = i // batch_size + 1
+        total_batches = (len(all_files) + batch_size - 1) // batch_size
         
-        if file_patterns is None:
-            file_patterns = ['*.wav', '*.mp3', '*.flac', '*.m4a']
+        print(f"バッチ {batch_num}/{total_batches} 処理中...")
         
-        # ファイル一覧取得
-        all_files = []
-        for pattern in file_patterns:
-            all_files.extend(glob.glob(os.path.join(directory_path, '**', pattern), recursive=True))
+        for file_path in batch:
+            try:
+                # ファイル名から楽曲情報を推測
+                title = os.path.splitext(os.path.basename(file_path))[0]
+                artist = os.path.basename(os.path.dirname(file_path))
+                
+                # 楽曲を追加
+                song_id = mimizam.add_song(file_path, title, artist)
+                results['processed_files'] += 1
+                
+            except Exception as e:
+                results['failed_files'] += 1
+                results['errors'].append(f"{file_path}: {str(e)}")
+                print(f"処理エラー {file_path}: {e}")
         
-        self.logger.info(f"処理対象ファイル数: {len(all_files)}")
-        
-        # バッチに分割
-        batches = [all_files[i:i+batch_size] for i in range(0, len(all_files), batch_size)]
-        
-        results = {
-            'total_files': len(all_files),
-            'processed_files': 0,
-            'failed_files': 0,
-            'processing_time': 0,
-            'errors': []
-        }
-        
-        start_time = time.time()
-        
-        # 並列バッチ処理
-        with ProcessPoolExecutor(max_workers=self.max_workers) as executor:
-            future_to_batch = {
-                executor.submit(self._process_batch, batch, batch_idx): batch_idx 
-                for batch_idx, batch in enumerate(batches)
-            }
-            
-            for future in as_completed(future_to_batch):
-                batch_idx = future_to_batch[future]
-                try:
-                    batch_result = future.result()
-                    results['processed_files'] += batch_result['processed']
-                    results['failed_files'] += batch_result['failed']
-                    results['errors'].extend(batch_result['errors'])
-                    
-                    self.logger.info(f"バッチ {batch_idx + 1}/{len(batches)} 完了: "
-                                   f"成功 {batch_result['processed']}, "
-                                   f"失敗 {batch_result['failed']}")
-                    
-                except Exception as e:
-                    self.logger.error(f"バッチ {batch_idx} 処理エラー: {e}")
-                    results['errors'].append(f"Batch {batch_idx}: {str(e)}")
-        
-        results['processing_time'] = time.time() - start_time
-        
-        self.logger.info(f"全体処理完了: {results['processed_files']}/{results['total_files']} "
-                        f"({results['processing_time']:.2f}秒)")
-        
-        return results
+        print(f"バッチ {batch_num} 完了: 成功 {len(batch) - len([e for e in results['errors'] if e.startswith(batch[0])])}, "
+              f"失敗 {len([e for e in results['errors'] if any(f in e for f in batch)])}")
+    
+    results['processing_time'] = time.time() - start_time
+    
+    print(f"全体処理完了: {results['processed_files']}/{results['total_files']} "
+          f"({results['processing_time']:.2f}秒)")
+    
+    mimizam.close()
+    return results
 
 # 使用例
-batch_processor = HighPerformanceBatchProcessor(mimizam, max_workers=4)
-
-# 大規模ディレクトリ処理
-results = batch_processor.process_directory_parallel(
+results = process_music_directory_batch(
     "/path/to/music/library",
     file_patterns=['*.wav', '*.mp3', '*.flac'],
     batch_size=50
@@ -450,6 +362,12 @@ results = batch_processor.process_directory_parallel(
 
 print(f"処理結果: {results['processed_files']}/{results['total_files']} "
       f"({results['processing_time']:.2f}秒)")
+
+# エラーがあった場合の詳細表示
+if results['errors']:
+    print(f"\nエラー詳細 ({len(results['errors'])}件):")
+    for error in results['errors'][:5]:  # 最初の5件のみ表示
+        print(f"  {error}")
 ```
 
 ## 🔗 関連ドキュメント

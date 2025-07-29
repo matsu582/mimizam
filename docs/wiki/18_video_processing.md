@@ -370,143 +370,88 @@ import glob
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
-class BatchVideoProcessor:
-    """バッチ動画処理システム"""
+def process_video_directory_batch(video_dir: str, recursive: bool = True, file_patterns=None):
+    """動画ディレクトリのバッチ処理"""
     
-    def __init__(self, database_config, max_workers: int = 4):
-        self.video_system = VideoFingerprintSystem(database_config)
-        self.max_workers = max_workers
-        
-        # 処理統計
-        self.batch_stats = {
-            'total_files': 0,
-            'processed_files': 0,
-            'skipped_files': 0,
-            'error_files': 0,
-            'processing_time': 0
-        }
+    if file_patterns is None:
+        file_patterns = ['*.mp4', '*.avi', '*.mov', '*.mkv', '*.wmv']
     
-    def process_directory(self, video_dir: str, recursive: bool = True,
-                         file_patterns: list = None) -> dict:
-        """ディレクトリ内の動画ファイルを一括処理"""
-        
-        if file_patterns is None:
-            file_patterns = ['*.mp4', '*.avi', '*.mov', '*.mkv', '*.wmv']
-        
-        # 動画ファイル一覧取得
-        video_files = []
-        for pattern in file_patterns:
-            if recursive:
-                search_pattern = os.path.join(video_dir, '**', pattern)
-                video_files.extend(glob.glob(search_pattern, recursive=True))
-            else:
-                search_pattern = os.path.join(video_dir, pattern)
-                video_files.extend(glob.glob(search_pattern))
-        
-        self.batch_stats['total_files'] = len(video_files)
-        print(f"処理対象動画ファイル数: {len(video_files)}")
-        
-        # 並列処理実行
-        import time
-        start_time = time.time()
-        
-        self._process_files_parallel(video_files)
-        
-        self.batch_stats['processing_time'] = time.time() - start_time
-        
-        # 結果サマリー
-        print(f"\n=== バッチ処理完了 ===")
-        print(f"総ファイル数: {self.batch_stats['total_files']}")
-        print(f"処理成功: {self.batch_stats['processed_files']}")
-        print(f"スキップ: {self.batch_stats['skipped_files']}")
-        print(f"エラー: {self.batch_stats['error_files']}")
-        print(f"処理時間: {self.batch_stats['processing_time']:.2f}秒")
-        
-        return self.batch_stats
+    # 動画ファイル一覧取得
+    video_files = []
+    for pattern in file_patterns:
+        if recursive:
+            search_pattern = os.path.join(video_dir, '**', pattern)
+            video_files.extend(glob.glob(search_pattern, recursive=True))
+        else:
+            search_pattern = os.path.join(video_dir, pattern)
+            video_files.extend(glob.glob(search_pattern))
     
-    def _process_files_parallel(self, video_files: list):
-        """ファイルの並列処理"""
-        
-        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-            # タスク投入
-            future_to_file = {
-                executor.submit(self._process_single_file, file_path): file_path
-                for file_path in video_files
-            }
-            
-            # 結果収集
-            for future in as_completed(future_to_file):
-                file_path = future_to_file[future]
-                try:
-                    result = future.result()
-                    if result['success']:
-                        self.batch_stats['processed_files'] += 1
-                    else:
-                        self.batch_stats['skipped_files'] += 1
-                    
-                    # 進捗表示
-                    completed = (self.batch_stats['processed_files'] + 
-                               self.batch_stats['skipped_files'] + 
-                               self.batch_stats['error_files'])
-                    
-                    print(f"進捗: {completed}/{self.batch_stats['total_files']} "
-                          f"({completed/self.batch_stats['total_files']*100:.1f}%)")
-                    
-                except Exception as e:
-                    self.batch_stats['error_files'] += 1
-                    print(f"処理エラー {file_path}: {e}")
+    print(f"処理対象動画ファイル数: {len(video_files)}")
     
-    def _process_single_file(self, file_path: str) -> dict:
-        """単一ファイルの処理"""
-        
+    # mimizamインスタンス作成
+    mimizam = create_mimizam_sqlite("batch_video_music.db")
+    
+    batch_stats = {
+        'total_files': len(video_files),
+        'processed_files': 0,
+        'skipped_files': 0,
+        'error_files': 0,
+        'processing_time': 0
+    }
+    
+    start_time = time.time()
+    
+    for i, video_path in enumerate(video_files):
         try:
             # ファイル名からメタデータを推測
-            file_name = Path(file_path).stem
-            title, artist = self._extract_metadata_from_filename(file_name)
+            file_name = Path(video_path).stem
+            title, artist = extract_metadata_from_filename(file_name)
             
             # 動画処理実行
-            song_id = self.video_system.process_video_file(
-                video_path=file_path,
-                title=title,
-                artist=artist
-            )
+            song_id = process_video_with_mimizam(video_path, title, artist)
+            batch_stats['processed_files'] += 1
             
-            return {
-                'success': True,
-                'song_id': song_id,
-                'file_path': file_path
-            }
+            print(f"✓ 処理完了 ({i+1}/{len(video_files)}): {title}")
             
         except Exception as e:
-            return {
-                'success': False,
-                'error': str(e),
-                'file_path': file_path
-            }
+            batch_stats['error_files'] += 1
+            print(f"✗ 処理エラー ({i+1}/{len(video_files)}): {video_path} - {e}")
+        
+        # 進捗表示
+        if (i + 1) % 10 == 0:
+            completed = batch_stats['processed_files'] + batch_stats['error_files']
+            print(f"進捗: {completed}/{batch_stats['total_files']} "
+                  f"({completed/batch_stats['total_files']*100:.1f}%)")
     
-    def _extract_metadata_from_filename(self, filename: str) -> tuple:
-        """ファイル名からメタデータを抽出"""
-        
-        # 一般的な区切り文字で分割を試行
-        separators = [' - ', '_-_', ' by ', '_by_', ' feat ', '_feat_']
-        
-        for sep in separators:
-            if sep in filename:
-                parts = filename.split(sep, 1)
-                if len(parts) == 2:
-                    return parts[1].strip(), parts[0].strip()  # title, artist
-        
-        # 区切り文字が見つからない場合
-        return filename, "Unknown Artist"
+    batch_stats['processing_time'] = time.time() - start_time
+    
+    # 結果サマリー
+    print(f"\n=== バッチ処理完了 ===")
+    print(f"総ファイル数: {batch_stats['total_files']}")
+    print(f"処理成功: {batch_stats['processed_files']}")
+    print(f"エラー: {batch_stats['error_files']}")
+    print(f"処理時間: {batch_stats['processing_time']:.2f}秒")
+    
+    mimizam.close()
+    return batch_stats
+
+def extract_metadata_from_filename(filename: str) -> tuple:
+    """ファイル名からメタデータを抽出"""
+    
+    # 一般的な区切り文字で分割を試行
+    separators = [' - ', '_-_', ' by ', '_by_', ' feat ', '_feat_']
+    
+    for sep in separators:
+        if sep in filename:
+            parts = filename.split(sep, 1)
+            if len(parts) == 2:
+                return parts[1].strip(), parts[0].strip()  # title, artist
+    
+    # 区切り文字が見つからない場合
+    return filename, "Unknown Artist"
 
 # 使用例
-batch_processor = BatchVideoProcessor(
-    database_config={'file_path': 'batch_video_music.db'},
-    max_workers=6
-)
-
-# ディレクトリ一括処理
-results = batch_processor.process_directory(
+results = process_video_directory_batch(
     video_dir="/path/to/video/library",
     recursive=True,
     file_patterns=['*.mp4', '*.avi', '*.mov']
@@ -518,183 +463,165 @@ results = batch_processor.process_directory(
 ### 高度な動画検索
 
 ```python
-class AdvancedVideoSearch:
-    """高度な動画検索システム"""
+def search_video_with_time_range(query_video_path: str, start_time: float = 0, 
+                                 duration: float = None, min_confidence: float = 0.3):
+    """時間範囲指定での動画検索"""
     
-    def __init__(self, database_config):
-        self.video_system = VideoFingerprintSystem(database_config)
-        self.search_cache = {}
+    # 一時音声ファイルのパス
+    temp_audio_path = f"temp_segment_{int(start_time)}_{int(duration or 30)}.wav"
     
-    def search_with_time_range(self, query_video_path: str, 
-                              start_time: float = 0, 
-                              duration: float = None,
-                              min_confidence: float = 0.3) -> list:
-        """時間範囲指定での動画検索"""
-        
-        try:
-            # 動画情報取得
-            video_info = self.video_system.processor.get_video_info(query_video_path)
-            total_duration = video_info.get('duration', 0)
-            
-            if duration is None:
-                duration = total_duration - start_time
-            
-            # 指定範囲の音声抽出
-            temp_audio_path = self._extract_audio_segment(
-                query_video_path, start_time, duration
-            )
-            
-            # 音声検索実行
-            results = self.video_system.mimizam.search_song(
-                query_path=temp_audio_path,
-                min_confidence=min_confidence
-            )
-            
-            # 結果に時間情報を追加
-            enhanced_results = []
-            for result in results:
-                enhanced_result = result.copy()
-                enhanced_result['query_time_range'] = {
-                    'start': start_time,
-                    'duration': duration,
-                    'end': start_time + duration
-                }
-                enhanced_results.append(enhanced_result)
-            
-            # 一時ファイルクリーンアップ
-            if os.path.exists(temp_audio_path):
-                os.remove(temp_audio_path)
-            
-            return enhanced_results
-            
-        except Exception as e:
-            print(f"時間範囲検索エラー: {e}")
-            return []
-    
-    def _extract_audio_segment(self, video_path: str, start_time: float, 
-                              duration: float) -> str:
-        """動画の指定範囲から音声を抽出"""
-        
-        output_path = os.path.join(
-            self.video_system.temp_dir,
-            f"segment_{int(start_time)}_{int(duration)}.wav"
-        )
-        
+    try:
+        # 指定範囲の音声抽出
         cmd = [
             'ffmpeg',
-            '-i', video_path,
+            '-i', query_video_path,
             '-ss', str(start_time),      # 開始時間
-            '-t', str(duration),         # 継続時間
+            '-t', str(duration or 30),   # 継続時間
             '-vn',                       # 動画ストリーム無視
             '-acodec', 'pcm_s16le',      # 音声コーデック
             '-ar', '22050',              # サンプルレート
             '-ac', '1',                  # モノラル
             '-y',                        # 上書き許可
-            output_path
+            temp_audio_path
         ]
         
-        import subprocess
         subprocess.run(cmd, capture_output=True, check=True)
         
-        return output_path
-    
-    def multi_segment_search(self, query_video_path: str, 
-                           segment_duration: float = 30,
-                           overlap: float = 10,
-                           min_confidence: float = 0.3) -> list:
-        """複数セグメントでの検索"""
+        # 音声検索実行
+        mimizam = create_mimizam_sqlite("video_search.db")
+        results = mimizam.search_song(temp_audio_path, min_confidence)
         
-        # 動画情報取得
-        video_info = self.video_system.processor.get_video_info(query_video_path)
-        total_duration = video_info.get('duration', 0)
-        
-        # セグメント分割
-        segments = []
-        current_time = 0
-        
-        while current_time < total_duration:
-            segment_end = min(current_time + segment_duration, total_duration)
-            segments.append({
-                'start': current_time,
-                'duration': segment_end - current_time
-            })
-            current_time += segment_duration - overlap
-        
-        print(f"セグメント数: {len(segments)}")
-        
-        # 各セグメントで検索実行
-        all_results = []
-        for i, segment in enumerate(segments):
-            print(f"セグメント {i+1}/{len(segments)} 検索中...")
-            
-            segment_results = self.search_with_time_range(
-                query_video_path,
-                segment['start'],
-                segment['duration'],
-                min_confidence
-            )
-            
-            # セグメント情報を追加
-            for result in segment_results:
-                result['segment_index'] = i
-                result['segment_info'] = segment
-            
-            all_results.extend(segment_results)
-        
-        # 結果の統合と重複除去
-        consolidated_results = self._consolidate_results(all_results)
-        
-        return consolidated_results
-    
-    def _consolidate_results(self, results: list) -> list:
-        """検索結果の統合"""
-        
-        # 楽曲IDでグループ化
-        grouped_results = {}
+        # 結果に時間情報を追加
+        enhanced_results = []
         for result in results:
-            song_id = result['song']['id']
-            if song_id not in grouped_results:
-                grouped_results[song_id] = []
-            grouped_results[song_id].append(result)
+            enhanced_result = result.copy()
+            enhanced_result['query_time_range'] = {
+                'start': start_time,
+                'duration': duration or 30,
+                'end': start_time + (duration or 30)
+            }
+            enhanced_results.append(enhanced_result)
         
-        # 各楽曲の最高信頼度結果を選択
-        consolidated = []
-        for song_id, song_results in grouped_results.items():
-            best_result = max(song_results, key=lambda x: x['confidence'])
-            
-            # セグメント情報をまとめる
-            segments = [r['segment_info'] for r in song_results]
-            best_result['matched_segments'] = segments
-            best_result['segment_count'] = len(segments)
-            
-            consolidated.append(best_result)
+        mimizam.close()
+        return enhanced_results
         
-        # 信頼度でソート
-        consolidated.sort(key=lambda x: x['confidence'], reverse=True)
+    except Exception as e:
+        print(f"時間範囲検索エラー: {e}")
+        return []
+    finally:
+        # 一時ファイルクリーンアップ
+        if os.path.exists(temp_audio_path):
+            os.remove(temp_audio_path)
+
+def multi_segment_video_search(query_video_path: str, segment_duration: float = 30,
+                              overlap: float = 10, min_confidence: float = 0.3):
+    """複数セグメントでの動画検索"""
+    
+    # 動画の長さを取得（簡易版）
+    try:
+        import subprocess
+        result = subprocess.run([
+            'ffprobe', '-v', 'quiet', '-show_entries', 'format=duration',
+            '-of', 'csv=p=0', query_video_path
+        ], capture_output=True, text=True)
+        total_duration = float(result.stdout.strip())
+    except:
+        print("動画の長さを取得できませんでした。デフォルト値を使用します。")
+        total_duration = 300  # 5分と仮定
+    
+    # セグメント分割
+    segments = []
+    current_time = 0
+    
+    while current_time < total_duration:
+        segment_end = min(current_time + segment_duration, total_duration)
+        segments.append({
+            'start': current_time,
+            'duration': segment_end - current_time
+        })
+        current_time += segment_duration - overlap
+    
+    print(f"セグメント数: {len(segments)}")
+    
+    # 各セグメントで検索実行
+    all_results = []
+    for i, segment in enumerate(segments):
+        print(f"セグメント {i+1}/{len(segments)} 検索中...")
         
-        return consolidated
+        segment_results = search_video_with_time_range(
+            query_video_path,
+            segment['start'],
+            segment['duration'],
+            min_confidence
+        )
+        
+        # セグメント情報を追加
+        for result in segment_results:
+            result['segment_index'] = i
+            result['segment_info'] = segment
+        
+        all_results.extend(segment_results)
+    
+    # 結果の統合と重複除去
+    consolidated_results = consolidate_search_results(all_results)
+    
+    return consolidated_results
+
+def consolidate_search_results(results: list) -> list:
+    """検索結果の統合"""
+    
+    # 楽曲IDでグループ化
+    grouped_results = {}
+    for result in results:
+        song_id = result['song']['id']
+        if song_id not in grouped_results:
+            grouped_results[song_id] = []
+        grouped_results[song_id].append(result)
+    
+    # 各楽曲の最高信頼度結果を選択
+    consolidated = []
+    for song_id, song_results in grouped_results.items():
+        best_result = max(song_results, key=lambda x: x['confidence'])
+        
+        # セグメント情報をまとめる
+        segments = [r.get('segment_info', {}) for r in song_results if 'segment_info' in r]
+        best_result['matched_segments'] = segments
+        best_result['segment_count'] = len(segments)
+        
+        consolidated.append(best_result)
+    
+    # 信頼度でソート
+    consolidated.sort(key=lambda x: x['confidence'], reverse=True)
+    
+    return consolidated
 
 # 使用例
-advanced_search = AdvancedVideoSearch(
-    database_config={'file_path': 'video_search.db'}
-)
 
 # 時間範囲指定検索
-results = advanced_search.search_with_time_range(
+results = search_video_with_time_range(
     "query_video.mp4",
     start_time=30,    # 30秒から
     duration=60,      # 60秒間
     min_confidence=0.4
 )
 
+print(f"時間範囲検索結果: {len(results)}件")
+for result in results:
+    song = result['song']
+    time_range = result['query_time_range']
+    print(f"マッチ: {song['title']} by {song['artist']}")
+    print(f"信頼度: {result['confidence']:.3f}")
+    print(f"検索範囲: {time_range['start']}-{time_range['end']}秒")
+
 # 複数セグメント検索
-multi_results = advanced_search.multi_segment_search(
+multi_results = multi_segment_video_search(
     "long_video.mp4",
     segment_duration=45,  # 45秒セグメント
     overlap=15,           # 15秒オーバーラップ
     min_confidence=0.3
 )
 
+print(f"\n複数セグメント検索結果: {len(multi_results)}件")
 for result in multi_results:
     song = result['song']
     print(f"マッチ: {song['title']} by {song['artist']}")
