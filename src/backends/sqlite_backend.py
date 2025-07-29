@@ -58,9 +58,6 @@ class SQLiteBackend(DatabaseBackend):
         try:
             cursor = self.connection.cursor()
             
-            cursor.execute("PRAGMA table_info(songs)")
-            existing_columns = [col[1] for col in cursor.fetchall()]
-            
             # 楽曲テーブル
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS songs (
@@ -72,14 +69,6 @@ class SQLiteBackend(DatabaseBackend):
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             """)
-            
-            if existing_columns and "meta" not in existing_columns:
-                try:
-                    cursor.execute("ALTER TABLE songs ADD COLUMN meta TEXT")
-                    self.logger.info("Added missing 'meta' column to songs table")
-                except Exception as e:
-                    if "duplicate column name" not in str(e).lower():
-                        self.logger.warning(f"Failed to add meta column: {e}")
             
             # フィンガープリントテーブル
             cursor.execute("""
