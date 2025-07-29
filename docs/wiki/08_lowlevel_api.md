@@ -491,36 +491,29 @@ import gc
 import psutil
 import os
 
-class MemoryOptimizer:
-    """メモリ使用量最適化"""
-    
-    def __init__(self):
-        self.process = psutil.Process(os.getpid())
-    
-    def get_memory_usage(self) -> Dict[str, float]:
-        """現在のメモリ使用量を取得"""
-        memory_info = self.process.memory_info()
-        return {
-            'rss': memory_info.rss / 1024 / 1024,  # MB
-            'vms': memory_info.vms / 1024 / 1024,  # MB
-            'percent': self.process.memory_percent()
-        }
-    
-    def optimize_memory(self):
-        """メモリ最適化実行"""
-        # ガベージコレクション実行
-        collected = gc.collect()
-        print(f"ガベージコレクション: {collected}個のオブジェクトを回収")
-        
-        # メモリ使用量の表示
-        memory = self.get_memory_usage()
-        print(f"メモリ使用量: RSS={memory['rss']:.1f}MB, VMS={memory['vms']:.1f}MB, {memory['percent']:.1f}%")
+def get_memory_usage():
+    """現在のメモリ使用量を取得"""
+    process = psutil.Process(os.getpid())
+    memory_info = process.memory_info()
+    return {
+        'rss': memory_info.rss / 1024 / 1024,  # MB
+        'vms': memory_info.vms / 1024 / 1024,  # MB
+        'percent': process.memory_percent()
+    }
 
-# メモリ最適化の使用
-optimizer = MemoryOptimizer()
+def optimize_memory():
+    """メモリ最適化実行"""
+    # ガベージコレクション実行
+    collected = gc.collect()
+    print(f"ガベージコレクション: {collected}個のオブジェクトを回収")
+    
+    # メモリ使用量の表示
+    memory = get_memory_usage()
+    print(f"メモリ使用量: RSS={memory['rss']:.1f}MB, VMS={memory['vms']:.1f}MB, {memory['percent']:.1f}%")
 
+# メモリ最適化の使用例
 print("処理前:")
-optimizer.optimize_memory()
+optimize_memory()
 
 # 大量データ処理
 for i in range(10):
@@ -529,10 +522,10 @@ for i in range(10):
     
     # 定期的なメモリ最適化
     if i % 3 == 0:
-        optimizer.optimize_memory()
+        optimize_memory()
 
 print("処理後:")
-optimizer.optimize_memory()
+optimize_memory()
 ```
 
 ## 🔗 関連ドキュメント

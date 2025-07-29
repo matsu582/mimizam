@@ -49,40 +49,37 @@ def compute_stft_detailed(audio, n_fft=2048, hop_length=512, window='hann'):
 
 #### パラメータ最適化
 ```python
-class STFTOptimizer:
-    """STFT パラメータ最適化"""
+def get_optimal_stft_params(audio: np.ndarray) -> dict:
+    """音声内容に応じたSTFTパラメータ最適化"""
     
-    def __init__(self):
-        self.optimization_profiles = {
-            'high_frequency_resolution': {
-                'n_fft': 4096,
-                'hop_length': 1024,
-                'window': 'blackman'
-            },
-            'high_time_resolution': {
-                'n_fft': 1024,
-                'hop_length': 256,
-                'window': 'hann'
-            },
-            'balanced': {
-                'n_fft': 2048,
-                'hop_length': 512,
-                'window': 'hann'
-            }
+    optimization_profiles = {
+        'high_frequency_resolution': {
+            'n_fft': 4096,
+            'hop_length': 1024,
+            'window': 'blackman'
+        },
+        'high_time_resolution': {
+            'n_fft': 1024,
+            'hop_length': 256,
+            'window': 'hann'
+        },
+        'balanced': {
+            'n_fft': 2048,
+            'hop_length': 512,
+            'window': 'hann'
         }
+    }
     
-    def optimize_for_content(self, audio: np.ndarray) -> dict:
-        """音声内容に応じた最適化"""
-        # 音声特性分析
-        spectral_centroid = librosa.feature.spectral_centroid(y=audio)[0]
-        tempo, _ = librosa.beat.beat_track(y=audio)
-        
-        if np.mean(spectral_centroid) > 3000:  # 高周波成分が多い
-            return self.optimization_profiles['high_frequency_resolution']
-        elif tempo > 140:  # 高速な楽曲
-            return self.optimization_profiles['high_time_resolution']
-        else:
-            return self.optimization_profiles['balanced']
+    # 音声特性分析
+    spectral_centroid = librosa.feature.spectral_centroid(y=audio)[0]
+    tempo, _ = librosa.beat.beat_track(y=audio)
+    
+    if np.mean(spectral_centroid) > 3000:  # 高周波成分が多い
+        return optimization_profiles['high_frequency_resolution']
+    elif tempo > 140:  # 高速な楽曲
+        return optimization_profiles['high_time_resolution']
+    else:
+        return optimization_profiles['balanced']
 ```
 
 ### 窓関数の選択と影響
@@ -299,58 +296,56 @@ class AdvancedHashGenerator:
 ### ハッシュ衝突対策
 
 ```python
-class HashCollisionManager:
-    """ハッシュ衝突管理"""
+def analyze_hash_distribution(fingerprints):
+    """ハッシュ分布分析"""
+    hash_counts = {}
     
-    def __init__(self):
-        self.collision_stats = {}
-        self.hash_distribution = {}
+    for fp in fingerprints:
+        hash_prefix = fp.hash_value[:8]  # 最初の8文字
+        hash_counts[hash_prefix] = hash_counts.get(hash_prefix, 0) + 1
     
-    def analyze_hash_distribution(self, fingerprints: List[Fingerprint]):
-        """ハッシュ分布分析"""
-        hash_counts = {}
-        
-        for fp in fingerprints:
-            hash_prefix = fp.hash_value[:8]  # 最初の8文字
-            hash_counts[hash_prefix] = hash_counts.get(hash_prefix, 0) + 1
-        
-        # 衝突率計算
-        total_hashes = len(fingerprints)
-        unique_prefixes = len(hash_counts)
-        collision_rate = 1 - (unique_prefixes / total_hashes)
-        
-        print(f"ハッシュ衝突率: {collision_rate:.3%}")
-        print(f"最大衝突数: {max(hash_counts.values())}")
-        
-        return hash_counts
+    # 衝突率計算
+    total_hashes = len(fingerprints)
+    unique_prefixes = len(hash_counts)
+    collision_rate = 1 - (unique_prefixes / total_hashes)
     
-    def optimize_hash_parameters(self, peaks: List[Peak]) -> dict:
-        """ハッシュパラメータ最適化"""
-        best_params = None
-        min_collision_rate = float('inf')
-        
-        # パラメータ候補
-        freq_tolerances = [25, 50, 100]
-        time_windows = [(1, 5), (1, 10), (2, 15)]
-        
-        for freq_tol in freq_tolerances:
-            for time_window in time_windows:
-                generator = AdvancedHashGenerator(
-                    target_zone_size=time_window,
-                    freq_tolerance=freq_tol
-                )
-                
-                fingerprints = generator.generate_robust_hashes(peaks)
-                collision_rate = self._calculate_collision_rate(fingerprints)
-                
-                if collision_rate < min_collision_rate:
-                    min_collision_rate = collision_rate
-                    best_params = {
-                        'freq_tolerance': freq_tol,
-                        'target_zone_size': time_window
-                    }
-        
-        return best_params
+    print(f"ハッシュ衝突率: {collision_rate:.3%}")
+    print(f"最大衝突数: {max(hash_counts.values())}")
+    
+    return hash_counts
+
+def optimize_hash_parameters(peaks):
+    """ハッシュパラメータ最適化"""
+    from mimizam import HashGenerator
+    
+    best_params = None
+    min_collision_rate = float('inf')
+    
+    # パラメータ候補
+    freq_tolerances = [25, 50, 100]
+    time_windows = [(1, 5), (1, 10), (2, 15)]
+    
+    for freq_tol in freq_tolerances:
+        for time_window in time_windows:
+            generator = HashGenerator()
+            
+            # 簡単な衝突率計算（実際の実装に合わせて調整）
+            fingerprints = generator.generate_hashes(peaks)
+            collision_rate = calculate_collision_rate(fingerprints)
+            
+            if collision_rate < min_collision_rate:
+                min_collision_rate = collision_rate
+                best_params = {
+                    'freq_tolerance': freq_tol,
+                    'target_zone_size': time_window
+                }
+    
+    return best_params
+
+def calculate_collision_rate(fingerprints):
+    """衝突率計算"""
+    hash_set = set(fp.hash_value for fp in fingerprints)
+    return 1 - (len(hash_set) / len(fingerprints))
 ```
 
 ## 🧠 適応的パラメータ調整

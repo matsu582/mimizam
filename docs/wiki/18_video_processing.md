@@ -219,64 +219,53 @@ print(f"抽出された音声: {audio_path}")
 
 ## 🎵 動画音声指紋生成
 
-### 統合動画処理システム
+### 動画音声指紋生成
 
 ```python
-class VideoFingerprintSystem:
-    """動画指紋システム"""
+from mimizam import create_mimizam_sqlite
+import subprocess
+import os
+
+def process_video_with_mimizam(video_path: str, title: str = None, artist: str = None):
+    """動画ファイルから音声を抽出してmimizamに追加"""
     
-    def __init__(self, database_config, temp_dir="./temp_video"):
-        self.processor = VideoProcessor()
-        self.temp_dir = temp_dir
-        
-        # mimizam初期化
-        from mimizam import create_mimizam_sqlite
-        self.mimizam = create_mimizam_sqlite(database_config['file_path'])
-        
-        # 処理統計
-        self.stats = {
-            'processed_videos': 0,
-            'extracted_audio_files': 0,
-            'generated_fingerprints': 0,
-            'processing_errors': 0
-        }
+    # メタデータの準備
+    if title is None:
+        title = os.path.splitext(os.path.basename(video_path))[0]
+    if artist is None:
+        artist = "Unknown Creator"
     
-    def process_video_file(self, video_path: str, title: str = None, 
-                          artist: str = None) -> str:
-        """動画ファイルを処理して指紋を生成"""
+    # 一時音声ファイルのパス
+    temp_audio_path = f"temp_{os.path.basename(video_path)}.wav"
+    
+    try:
+        # FFmpegで音声抽出
+        cmd = [
+            'ffmpeg',
+            '-i', video_path,
+            '-vn',                    # 動画ストリーム無視
+            '-acodec', 'pcm_s16le',   # 音声コーデック
+            '-ar', '22050',           # サンプルレート
+            '-ac', '1',               # モノラル
+            '-y',                     # 上書き許可
+            temp_audio_path
+        ]
         
-        try:
-            # 動画情報取得
-            video_info = self.processor.get_video_info(video_path)
-            
-            # メタデータの準備
-            if title is None:
-                title = os.path.splitext(os.path.basename(video_path))[0]
-            if artist is None:
-                artist = "Unknown Creator"
-            
-            # 音声抽出
-            audio_path = self.processor.extract_audio(video_path)
-            self.stats['extracted_audio_files'] += 1
-            
-            # 楽曲として追加（音声指紋生成を含む）
-            song_id = self.mimizam.add_song(
-                file_path=audio_path,
-                title=title,
-                artist=artist
-            )
-            
-            # メタデータに動画情報を追加
-            self._update_song_metadata(song_id, video_info, video_path)
-            
-            self.stats['processed_videos'] += 1
-            print(f"動画処理完了: {title} (ID: {song_id})")
-            
-            # 一時ファイルのクリーンアップ
-            if os.path.exists(audio_path):
-                os.remove(audio_path)
-            
-            return song_id
+        subprocess.run(cmd, capture_output=True, check=True)
+        
+        # mimizamに楽曲として追加
+        mimizam = create_mimizam_sqlite("video_music.db")
+        song_id = mimizam.add_song(temp_audio_path, title, artist)
+        
+        print(f"動画処理完了: {title} (ID: {song_id})")
+        
+        mimizam.close()
+        return song_id
+        
+    finally:
+        # 一時ファイルのクリーンアップ
+        if os.path.exists(temp_audio_path):
+            os.remove(temp_audio_path)
             
         except Exception as e:
             self.stats['processing_errors'] += 1

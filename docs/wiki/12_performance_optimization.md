@@ -291,41 +291,25 @@ import multiprocessing as mp
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 import os
 
-class ParallelProcessor:
-    """並列処理最適化"""
+def process_audio_files_parallel(audio_files: list, max_workers: int = None):
+    """音声ファイルの並列処理"""
     
-    def __init__(self, max_workers: int = None):
-        self.max_workers = max_workers or os.cpu_count()
-        self.process_pool = None
-        self.thread_pool = None
+    if max_workers is None:
+        max_workers = os.cpu_count()
     
-    def __enter__(self):
-        self.process_pool = ProcessPoolExecutor(max_workers=self.max_workers)
-        self.thread_pool = ThreadPoolExecutor(max_workers=self.max_workers * 2)
-        return self
+    from mimizam import AudioFingerprinter
     
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        if self.process_pool:
-            self.process_pool.shutdown(wait=True)
-        if self.thread_pool:
-            self.thread_pool.shutdown(wait=True)
+    def process_single_file(file_path: str):
+        """単一ファイルの処理"""
+        import librosa
+        fingerprinter = AudioFingerprinter(enable_numba_optimization=True)
+        audio, sr = librosa.load(file_path, sr=22050)
+        return fingerprinter.fingerprint_audio(audio)
     
-    def process_audio_files_parallel(self, audio_files: List[str], 
-                                   fingerprinter: AudioFingerprinter) -> List[List[Fingerprint]]:
-        """音声ファイルの並列処理"""
+    # 並列処理実行
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = [executor.submit(process_single_file, file_path) for file_path in audio_files]
         
-        def process_single_file(file_path: str) -> List[Fingerprint]:
-            import librosa
-            audio, sr = librosa.load(file_path, sr=fingerprinter.spectrogram_analyzer.sr)
-            return fingerprinter.fingerprint_audio(audio)
-        
-        # プロセスプールで並列実行
-        futures = []
-        for file_path in audio_files:
-            future = self.process_pool.submit(process_single_file, file_path)
-            futures.append(future)
-        
-        # 結果の収集
         results = []
         for future in futures:
             try:
@@ -342,17 +326,13 @@ def parallel_processing_example():
     """並列処理の使用例"""
     
     audio_files = ["song1.wav", "song2.wav", "song3.wav", "song4.wav"]
-    fingerprinter = AudioFingerprinter(enable_numba_optimization=True)
     
-    with ParallelProcessor(max_workers=4) as processor:
-        # 並列音声処理
-        all_fingerprints = processor.process_audio_files_parallel(
-            audio_files, fingerprinter
-        )
-        
-        print(f"処理完了: {len(all_fingerprints)}ファイル")
-        for i, fingerprints in enumerate(all_fingerprints):
-            print(f"  ファイル{i+1}: {len(fingerprints)}個の指紋")
+    # 並列音声処理
+    all_fingerprints = process_audio_files_parallel(audio_files, max_workers=4)
+    
+    print(f"処理完了: {len(all_fingerprints)}ファイル")
+    for i, fingerprints in enumerate(all_fingerprints):
+        print(f"  ファイル{i+1}: {len(fingerprints)}個の指紋")
 ```
 
 ## 📊 パフォーマンス指標

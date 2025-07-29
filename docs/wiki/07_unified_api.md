@@ -556,57 +556,32 @@ import time
 import threading
 from queue import Queue
 
-class AudioMonitor:
-    def __init__(self, db_path: str):
-        self.mimizam = create_mimizam_sqlite(db_path)
-        self.audio_queue = Queue()
-        self.running = False
+def monitor_audio_files(db_path: str, audio_files: list):
+    """音声ファイルの監視と識別"""
     
-    def start_monitoring(self):
-        """監視開始"""
-        self.running = True
-        monitor_thread = threading.Thread(target=self._monitor_loop)
-        monitor_thread.start()
-        print("音声監視を開始しました")
+    mimizam = create_mimizam_sqlite(db_path)
     
-    def stop_monitoring(self):
-        """監視停止"""
-        self.running = False
-        self.mimizam.close()
-        print("音声監視を停止しました")
-    
-    def add_audio_for_identification(self, audio_path: str):
-        """識別対象音声を追加"""
-        self.audio_queue.put(audio_path)
-    
-    def _monitor_loop(self):
-        """監視ループ"""
-        while self.running:
-            if not self.audio_queue.empty():
-                audio_path = self.audio_queue.get()
-                try:
-                    identified = self.mimizam.identify_audio(audio_path)
-                    if identified:
-                        song, confidence = identified
-                        print(f"🎵 識別: {song.title} by {song.artist} (信頼度: {confidence:.2%})")
-                    else:
-                        print(f"❓ 未識別: {audio_path}")
-                except Exception as e:
-                    print(f"❌ エラー: {audio_path} - {e}")
+    for audio_path in audio_files:
+        try:
+            # 音声識別を実行
+            results = mimizam.search_song(audio_path)
             
-            time.sleep(0.1)  # CPU使用率を抑制
+            if results:
+                best_match = results[0]
+                song = best_match['song']
+                confidence = best_match['confidence']
+                print(f"🎵 識別: {song['title']} by {song['artist']} (信頼度: {confidence:.2%})")
+            else:
+                print(f"❓ 未識別: {audio_path}")
+                
+        except Exception as e:
+            print(f"❌ エラー: {audio_path} - {e}")
+    
+    mimizam.close()
 
 # 使用例
-monitor = AudioMonitor("my_library.db")
-monitor.start_monitoring()
-
-# 音声ファイルを監視対象に追加
-monitor.add_audio_for_identification("live_audio_1.wav")
-monitor.add_audio_for_identification("live_audio_2.wav")
-
-# 監視停止
-time.sleep(10)
-monitor.stop_monitoring()
+audio_files = ["live_audio_1.wav", "live_audio_2.wav", "query_audio.wav"]
+monitor_audio_files("my_library.db", audio_files)
 ```
 
 ## 🚨 エラーハンドリング

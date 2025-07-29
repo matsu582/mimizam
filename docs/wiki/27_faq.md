@@ -248,34 +248,36 @@ except mysql.connector.Error as e:
 ```python
 import gc
 
-class MemoryEfficientProcessor:
-    """メモリ効率的な処理器"""
+def process_large_dataset_efficiently(file_paths, batch_size=10):
+    """大規模データセットの効率的処理"""
     
-    def __init__(self):
-        self.batch_size = 10  # バッチサイズを調整
+    from mimizam import create_mimizam_sqlite
+    import librosa
     
-    def process_large_dataset(self, file_paths):
-        """大規模データセットの効率的処理"""
-        
-        for i in range(0, len(file_paths), self.batch_size):
-            batch = file_paths[i:i+self.batch_size]
-            
-            # バッチ処理
-            for file_path in batch:
-                self.process_single_file(file_path)
-            
-            # メモリクリーンアップ
-            gc.collect()
+    mimizam = create_mimizam_sqlite("large_dataset.db")
     
-    def process_single_file(self, file_path):
-        """単一ファイル処理"""
+    for i in range(0, len(file_paths), batch_size):
+        batch = file_paths[i:i+batch_size]
         
-        # 処理後は明示的に削除
-        audio = librosa.load(file_path)[0]
-        fingerprints = self.fingerprinter.fingerprint_audio(audio)
+        # バッチ処理
+        for file_path in batch:
+            try:
+                # ファイル名から情報を推測
+                title = os.path.splitext(os.path.basename(file_path))[0]
+                artist = "Unknown"
+                
+                # 楽曲を追加
+                song_id = mimizam.add_song(file_path, title, artist)
+                print(f"処理完了: {title} (ID: {song_id})")
+                
+            except Exception as e:
+                print(f"処理エラー {file_path}: {e}")
         
-        # 明示的な削除
-        del audio, fingerprints
+        # メモリクリーンアップ
+        gc.collect()
+        print(f"バッチ {i//batch_size + 1} 完了")
+    
+    mimizam.close()
 ```
 
 ## 🚀 パフォーマンス最適化
