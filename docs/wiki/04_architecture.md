@@ -372,41 +372,82 @@ USER_CONFIG = {
 final_config = merge_configs(DEFAULT_CONFIG, PROFILE_CONFIGS['balanced'], USER_CONFIG)
 ```
 
-## 📊 パフォーマンス考慮事項
+## 📊 パフォーマンス最適化
 
-### 処理フロー
+mimizamは音声指紋生成とマッチング処理において、以下の実装された最適化機能を提供します：
 
-mimizamは音声ファイル処理において、標準的なPython処理を行います：
+### Numba JIT最適化
 
-- **音声ファイル読み込み**: `librosa.load()`により音声ファイル全体をメモリに読み込み
-- **指紋生成**: スペクトログラム→ピーク検出→ハッシュ生成の順序で処理
-- **データベース保存**: 生成された指紋をデータベースに保存
+ピーク検出処理の高速化：
 
-### バッチ処理
+```python
+from mimizam import AudioFingerprinter
 
-複数ファイルの効率的な処理：
+# Numba JIT最適化を有効化
+fingerprinter = AudioFingerprinter(enable_numba_optimization=True)
+
+# 初回実行時に自動的にJITコンパイルが実行される
+fingerprints = fingerprinter.fingerprint_file("audio.wav")
+```
+
+**技術詳細:**
+- `_numba_optimized_peak_detection`関数でスペクトログラムピーク検出を高速化
+- 初期化時にダミーデータで事前コンパイルを実行し、実行時遅延を回避
+- `@njit(cache=True)`によるキャッシュ機能でコンパイル結果を再利用
+
+### 適応的パラメータ調整
+
+音声特性に基づく動的パラメータ最適化：
+
+```python
+from mimizam import AudioFingerprinter
+
+# 適応的パラメータ調整を有効化
+fingerprinter = AudioFingerprinter(enable_adaptive_params=True)
+
+# 音声特性を自動分析してパラメータを最適化
+fingerprints = fingerprinter.fingerprint_file("audio.wav", debug=True)
+```
+
+**最適化項目:**
+- 静寂比率に基づく振幅閾値調整
+- スペクトルエントロピーによる複雑度対応
+- テンポ検出による時間パラメータ調整
+- 音声継続時間による処理パラメータ最適化
+
+### パフォーマンス監視
+
+処理時間とリソース使用量の監視：
+
+```python
+from mimizam import AudioFingerprinter
+
+fingerprinter = AudioFingerprinter(enable_adaptive_params=True)
+
+# パフォーマンス監視が自動的に有効化される
+fingerprints = fingerprinter.fingerprint_file("audio.wav")
+
+# パフォーマンス統計を取得
+if fingerprinter.performance_monitor:
+    summary = fingerprinter.performance_monitor.get_performance_summary()
+    print(summary)
+```
+
+### データベース最適化
+
+SQLiteバックエンドでの最適化設定：
+
+- **WALモード**: 読み取り時のブロック回避
+- **メモリマップ**: 256MBメモリマップによる高速アクセス
+- **キャッシュ設定**: 64MBキャッシュサイズ
+- **バッチクエリ**: IN句を使用した効率的な検索
+- **複合インデックス**: ハッシュ値、楽曲ID、時間オフセットの複合インデックス
 
 ```python
 from mimizam import create_mimizam_sqlite
-import os
 
-def process_multiple_files(file_paths: list):
-    """複数ファイルのバッチ処理"""
-    
-    mimizam = create_mimizam_sqlite("batch_processing.db")
-    results = []
-    
-    for file_path in file_paths:
-        try:
-            # ファイル名から基本情報を推測
-            filename = os.path.splitext(os.path.basename(file_path))[0]
-            song_id = mimizam.add_song(file_path, filename, "Unknown")
-            results.append({'success': True, 'song_id': song_id, 'file_path': file_path})
-        except Exception as e:
-            results.append({'success': False, 'error': str(e), 'file_path': file_path})
-    
-    mimizam.close()
-    return results
+# 最適化設定は自動的に適用される
+mimizam = create_mimizam_sqlite("optimized.db")
 ```
 
 
@@ -567,9 +608,10 @@ def create_mimizam_redis(host: str = 'localhost', port: int = 6379,
 - 新しいバックエンドの容易な追加
 
 ### 3. 性能
-- 適応的パラメータ調整
-- メモリ効率的な処理
-- Numba JIT最適化
+- Numba JIT最適化によるピーク検出高速化
+- 適応的パラメータ調整による音声特性対応
+- パフォーマンス監視による処理時間追跡
+- データベース最適化による高速検索
 
 ### 4. 保守性
 - 明確なコード構造
