@@ -28,9 +28,7 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y ffmpeg docker.io
-          sudo systemctl start docker
-          sudo usermod -aG docker $USER
+          sudo apt-get install -y ffmpeg
       
       - name: Install dependencies
         run: |
