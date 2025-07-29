@@ -235,62 +235,38 @@ class PeakDensityController:
 ### アンカー・ターゲット方式
 
 ```python
-class AdvancedHashGenerator:
-    """高度なハッシュ生成器"""
+def generate_robust_hashes(peaks: List[Peak]) -> List[Fingerprint]:
+    """ロバストなハッシュ生成"""
+    from mimizam import HashGenerator
     
-    def __init__(self, target_zone_size=(1, 10), freq_tolerance=50):
-        self.target_zone_size = target_zone_size
-        self.freq_tolerance = freq_tolerance
+    # 実際のHashGeneratorを使用
+    generator = HashGenerator()
+    fingerprints = generator.generate_hashes(peaks)
     
-    def generate_robust_hashes(self, peaks: List[Peak]) -> List[Fingerprint]:
-        """ロバストなハッシュ生成"""
-        fingerprints = []
-        
-        for i, anchor in enumerate(peaks):
-            targets = self._find_optimal_targets(anchor, peaks[i+1:])
-            
-            for target in targets:
-                # 複数のハッシュ方式を組み合わせ
-                hash_variants = [
-                    self._generate_frequency_hash(anchor, target),
-                    self._generate_time_delta_hash(anchor, target),
-                    self._generate_combined_hash(anchor, target)
-                ]
-                
-                for hash_value in hash_variants:
-                    fingerprint = Fingerprint(
-                        hash_value=hash_value,
-                        time_offset=anchor.time
-                    )
-                    fingerprints.append(fingerprint)
-        
-        return self._deduplicate_fingerprints(fingerprints)
+    return fingerprints
+
+def analyze_hash_quality(peaks: List[Peak]) -> dict:
+    """ハッシュ品質分析"""
+    from mimizam import HashGenerator
+    import hashlib
     
-    def _generate_frequency_hash(self, anchor: Peak, target: Peak) -> str:
-        """周波数ベースハッシュ"""
-        freq_diff = int(target.frequency - anchor.frequency)
-        time_diff = int((target.time - anchor.time) * 1000)  # ms
-        
-        hash_input = f"freq:{anchor.frequency:.0f}:{freq_diff}:{time_diff}"
-        return hashlib.sha256(hash_input.encode()).hexdigest()
+    generator = HashGenerator()
+    fingerprints = generator.generate_hashes(peaks)
     
-    def _generate_time_delta_hash(self, anchor: Peak, target: Peak) -> str:
-        """時間差ベースハッシュ"""
-        time_ratio = target.time / (anchor.time + 1e-10)
-        freq_ratio = target.frequency / (anchor.frequency + 1e-10)
-        
-        hash_input = f"ratio:{time_ratio:.3f}:{freq_ratio:.3f}"
-        return hashlib.sha256(hash_input.encode()).hexdigest()
+    # 基本統計
+    analysis = {
+        'total_fingerprints': len(fingerprints),
+        'unique_hashes': len(set(fp.hash_value for fp in fingerprints)),
+        'time_span': max(fp.time_offset for fp in fingerprints) - min(fp.time_offset for fp in fingerprints) if fingerprints else 0
+    }
     
-    def _generate_combined_hash(self, anchor: Peak, target: Peak) -> str:
-        """組み合わせハッシュ"""
-        # 量子化された特徴量
-        anchor_freq_bin = int(anchor.frequency / 50)  # 50Hz bins
-        target_freq_bin = int(target.frequency / 50)
-        time_delta_bin = int((target.time - anchor.time) * 100)  # 10ms bins
-        
-        hash_input = f"combined:{anchor_freq_bin}:{target_freq_bin}:{time_delta_bin}"
-        return hashlib.sha256(hash_input.encode()).hexdigest()
+    # 衝突率計算
+    if analysis['total_fingerprints'] > 0:
+        analysis['collision_rate'] = 1 - (analysis['unique_hashes'] / analysis['total_fingerprints'])
+    else:
+        analysis['collision_rate'] = 0
+    
+    return analysis
 ```
 
 ### ハッシュ衝突対策

@@ -38,16 +38,8 @@ from typing import Dict, List, Tuple
 import psutil
 import gc
 
-class FingerprintPerformanceTester:
-    """指紋生成性能テスター"""
-    
-    def __init__(self):
-        self.results = {}
-        self.baseline_established = False
-        
-    def test_fingerprint_generation_speed(self, 
-                                        audio_durations: List[int] = None,
-                                        configurations: Dict = None) -> Dict:
+def test_fingerprint_generation_speed(audio_durations: list = None,
+                                    configurations: dict = None) -> dict:
         """指紋生成速度テスト"""
         
         if audio_durations is None:
@@ -125,10 +117,9 @@ class FingerprintPerformanceTester:
             
             results[config_name] = config_results
         
-        self.results['fingerprint_generation'] = results
         return results
     
-    def _generate_test_audio(self, duration: int) -> np.ndarray:
+def generate_test_audio(duration: int) -> np.ndarray:
         """テスト音声生成"""
         
         sample_rate = 22050
@@ -151,10 +142,8 @@ class FingerprintPerformanceTester:
         return audio
 
 # 使用例
-tester = FingerprintPerformanceTester()
-
 # 指紋生成速度テスト
-fingerprint_results = tester.test_fingerprint_generation_speed()
+fingerprint_results = test_fingerprint_generation_speed()
 
 print("パフォーマンステスト完了")
 ```
@@ -164,16 +153,9 @@ print("パフォーマンステスト完了")
 ### メモリリーク検出
 
 ```python
-class MemoryLeakTester:
-    """メモリリーク検出テスター"""
-    
-    def __init__(self):
-        self.memory_snapshots = []
-        
-    def test_memory_leak(self, 
-                        test_function,
-                        iterations: int = 100,
-                        snapshot_interval: int = 10) -> Dict:
+def test_memory_leak(test_function,
+                    iterations: int = 100,
+                    snapshot_interval: int = 10) -> dict:
         """メモリリークテスト"""
         
         import gc
@@ -245,8 +227,6 @@ class MemoryLeakTester:
         return results
 
 # 使用例
-memory_tester = MemoryLeakTester()
-
 def fingerprint_test():
     """指紋生成テスト関数"""
     from mimizam import AudioFingerprinter
@@ -262,7 +242,7 @@ def fingerprint_test():
     del fingerprints, audio, fingerprinter
 
 # メモリリークテスト実行
-leak_results = memory_tester.test_memory_leak(fingerprint_test, iterations=200, snapshot_interval=20)
+leak_results = test_memory_leak(fingerprint_test, iterations=200, snapshot_interval=20)
 
 print("=== メモリリークテスト結果 ===")
 print(f"リーク検出: {'あり' if leak_results['leak_detected'] else 'なし'}")

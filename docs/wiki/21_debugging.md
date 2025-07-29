@@ -39,45 +39,171 @@ import sys
 from typing import Dict, List, Any, Optional
 import time
 
-class DiagnosticTool:
-    """診断ツール"""
+def setup_debug_logging(log_level=logging.INFO):
+    """デバッグログ設定"""
+    import logging
+    import sys
     
-    def __init__(self, log_level=logging.INFO):
-        self.setup_logging(log_level)
-        self.logger = logging.getLogger(__name__)
-        self.diagnostic_results = {}
-        
-    def setup_logging(self, level):
-        """ログ設定"""
-        logging.basicConfig(
-            level=level,
-            format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-            handlers=[
-                logging.FileHandler('mimizam_debug.log'),
-                logging.StreamHandler(sys.stdout)
-            ]
-        )
+    logging.basicConfig(
+        level=log_level,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        handlers=[
+            logging.FileHandler('mimizam_debug.log'),
+            logging.StreamHandler(sys.stdout)
+        ]
+    )
     
-    def run_full_diagnostic(self) -> Dict[str, Any]:
-        """完全診断実行"""
+    return logging.getLogger(__name__)
+
+def run_system_diagnostic() -> dict:
+    """システム診断実行"""
+    import time
+    
+    logger = setup_debug_logging()
+    logger.info("=== mimizam システム診断開始 ===")
+    
+    results = {
+        'timestamp': time.strftime('%Y-%m-%d %H:%M:%S'),
+        'system_info': check_system_environment(),
+        'dependencies': check_dependencies(),
+        'audio_processing': test_audio_processing(),
+        'database_connectivity': test_database_connectivity(),
+        'performance_baseline': measure_performance_baseline(),
+        'recommendations': []
+    }
+    
+    # 問題の特定と推奨事項生成
+    results['recommendations'] = generate_recommendations(results)
+    
+    logger.info("=== システム診断完了 ===")
+    return results
+
+def check_system_environment() -> dict:
+    """システム環境チェック"""
+    import platform
+    import sys
+    
+    return {
+        'python_version': sys.version,
+        'platform': platform.platform(),
+        'architecture': platform.architecture()[0]
+    }
+
+def check_dependencies() -> dict:
+    """依存関係チェック"""
+    dependencies = {}
+    
+    try:
+        import numpy
+        dependencies['numpy'] = numpy.__version__
+    except ImportError:
+        dependencies['numpy'] = 'NOT_INSTALLED'
+    
+    try:
+        import librosa
+        dependencies['librosa'] = librosa.__version__
+    except ImportError:
+        dependencies['librosa'] = 'NOT_INSTALLED'
+    
+    try:
+        import numba
+        dependencies['numba'] = numba.__version__
+    except ImportError:
+        dependencies['numba'] = 'NOT_INSTALLED'
+    
+    return dependencies
+
+def test_audio_processing() -> dict:
+    """音声処理テスト"""
+    try:
+        from mimizam import AudioFingerprinter
+        import numpy as np
         
-        self.logger.info("=== mimizam システム診断開始 ===")
+        fingerprinter = AudioFingerprinter()
+        test_audio = np.random.randn(22050)  # 1秒のテスト音声
         
-        results = {
-            'timestamp': time.strftime('%Y-%m-%d %H:%M:%S'),
-            'system_info': self._check_system_environment(),
-            'dependencies': self._check_dependencies(),
-            'audio_processing': self._test_audio_processing(),
-            'database_connectivity': self._test_database_connectivity(),
-            'performance_baseline': self._measure_performance_baseline(),
-            'memory_analysis': self._analyze_memory_usage(),
-            'recommendations': []
+        fingerprints = fingerprinter.fingerprint_audio(test_audio)
+        
+        return {
+            'status': 'SUCCESS',
+            'fingerprint_count': len(fingerprints),
+            'error': None
         }
+    except Exception as e:
+        return {
+            'status': 'FAILED',
+            'fingerprint_count': 0,
+            'error': str(e)
+        }
+
+def test_database_connectivity() -> dict:
+    """データベース接続テスト"""
+    try:
+        from mimizam import create_mimizam_sqlite
         
-        # 問題の特定と推奨事項生成
-        results['recommendations'] = self._generate_recommendations(results)
+        mimizam = create_mimizam_sqlite(':memory:')
+        mimizam.close()
         
-        self.diagnostic_results = results
+        return {
+            'status': 'SUCCESS',
+            'error': None
+        }
+    except Exception as e:
+        return {
+            'status': 'FAILED',
+            'error': str(e)
+        }
+
+def measure_performance_baseline() -> dict:
+    """パフォーマンスベースライン測定"""
+    try:
+        from mimizam import PerformanceMonitor
+        import time
+        
+        monitor = PerformanceMonitor()
+        
+        start_time = time.time()
+        # 簡単な処理時間測定
+        time.sleep(0.1)
+        elapsed = time.time() - start_time
+        
+        metrics = monitor.get_metrics()
+        
+        return {
+            'status': 'SUCCESS',
+            'elapsed_time': elapsed,
+            'metrics': metrics
+        }
+    except Exception as e:
+        return {
+            'status': 'FAILED',
+            'error': str(e)
+        }
+
+def generate_recommendations(results: dict) -> list:
+    """推奨事項生成"""
+    recommendations = []
+    
+    # 依存関係チェック
+    deps = results.get('dependencies', {})
+    for dep, version in deps.items():
+        if version == 'NOT_INSTALLED':
+            recommendations.append(f"{dep}がインストールされていません")
+    
+    # 音声処理チェック
+    audio_test = results.get('audio_processing', {})
+    if audio_test.get('status') == 'FAILED':
+        recommendations.append(f"音声処理エラー: {audio_test.get('error')}")
+    
+    # データベース接続チェック
+    db_test = results.get('database_connectivity', {})
+    if db_test.get('status') == 'FAILED':
+        recommendations.append(f"データベース接続エラー: {db_test.get('error')}")
+    
+    if not recommendations:
+        recommendations.append("システムは正常に動作しています")
+    
+    return recommendations
         self.logger.info("=== システム診断完了 ===")
         
         return results

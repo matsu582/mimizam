@@ -72,57 +72,53 @@ print(f"生成された指紋数: {len(fingerprints)}")
 ### カスタムピーク検出
 
 ```python
-class CustomPeakDetector:
-    """カスタムピーク検出器"""
+def detect_custom_peaks(magnitude: np.ndarray, sr: int, hop_length: int, 
+                       min_amplitude: float = -50, neighborhood_size: int = 15) -> List[Peak]:
+    """カスタムピーク検出アルゴリズム"""
+    from mimizam import Peak
+    import numpy as np
     
-    def __init__(self, min_amplitude=-50, neighborhood_size=15):
-        self.min_amplitude = min_amplitude
-        self.neighborhood_size = neighborhood_size
+    peaks = []
     
-    def detect_peaks(self, magnitude: np.ndarray, sr: int, hop_length: int) -> List[Peak]:
-        """カスタムピーク検出アルゴリズム"""
-        peaks = []
-        
-        # 動的閾値の計算
-        local_mean = np.mean(magnitude, axis=0)
-        dynamic_threshold = np.percentile(local_mean, 75)  # 75パーセンタイル
-        
-        for t_idx in range(magnitude.shape[1]):
-            for f_idx in range(magnitude.shape[0]):
-                amplitude = magnitude[f_idx, t_idx]
-                
-                if amplitude > max(self.min_amplitude, dynamic_threshold):
-                    # 近傍での局所最大値チェック
-                    if self._is_local_maximum(magnitude, f_idx, t_idx):
-                        time = t_idx * hop_length / sr
-                        frequency = f_idx * sr / (2 * magnitude.shape[0])
-                        
-                        peak = Peak(
-                            time=np.float64(time),
-                            frequency=np.float64(frequency),
-                            amplitude=np.float64(amplitude)
-                        )
-                        peaks.append(peak)
-        
-        return peaks
+    # 動的閾値の計算
+    local_mean = np.mean(magnitude, axis=0)
+    dynamic_threshold = np.percentile(local_mean, 75)  # 75パーセンタイル
     
-    def _is_local_maximum(self, magnitude: np.ndarray, f_idx: int, t_idx: int) -> bool:
-        """局所最大値判定"""
-        center_value = magnitude[f_idx, t_idx]
-        
-        # 近傍領域の定義
-        f_start = max(0, f_idx - self.neighborhood_size // 2)
-        f_end = min(magnitude.shape[0], f_idx + self.neighborhood_size // 2 + 1)
-        t_start = max(0, t_idx - self.neighborhood_size // 2)
-        t_end = min(magnitude.shape[1], t_idx + self.neighborhood_size // 2 + 1)
-        
-        # 近傍での最大値チェック
-        neighborhood = magnitude[f_start:f_end, t_start:t_end]
-        return center_value >= np.max(neighborhood)
+    for t_idx in range(magnitude.shape[1]):
+        for f_idx in range(magnitude.shape[0]):
+            amplitude = magnitude[f_idx, t_idx]
+            
+            if amplitude > max(min_amplitude, dynamic_threshold):
+                # 近傍での局所最大値チェック
+                if is_local_maximum(magnitude, f_idx, t_idx, neighborhood_size):
+                    time = t_idx * hop_length / sr
+                    frequency = f_idx * sr / (2 * magnitude.shape[0])
+                    
+                    peak = Peak(
+                        time=np.float64(time),
+                        frequency=np.float64(frequency),
+                        amplitude=np.float64(amplitude)
+                    )
+                    peaks.append(peak)
+    
+    return peaks
+
+def is_local_maximum(magnitude: np.ndarray, f_idx: int, t_idx: int, neighborhood_size: int) -> bool:
+    """局所最大値判定"""
+    center_value = magnitude[f_idx, t_idx]
+    
+    # 近傍領域の定義
+    f_start = max(0, f_idx - neighborhood_size // 2)
+    f_end = min(magnitude.shape[0], f_idx + neighborhood_size // 2 + 1)
+    t_start = max(0, t_idx - neighborhood_size // 2)
+    t_end = min(magnitude.shape[1], t_idx + neighborhood_size // 2 + 1)
+    
+    # 近傍での最大値チェック
+    neighborhood = magnitude[f_start:f_end, t_start:t_end]
+    return center_value >= np.max(neighborhood)
 
 # カスタム検出器の使用
-custom_detector = CustomPeakDetector(min_amplitude=-55, neighborhood_size=20)
-custom_peaks = custom_detector.detect_peaks(magnitude, sr, hop_length)
+custom_peaks = detect_custom_peaks(magnitude, sr, hop_length, min_amplitude=-55, neighborhood_size=20)
 
 print(f"カスタム検出器によるピーク数: {len(custom_peaks)}")
 ```

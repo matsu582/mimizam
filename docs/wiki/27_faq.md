@@ -357,16 +357,23 @@ def optimize_sqlite_database(db_path):
 ```python
 from functools import lru_cache
 
-class CachedMimizam:
-    """キャッシュ機能付きmimizam"""
+@lru_cache(maxsize=1000)
+def cached_search(mimizam, audio_hash):
+    """キャッシュ付き検索"""
+    return mimizam.search_fingerprints(audio_hash)
+
+def setup_cached_mimizam(mimizam):
+    """キャッシュ機能付きmimizam設定"""
     
-    def __init__(self, mimizam):
-        self.mimizam = mimizam
+    def search_with_cache(audio_file):
+        # 音声ファイルのハッシュを生成
+        import hashlib
+        with open(audio_file, 'rb') as f:
+            audio_hash = hashlib.md5(f.read()).hexdigest()
+        
+        return cached_search(mimizam, audio_hash)
     
-    @lru_cache(maxsize=1000)
-    def cached_search(self, audio_hash):
-        """キャッシュ付き検索"""
-        return self.mimizam.search_fingerprints(audio_hash)
+    return search_with_cache
 ```
 
 ## 🔄 データ管理
@@ -573,10 +580,29 @@ fingerprints = fingerprinter.fingerprint_audio(audio)
 import signal
 import time
 
-class TimeoutHandler:
-    """タイムアウトハンドラー"""
+def setup_timeout_handler(timeout_seconds=30):
+    """タイムアウトハンドラーの設定"""
     
-    def __init__(self, timeout_seconds=30):
+    def timeout_handler(signum, frame):
+        raise TimeoutError(f"処理がタイムアウトしました ({timeout_seconds}秒)")
+    
+    def with_timeout(func):
+        """タイムアウト付き関数実行"""
+        def wrapper(*args, **kwargs):
+            # タイムアウト設定
+            signal.signal(signal.SIGALRM, timeout_handler)
+            signal.alarm(timeout_seconds)
+            
+            try:
+                result = func(*args, **kwargs)
+                return result
+            finally:
+                # タイムアウト解除
+                signal.alarm(0)
+        
+        return wrapper
+    
+    return with_timeout
         self.timeout_seconds = timeout_seconds
     
     def __enter__(self):

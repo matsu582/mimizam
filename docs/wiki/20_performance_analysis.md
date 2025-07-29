@@ -644,158 +644,97 @@ print(report)
 ### パフォーマンスグラフ生成
 
 ```python
-class PerformanceVisualizer:
-    """パフォーマンス可視化"""
+def create_performance_dashboard(analysis_results: dict, 
+                               output_dir: str = "./performance_charts") -> list:
+    """パフォーマンスダッシュボード作成"""
+    import matplotlib.pyplot as plt
+    import os
     
-    def __init__(self):
-        self.figures = []
+    os.makedirs(output_dir, exist_ok=True)
+    chart_files = []
     
-    def create_performance_dashboard(self, analysis_results: Dict, 
-                                   output_dir: str = "./performance_charts") -> List[str]:
-        """パフォーマンスダッシュボード作成"""
-        
-        import os
-        os.makedirs(output_dir, exist_ok=True)
-        
-        chart_files = []
-        
-        # 1. 処理時間比較チャート
-        processing_chart = self._create_processing_time_chart(
-            analysis_results, 
-            os.path.join(output_dir, "processing_times.png")
-        )
-        chart_files.append(processing_chart)
-        
-        # 2. メモリ使用量チャート
-        memory_chart = self._create_memory_usage_chart(
-            analysis_results,
-            os.path.join(output_dir, "memory_usage.png")
-        )
-        chart_files.append(memory_chart)
-        
-        # 3. スループット比較チャート
-        throughput_chart = self._create_throughput_chart(
-            analysis_results,
-            os.path.join(output_dir, "throughput.png")
-        )
-        chart_files.append(throughput_chart)
-        
-        # 4. 設定別性能レーダーチャート
-        radar_chart = self._create_radar_chart(
-            analysis_results,
-            os.path.join(output_dir, "performance_radar.png")
-        )
-        chart_files.append(radar_chart)
-        
-        return chart_files
+    # 1. 処理時間比較チャート
+    processing_chart = create_processing_time_chart(
+        analysis_results, 
+        os.path.join(output_dir, "processing_times.png")
+    )
+    chart_files.append(processing_chart)
     
-    def _create_processing_time_chart(self, results: Dict, output_path: str) -> str:
-        """処理時間比較チャート"""
-        
-        plt.figure(figsize=(12, 6))
-        
-        config_names = []
-        mean_times = []
-        std_times = []
-        
-        for config_name, config_data in results['configurations'].items():
-            if 'statistics' in config_data and 'processing_times' in config_data['statistics']:
-                stats = config_data['statistics']['processing_times']
-                config_names.append(config_name)
-                mean_times.append(stats['mean'])
-                std_times.append(stats['std'])
-        
-        if config_names:
-            bars = plt.bar(config_names, mean_times, yerr=std_times, capsize=5)
-            plt.title('設定別処理時間比較', fontsize=14, fontweight='bold')
-            plt.xlabel('設定名')
-            plt.ylabel('処理時間 (秒)')
-            plt.xticks(rotation=45)
-            
-            # 値をバーの上に表示
-            for bar, mean_time in zip(bars, mean_times):
-                plt.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.01,
-                        f'{mean_time:.3f}s', ha='center', va='bottom')
-        
-        plt.tight_layout()
-        plt.savefig(output_path, dpi=300, bbox_inches='tight')
-        plt.close()
-        
-        return output_path
+    # 2. メモリ使用量チャート
+    memory_chart = create_memory_usage_chart(
+        analysis_results,
+        os.path.join(output_dir, "memory_usage.png")
+    )
+    chart_files.append(memory_chart)
     
-    def _create_memory_usage_chart(self, results: Dict, output_path: str) -> str:
-        """メモリ使用量チャート"""
-        
-        plt.figure(figsize=(12, 6))
-        
-        config_names = []
-        memory_usage = []
-        
-        for config_name, config_data in results['configurations'].items():
-            if 'statistics' in config_data and 'memory_usage' in config_data['statistics']:
-                stats = config_data['statistics']['memory_usage']
-                config_names.append(config_name)
-                memory_usage.append(stats['mean'])
-        
-        if config_names:
-            bars = plt.bar(config_names, memory_usage, color='lightcoral')
-            plt.title('設定別メモリ使用量比較', fontsize=14, fontweight='bold')
-            plt.xlabel('設定名')
-            plt.ylabel('メモリ使用量 (MB)')
-            plt.xticks(rotation=45)
-            
-            # 値をバーの上に表示
-            for bar, memory in zip(bars, memory_usage):
-                plt.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.5,
-                        f'{memory:.1f}MB', ha='center', va='bottom')
-        
-        plt.tight_layout()
-        plt.savefig(output_path, dpi=300, bbox_inches='tight')
-        plt.close()
-        
-        return output_path
+    return chart_files
+
+def create_processing_time_chart(results: dict, output_path: str) -> str:
+    """処理時間比較チャート"""
+    import matplotlib.pyplot as plt
     
-    def _create_throughput_chart(self, results: Dict, output_path: str) -> str:
-        """スループット比較チャート"""
+    plt.figure(figsize=(12, 6))
+    
+    config_names = []
+    mean_times = []
+    
+    for config_name, config_data in results.get('configurations', {}).items():
+        if 'processing_times' in config_data:
+            config_names.append(config_name)
+            mean_times.append(sum(config_data['processing_times']) / len(config_data['processing_times']))
+    
+    if config_names:
+        bars = plt.bar(config_names, mean_times)
+        plt.title('設定別処理時間比較', fontsize=14, fontweight='bold')
+        plt.xlabel('設定名')
+        plt.ylabel('処理時間 (秒)')
+        plt.xticks(rotation=45)
         
-        plt.figure(figsize=(12, 6))
+        # 値をバーの上に表示
+        for bar, mean_time in zip(bars, mean_times):
+            plt.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.01,
+                    f'{mean_time:.3f}s', ha='center', va='bottom')
+    
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=300, bbox_inches='tight')
+    plt.close()
+    
+    return output_path
+
+def create_memory_usage_chart(results: dict, output_path: str) -> str:
+    """メモリ使用量チャート"""
+    import matplotlib.pyplot as plt
+    
+    plt.figure(figsize=(12, 6))
+    
+    config_names = []
+    memory_usage = []
+    
+    for config_name, config_data in results.get('configurations', {}).items():
+        if 'memory_usage' in config_data:
+            config_names.append(config_name)
+            memory_usage.append(sum(config_data['memory_usage']) / len(config_data['memory_usage']))
+    
+    if config_names:
+        bars = plt.bar(config_names, memory_usage, color='lightcoral')
+        plt.title('設定別メモリ使用量比較', fontsize=14, fontweight='bold')
+        plt.xlabel('設定名')
+        plt.ylabel('メモリ使用量 (MB)')
+        plt.xticks(rotation=45)
         
-        config_names = []
-        throughput_values = []
-        
-        for config_name, config_data in results['configurations'].items():
-            if 'statistics' in config_data and 'throughput' in config_data['statistics']:
-                stats = config_data['statistics']['throughput']
-                config_names.append(config_name)
-                throughput_values.append(stats['mean'])
-        
-        if config_names:
-            bars = plt.bar(config_names, throughput_values, color='lightgreen')
-            plt.title('設定別スループット比較', fontsize=14, fontweight='bold')
-            plt.xlabel('設定名')
-            plt.ylabel('スループット (実時間比)')
-            plt.xticks(rotation=45)
-            
-            # 実時間ラインを追加
-            plt.axhline(y=1.0, color='red', linestyle='--', alpha=0.7, label='実時間')
-            plt.legend()
-            
-            # 値をバーの上に表示
-            for bar, throughput in zip(bars, throughput_values):
-                plt.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.05,
-                        f'{throughput:.2f}x', ha='center', va='bottom')
-        
-        plt.tight_layout()
-        plt.savefig(output_path, dpi=300, bbox_inches='tight')
-        plt.close()
-        
-        return output_path
+        # 値をバーの上に表示
+        for bar, memory in zip(bars, memory_usage):
+            plt.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.5,
+                    f'{memory:.1f}MB', ha='center', va='bottom')
+    
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=300, bbox_inches='tight')
+    plt.close()
+    
+    return output_path
 
 # 使用例
-visualizer = PerformanceVisualizer()
-
-# チャート生成
-chart_files = visualizer.create_performance_dashboard(results)
+chart_files = create_performance_dashboard(results)
 
 print("生成されたチャート:")
 for chart_file in chart_files:

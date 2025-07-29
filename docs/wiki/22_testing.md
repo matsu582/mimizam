@@ -293,114 +293,154 @@ class TestEndToEnd(unittest.TestCase):
                 os.unlink(temp_file.name)
 
 # 使用例
-class MimizamTestRunner:
-    """mimizam専用テストランナー"""
+def setup_test_logging():
+    """テストログ設定"""
+    import logging
     
-    def __init__(self):
-        self.test_results = {}
-        self.setup_logging()
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        handlers=[
+            logging.FileHandler('test_results.log'),
+            logging.StreamHandler()
+        ]
+    )
     
-    def setup_logging(self):
-        """ログ設定"""
-        import logging
-        logging.basicConfig(
-            level=logging.INFO,
-            format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-            handlers=[
-                logging.FileHandler('test_results.log'),
-                logging.StreamHandler()
-            ]
-        )
-        self.logger = logging.getLogger(__name__)
+    return logging.getLogger(__name__)
+
+def run_mimizam_tests(include_containers=False, include_performance=False):
+    """mimizamテスト実行"""
+    import unittest
+    import time
     
-    def run_all_tests(self, include_containers=False, include_performance=False):
-        """全テスト実行"""
-        
-        self.logger.info("=== mimizam テストスイート実行開始 ===")
-        
-        # 基本テスト
-        self.test_results['unit'] = self._run_unit_tests()
-        self.test_results['integration'] = self._run_integration_tests()
-        
-        # オプションテスト
-        if include_containers:
-            self.test_results['containers'] = self._run_container_tests()
-        
-        if include_performance:
-            self.test_results['performance'] = self._run_performance_tests()
-        
-        # レポート生成
-        report = self._generate_test_report()
-        
-        self.logger.info("=== テストスイート実行完了 ===")
-        
-        return report
+    logger = setup_test_logging()
+    logger.info("=== mimizam テストスイート実行開始 ===")
     
-    def _run_unit_tests(self):
-        """単体テスト実行"""
-        self.logger.info("単体テスト実行中...")
-        
-        suite = unittest.TestSuite()
-        suite.addTest(unittest.makeSuite(TestAudioFingerprinter))
-        suite.addTest(unittest.makeSuite(TestFingerprintDatabase))
-        
-        runner = unittest.TextTestRunner(stream=open(os.devnull, 'w'))
-        result = runner.run(suite)
-        
-        return {
-            'tests_run': result.testsRun,
-            'failures': len(result.failures),
-            'errors': len(result.errors),
-            'success_rate': (result.testsRun - len(result.failures) - len(result.errors)) / result.testsRun * 100
-        }
+    test_results = {}
     
-    def _generate_test_report(self):
-        """テストレポート生成"""
-        
-        report = []
-        report.append("=" * 60)
-        report.append("mimizam テスト実行レポート")
-        report.append("=" * 60)
-        report.append(f"実行日時: {time.strftime('%Y-%m-%d %H:%M:%S')}")
+    # 基本テスト
+    test_results['unit'] = run_unit_tests()
+    test_results['integration'] = run_integration_tests()
+    
+    # オプションテスト
+    if include_containers:
+        test_results['containers'] = run_container_tests()
+    
+    if include_performance:
+        test_results['performance'] = run_performance_tests()
+    
+    # レポート生成
+    report = generate_test_report(test_results)
+    
+    logger.info("=== テストスイート実行完了 ===")
+    
+    return report
+
+def run_unit_tests():
+    """単体テスト実行"""
+    import unittest
+    import os
+    
+    logger = setup_test_logging()
+    logger.info("単体テスト実行中...")
+    
+    suite = unittest.TestSuite()
+    suite.addTest(unittest.makeSuite(TestAudioFingerprinter))
+    suite.addTest(unittest.makeSuite(TestFingerprintDatabase))
+    
+    runner = unittest.TextTestRunner(stream=open(os.devnull, 'w'))
+    result = runner.run(suite)
+    
+    return {
+        'tests_run': result.testsRun,
+        'failures': len(result.failures),
+        'errors': len(result.errors),
+        'success_rate': (result.testsRun - len(result.failures) - len(result.errors)) / result.testsRun * 100 if result.testsRun > 0 else 0
+    }
+
+def run_integration_tests():
+    """統合テスト実行"""
+    import unittest
+    
+    suite = unittest.TestSuite()
+    suite.addTest(unittest.makeSuite(TestMimizamIntegration))
+    
+    runner = unittest.TextTestRunner(stream=open(os.devnull, 'w'))
+    result = runner.run(suite)
+    
+    return {
+        'tests_run': result.testsRun,
+        'failures': len(result.failures),
+        'errors': len(result.errors),
+        'success_rate': (result.testsRun - len(result.failures) - len(result.errors)) / result.testsRun * 100 if result.testsRun > 0 else 0
+    }
+
+def run_container_tests():
+    """コンテナテスト実行"""
+    # 簡易実装
+    return {
+        'tests_run': 0,
+        'failures': 0,
+        'errors': 0,
+        'success_rate': 100
+    }
+
+def run_performance_tests():
+    """パフォーマンステスト実行"""
+    # 簡易実装
+    return {
+        'tests_run': 0,
+        'failures': 0,
+        'errors': 0,
+        'success_rate': 100
+    }
+
+def generate_test_report(test_results: dict):
+    """テストレポート生成"""
+    import time
+    
+    report = []
+    report.append("=" * 60)
+    report.append("mimizam テスト実行レポート")
+    report.append("=" * 60)
+    report.append(f"実行日時: {time.strftime('%Y-%m-%d %H:%M:%S')}")
+    report.append("")
+    
+    total_tests = 0
+    total_failures = 0
+    total_errors = 0
+    
+    for test_type, results in test_results.items():
+        report.append(f"【{test_type.upper()}テスト】")
+        report.append(f"  実行数: {results['tests_run']}")
+        report.append(f"  失敗数: {results['failures']}")
+        report.append(f"  エラー数: {results['errors']}")
+        report.append(f"  成功率: {results['success_rate']:.1f}%")
         report.append("")
         
-        total_tests = 0
-        total_failures = 0
-        total_errors = 0
-        
-        for test_type, results in self.test_results.items():
-            report.append(f"【{test_type.upper()}テスト】")
-            report.append(f"  実行数: {results['tests_run']}")
-            report.append(f"  失敗数: {results['failures']}")
-            report.append(f"  エラー数: {results['errors']}")
-            report.append(f"  成功率: {results['success_rate']:.1f}%")
-            report.append("")
-            
-            total_tests += results['tests_run']
-            total_failures += results['failures']
-            total_errors += results['errors']
-        
-        # 全体サマリー
-        overall_success_rate = (total_tests - total_failures - total_errors) / total_tests * 100 if total_tests > 0 else 0
-        
-        report.append("【全体サマリー】")
-        report.append(f"  総テスト数: {total_tests}")
-        report.append(f"  成功: {total_tests - total_failures - total_errors}")
-        report.append(f"  失敗: {total_failures}")
-        report.append(f"  エラー: {total_errors}")
-        report.append(f"  全体成功率: {overall_success_rate:.1f}%")
-        
-        report.append("")
-        report.append("=" * 60)
-        
-        return "\n".join(report)
+        total_tests += results['tests_run']
+        total_failures += results['failures']
+        total_errors += results['errors']
+    
+    # 全体サマリー
+    overall_success_rate = (total_tests - total_failures - total_errors) / total_tests * 100 if total_tests > 0 else 0
+    
+    report.append("【全体サマリー】")
+    report.append(f"  総テスト数: {total_tests}")
+    report.append(f"  成功: {total_tests - total_failures - total_errors}")
+    report.append(f"  失敗: {total_failures}")
+    report.append(f"  エラー: {total_errors}")
+    report.append(f"  全体成功率: {overall_success_rate:.1f}%")
+    
+    report.append("")
+    report.append("=" * 60)
+    
+    return "\n".join(report)
 
 # 使用例
 if __name__ == '__main__':
-    runner = MimizamTestRunner()
-    
     # 基本テストのみ実行
-    report = runner.run_all_tests()
+    report = run_mimizam_tests()
     print(report)
 ```
 
