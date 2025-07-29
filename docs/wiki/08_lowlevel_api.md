@@ -199,9 +199,8 @@ def generate_robust_hashes(peaks: List[Peak], target_zone_size: int = 5,
         hash_input = f"amp:{amp_diff:.1f}:{time_diff:.3f}"
         return hashlib.sha256(hash_input.encode()).hexdigest()
 
-# 高度なハッシュ生成器の使用
-advanced_generator = AdvancedHashGenerator(target_zone_size=8, freq_tolerance=75)
-advanced_fingerprints = advanced_generator.generate_robust_hashes(peaks)
+# 高度なハッシュ生成の使用
+advanced_fingerprints = generate_robust_hashes(peaks, target_zone_size=8, freq_tolerance=75)
 
 print(f"高度なハッシュ生成による指紋数: {len(advanced_fingerprints)}")
 ```
