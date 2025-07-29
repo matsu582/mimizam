@@ -309,26 +309,14 @@ fast_fingerprinter = AudioFingerprinter(
 )
 ```
 
-**3. 並列処理**
+**3. パラメータ調整による高速化**
 ```python
-from concurrent.futures import ThreadPoolExecutor
-import os
-
-def parallel_processing(file_paths, max_workers=None):
-    """並列処理による高速化"""
-    
-    if max_workers is None:
-        max_workers = os.cpu_count()
-    
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = [
-            executor.submit(process_file, path) 
-            for path in file_paths
-        ]
-        
-        results = [future.result() for future in futures]
-    
-    return results
+# より高速な設定（精度とのトレードオフ）
+fast_fingerprinter = AudioFingerprinter(
+    n_fft=1024,        # 小さなFFTサイズ
+    hop_length=512,    # 大きなホップ長
+    enable_numba_optimization=True
+)
 ```
 
 ### Q14: 大規模データベースでの検索が遅いです
@@ -361,27 +349,18 @@ def optimize_sqlite_database(db_path):
     conn.close()
 ```
 
-**キャッシュ活用:**
+**データベース設定の最適化:**
 ```python
-from functools import lru_cache
+# SQLiteの場合、適切なデータベース設定を使用
+mimizam = create_mimizam_sqlite("optimized_music.db")
 
-@lru_cache(maxsize=1000)
-def cached_search(mimizam, audio_hash):
-    """キャッシュ付き検索"""
-    return mimizam.search_fingerprints(audio_hash)
-
-def setup_cached_mimizam(mimizam):
-    """キャッシュ機能付きmimizam設定"""
-    
-    def search_with_cache(audio_file):
-        # 音声ファイルのハッシュを生成
-        import hashlib
-        with open(audio_file, 'rb') as f:
-            audio_hash = hashlib.md5(f.read()).hexdigest()
-        
-        return cached_search(mimizam, audio_hash)
-    
-    return search_with_cache
+# 大量データの場合はMySQLを検討
+mimizam = create_mimizam_mysql(
+    host="localhost",
+    database="music_db",
+    username="user",
+    password="password"
+)
 ```
 
 ## 🔄 データ管理
@@ -430,43 +409,29 @@ def backup_mysql(host, database, username, password, output_file):
 
 ### Q16: データベース間でデータを移行するにはどうすればよいですか？
 
-**A:** 移行ツールを使用してください：
+**A:** 現在、mimizamには自動的なデータベース間移行機能はありません。手動でデータを移行する場合は、以下の手順を参考にしてください：
 
 ```python
-from mimizam.scripts.migrate_database import DatabaseMigrator
-from mimizam import DatabaseConfig
+# 移行元からデータを取得
+source_mimizam = create_mimizam_sqlite("source.db")
+songs = source_mimizam.list_songs()
 
-# 移行ツール初期化
-migrator = DatabaseMigrator()
-
-# 移行元設定
-source_config = DatabaseConfig(
-    backend='sqlite',
-    file_path='source.db'
+# 移行先に手動でデータを追加
+target_mimizam = create_mimizam_mysql(
+    host="localhost",
+    database="target_db",
+    username="user", 
+    password="password"
 )
 
-# 移行先設定
-target_config = DatabaseConfig(
-    backend='mysql',
-    host='localhost',
-    database='target_db',
-    username='user',
-    password='password'
-)
-
-# 移行実行
-import subprocess
-
-# スキーマ分析
-result = subprocess.run(['python', 'scripts/migrate_database.py', '--analyze'], 
-                       capture_output=True, text=True)
-
-# スキーマ移行実行
-result = subprocess.run(['python', 'scripts/migrate_database.py', '--migrate'], 
-                       capture_output=True, text=True)
+# 各楽曲を個別に追加
+for song in songs:
+    target_mimizam.add_song(
+        file_path=song['file_path'],
+        title=song['title'],
+        artist=song['artist']
+    )
 ```
-
-詳細は[データベース移行ツール](./19_migration_tools.md)を参照してください。
 
 ## 🎵 音声処理
 

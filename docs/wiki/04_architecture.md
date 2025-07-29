@@ -418,34 +418,28 @@ def process_large_audio_file(file_path: str, chunk_duration: int = 30):
     return all_fingerprints
 ```
 
-### 並列処理
+### バッチ処理
 
 複数ファイルの効率的な処理：
 
 ```python
-from concurrent.futures import ThreadPoolExecutor
 from mimizam import create_mimizam_sqlite
 import os
 
-def process_multiple_files(file_paths: list, max_workers: int = None):
-    """複数ファイルの並列処理"""
+def process_multiple_files(file_paths: list):
+    """複数ファイルのバッチ処理"""
     
-    if max_workers is None:
-        max_workers = min(len(file_paths), os.cpu_count())
+    mimizam = create_mimizam_sqlite("batch_processing.db")
+    results = []
     
-    mimizam = create_mimizam_sqlite("parallel_processing.db")
-    
-    def process_single_file(file_info):
-        file_path, title, artist = file_info
+    for file_path in file_paths:
         try:
-            song_id = mimizam.add_song(file_path, title, artist)
-            return {'success': True, 'song_id': song_id, 'file_path': file_path}
+            # ファイル名から基本情報を推測
+            filename = os.path.splitext(os.path.basename(file_path))[0]
+            song_id = mimizam.add_song(file_path, filename, "Unknown")
+            results.append({'success': True, 'song_id': song_id, 'file_path': file_path})
         except Exception as e:
-            return {'success': False, 'error': str(e), 'file_path': file_path}
-    
-    # 並列処理実行
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        results = list(executor.map(process_single_file, file_paths))
+            results.append({'success': False, 'error': str(e), 'file_path': file_path})
     
     mimizam.close()
     return results
@@ -539,7 +533,7 @@ def setup_custom_backend(backend_type: str):
 ### 3. 性能
 - 適応的パラメータ調整
 - メモリ効率的な処理
-- 並列処理対応
+- Numba JIT最適化
 
 ### 4. 保守性
 - 明確なコード構造
