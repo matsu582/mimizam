@@ -2,6 +2,7 @@
 
 from typing import List, Optional, Dict, Tuple
 from ..database_base import DatabaseBackend, DatabaseConfig, Song, Fingerprint
+from ..exceptions import ConnectionError, QueryError
 import json
 
 try:
@@ -43,7 +44,7 @@ class SQLiteBackend(DatabaseBackend):
             self.logger.info(f"Connected to SQLite database with optimization settings: {self.db_path}")
             return True
         except Exception as e:
-            self.logger.error(f"SQLite connection error: {e}")
+            self.logger.error(f"SQLite connection error: {e} | Context: {{'db_path': self.db_path}}")
             return False
     
     def disconnect(self) -> None:
@@ -120,7 +121,7 @@ class SQLiteBackend(DatabaseBackend):
             self.connection.commit()
             return True
         except Exception as e:
-            self.logger.error(f"SQLite song addition error: {e}")
+            self.logger.error(f"SQLite song addition error: {e} | Context: {{'song_id': '{song.id}'}}")
             return False
     
     def add_fingerprints(self, song_id: str, fingerprints: List[Fingerprint]) -> bool:
@@ -145,7 +146,7 @@ class SQLiteBackend(DatabaseBackend):
             self.connection.commit()
             return True
         except Exception as e:
-            self.logger.error(f"SQLite fingerprint addition error: {e}")
+            self.logger.error(f"SQLite fingerprint addition error: {e} | Context: {{'song_id': '{song_id}', 'count': {len(fingerprints)}}}")
             return False
     
     def search_fingerprints(self, query_fingerprints: List[Fingerprint]) -> Dict[str, List[Tuple[float, float]]]:
@@ -266,7 +267,7 @@ class SQLiteBackend(DatabaseBackend):
             self.connection.commit()
             return True
         except Exception as e:
-            self.logger.error(f"SQLite song deletion error: {e}")
+            self.logger.error(f"SQLite song deletion error: {e} | Context: {{'song_id': '{song_id}'}}")
             return False
 
     def get_fingerprints_by_song(self, song_id: str) -> List[Fingerprint]:

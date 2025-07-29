@@ -8,6 +8,7 @@ import logging
 
 # 共通データ構造とインターフェースのインポート
 from .database_base import DatabaseBackend, DatabaseConfig, Song
+from .exceptions import ConfigurationError
 
 # 各データベースバックエンドの実装をインポート
 try:
@@ -50,13 +51,15 @@ def create_database_backend(config: DatabaseConfig) -> DatabaseBackend:
     # バックエンドタイプの妥当性チェック
     if backend_type not in backend_map:
         supported_backends = [k for k, v in backend_map.items() if v is not None]
-        raise ValueError(f"Unsupported backend: {config.backend}. "
-                        f"Supported backends: {supported_backends}")
+        error_msg = f"Unsupported backend: {config.backend}. Supported backends: {supported_backends}"
+        logger.error(error_msg)
+        raise ConfigurationError(error_msg)
     
     # バックエンドクラスの利用可能性チェック
     if backend_class is None:
-        raise ImportError(f"{config.backend} backend implementation is not available. "
-                         f"Please check that required libraries are installed.")
+        error_msg = f"{config.backend} backend implementation is not available. Please check that required libraries are installed."
+        logger.error(error_msg)
+        raise ConfigurationError(error_msg)
     
     logger.info(f"Creating {config.backend} backend...")
     return backend_class(config)

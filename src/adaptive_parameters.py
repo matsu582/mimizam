@@ -2,6 +2,7 @@
 
 import numpy as np
 import librosa
+import logging
 try:
     from numba import njit
     NUMBA_AVAILABLE = True
@@ -34,6 +35,8 @@ class AdaptiveParameterTuner:
     
     def __init__(self):
         """適応的パラメータチューナーを初期化（JITコンパイルを事前実行）"""
+        self.logger = logging.getLogger(__name__)
+        
         # ダミーデータでJITコンパイルを事前実行
         if NUMBA_AVAILABLE:
             dummy_power = np.ones(128, dtype=np.float32)
@@ -219,6 +222,7 @@ class PerformanceMonitor:
     
     def __init__(self):
         """パフォーマンス監視器を初期化"""
+        self.logger = logging.getLogger(__name__)
         self.metrics = {}
         self.processing_times = []
         self.fingerprint_counts = []
