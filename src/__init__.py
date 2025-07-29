@@ -24,6 +24,16 @@ from .fingerprint_database import (
 )
 from .database_base import DatabaseConfig, Song, Fingerprint
 from .adaptive_parameters import AdaptiveParameterTuner, PerformanceMonitor
+from .exceptions import (
+    MimizamError,
+    DatabaseError, 
+    ConnectionError,
+    QueryError,
+    AudioProcessingError,
+    FingerprintGenerationError,
+    ConfigurationError,
+    ValidationError
+)
 
 __all__ = [
     'Mimizam',
@@ -45,5 +55,13 @@ __all__ = [
     'Song',
     'DatabaseConfig',
     'AdaptiveParameterTuner',
-    'PerformanceMonitor'
+    'PerformanceMonitor',
+    'MimizamError',
+    'DatabaseError',
+    'ConnectionError',
+    'QueryError',
+    'AudioProcessingError',
+    'FingerprintGenerationError',
+    'ConfigurationError',
+    'ValidationError'
 ]

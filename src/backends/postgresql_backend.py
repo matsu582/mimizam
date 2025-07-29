@@ -2,6 +2,7 @@
 
 from typing import List, Optional, Dict, Tuple
 from ..database_base import DatabaseBackend, DatabaseConfig, Song, Fingerprint
+from ..exceptions import ConnectionError, QueryError
 import json
 
 try:
@@ -69,7 +70,7 @@ class PostgreSQLBackend(DatabaseBackend):
             self.logger.info(f"Connected to PostgreSQL database: {self.config.host}:{self.config.port}")
             return True
         except PostgresError as e:
-            self.logger.error(f"PostgreSQL connection error: {e}")
+            self.logger.error(f"PostgreSQL connection error: {e} | Context: {{'host': self.config.host, 'port': self.config.port}}")
             return False
     
     def disconnect(self) -> None:
@@ -163,7 +164,7 @@ class PostgreSQLBackend(DatabaseBackend):
             """, (song.id, song.title, song.artist, song.file_path, meta_json))
             return True
         except PostgresError as e:
-            self.logger.error(f"PostgreSQL song addition error: {e}")
+            self.logger.error(f"PostgreSQL song addition error: {e} | Context: {{'song_id': song.id}}")
             return False
     
     def add_fingerprints(self, song_id: str, fingerprints: List[Fingerprint]) -> bool:
@@ -187,7 +188,7 @@ class PostgreSQLBackend(DatabaseBackend):
             
             return True
         except PostgresError as e:
-            self.logger.error(f"PostgreSQL fingerprint addition error: {e}")
+            self.logger.error(f"PostgreSQL fingerprint addition error: {e} | Context: {{'song_id': song_id, 'count': len(fingerprints)}}")
             return False
     
     def search_fingerprints(self, query_fingerprints: List[Fingerprint]) -> Dict[str, List[Tuple[float, float]]]:
@@ -304,7 +305,7 @@ class PostgreSQLBackend(DatabaseBackend):
             
             return True
         except PostgresError as e:
-            self.logger.error(f"PostgreSQL song deletion error: {e}")
+            self.logger.error(f"PostgreSQL song deletion error: {e} | Context: {{'song_id': song_id}}")
             return False
 
     def get_fingerprints_by_song(self, song_id: str) -> List[Fingerprint]:

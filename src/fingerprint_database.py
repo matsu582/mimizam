@@ -309,7 +309,7 @@ class FingerprintMatcher:
                     best_conf = conf
                     best_group = pairs
                     best_group_info = (t_scale, f_scale)
-            if best_group and best_conf >= self.min_confidence:
+            if best_group and best_conf >= self.min_confidence and best_group_info:
                 time_offset = self._calculate_time_offset(best_group)
                 alignment_ratio = self._calculate_alignment_ratio(best_group)
                 match_density = self._calculate_match_density(best_group)
@@ -397,7 +397,7 @@ class FingerprintMatcher:
         bin_width = max(0.05, min(bin_width, 1.0))  # 0.05-1.0秒の範囲で制限
         
         # 適応的レンジ設定
-        offset_range = max(10, np.std(offsets) * 4)
+        offset_range = max(10.0, float(np.std(offsets)) * 4)
         offset_mean = np.mean(offsets)
         
         bins = int((2 * offset_range) / bin_width)
@@ -405,8 +405,8 @@ class FingerprintMatcher:
         
         hist, bin_edges = np.histogram(offsets, 
                                      bins=bins, 
-                                     range=(offset_mean - offset_range, 
-                                           offset_mean + offset_range))
+                                     range=(float(offset_mean - offset_range), 
+                                           float(offset_mean + offset_range)))
         
         # ピーク検出とノイズ除去
         max_count = int(np.max(hist))
@@ -473,7 +473,7 @@ class FingerprintMatcher:
     
     def _process_scale_combination(self, query_fingerprints: List[Fingerprint],
                                  time_scale: float, freq_scale: float,
-                                 min_matches: int, best_results: Dict[str, Dict[str, Any]], song_id: str = None):
+                                 min_matches: int, best_results: Dict[str, Dict[str, Any]], song_id: Optional[str] = None):
         """
         特定のスケール組み合わせを処理
         
@@ -1029,10 +1029,10 @@ class FingerprintMatcher:
         
         # 軽量化されたビン幅計算
         std_dev = np.std(offsets)
-        bin_width = max(0.1, min(std_dev / 2, 0.5))  # 0.1-0.5秒の範囲
+        bin_width = max(0.1, min(float(std_dev) / 2, 0.5))  # 0.1-0.5秒の範囲
         
         # 適応的レンジ（軽量版）
-        offset_range = max(5, std_dev * 3)
+        offset_range = max(5.0, float(std_dev) * 3)
         offset_mean = np.mean(offsets)
         
         bins = int((2 * offset_range) / bin_width)
@@ -1040,8 +1040,8 @@ class FingerprintMatcher:
         
         hist, _ = np.histogram(offsets, 
                                      bins=bins, 
-                                     range=(offset_mean - offset_range, 
-                                           offset_mean + offset_range))
+                                     range=(float(offset_mean - offset_range), 
+                                           float(offset_mean + offset_range)))
         
         max_count = int(np.max(hist))
         max_bin_idx = int(np.argmax(hist))
