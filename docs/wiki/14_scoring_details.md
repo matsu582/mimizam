@@ -324,43 +324,38 @@ def confidence_threshold_analysis():
 ```python
 from mimizam import FingerprintMatcher
 
-class CustomScorer:
-    """カスタムスコアリング実装"""
+def calculate_custom_score(matches: list, query_duration: float, 
+                          weight_time: float = 0.4, weight_density: float = 0.4, 
+                          weight_consistency: float = 0.2) -> float:
+    """カスタムスコア計算"""
+    import numpy as np
     
-    def __init__(self, weight_time=0.4, weight_density=0.4, weight_consistency=0.2):
-        self.weight_time = weight_time
-        self.weight_density = weight_density
-        self.weight_consistency = weight_consistency
+    if not matches:
+        return 0.0
     
-    def calculate_score(self, matches: list, query_duration: float) -> float:
-        """カスタムスコア計算"""
-        if not matches:
-            return 0.0
-        
-        # 時間アライメントスコア
-        time_offsets = [m['time_offset'] for m in matches]
-        time_consistency = 1.0 / (1.0 + np.std(time_offsets))
-        
-        # マッチ密度スコア
-        match_density = len(matches) / query_duration
-        density_score = min(match_density / 10.0, 1.0)  # 正規化
-        
-        # 一貫性スコア
-        consistency_score = time_consistency
-        
-        # 重み付き統合
-        final_score = (
-            self.weight_time * time_consistency +
-            self.weight_density * density_score +
-            self.weight_consistency * consistency_score
-        )
-        
-        return min(final_score, 1.0)
+    # 時間アライメントスコア
+    time_offsets = [m['time_offset'] for m in matches]
+    time_consistency = 1.0 / (1.0 + np.std(time_offsets))
+    
+    # マッチ密度スコア
+    match_density = len(matches) / query_duration
+    density_score = min(match_density / 10.0, 1.0)  # 正規化
+    
+    # 一貫性スコア
+    consistency_score = time_consistency
+    
+    # 重み付き統合
+    final_score = (
+        weight_time * time_consistency +
+        weight_density * density_score +
+        weight_consistency * consistency_score
+    )
+    
+    return min(final_score, 1.0)
 
 # 使用例
 def custom_scoring_example():
     """カスタムスコアリングの使用例"""
-    scorer = CustomScorer(weight_time=0.5, weight_density=0.3, weight_consistency=0.2)
     
     # 低レベルAPIでカスタムスコアリングを使用
     from mimizam import FingerprintDatabase, create_sqlite_config
@@ -378,7 +373,8 @@ def custom_scoring_example():
         # カスタムスコアリング適用
         scored_results = []
         for song_id, matches in raw_matches.items():
-            score = scorer.calculate_score(matches, query_duration=30.0)
+            score = calculate_custom_score(matches, query_duration=30.0, 
+                                         weight_time=0.5, weight_density=0.3, weight_consistency=0.2)
             if score > 0.2:  # 閾値
                 song = db.get_song(song_id)
                 scored_results.append({
