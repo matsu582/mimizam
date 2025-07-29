@@ -17,12 +17,6 @@ jobs:
       matrix:
         python-version: [3.13]
     
-    # Docker サービスを有効化（testcontainers用）
-    services:
-      docker:
-        image: docker:dind
-        options: --privileged
-    
     steps:
       - uses: actions/checkout@v4
       
@@ -34,7 +28,9 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y ffmpeg
+          sudo apt-get install -y ffmpeg docker.io
+          sudo systemctl start docker
+          sudo usermod -aG docker $USER
       
       - name: Install dependencies
         run: |
@@ -46,6 +42,9 @@ jobs:
         env:
           # testcontainers用の環境変数設定
           TESTCONTAINERS_RYUK_DISABLED: true
-          DOCKER_HOST: unix:///var/run/docker.sock
+          TESTCONTAINERS_HOST_OVERRIDE: localhost
         run: |
+          # Docker デーモンが利用可能か確認
+          docker version
+          # テストを実行
           python -m unittest discover -s tests
