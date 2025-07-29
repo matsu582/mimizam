@@ -367,14 +367,14 @@ resource.setrlimit(resource.RLIMIT_AS, (2*1024*1024*1024, -1))  # 2GB制限
 ## 🔗 次のステップ
 
 - [基本的な使用方法](./03_basic_usage.md) - 基本的な使用パターン
-- [データベース設定](./10_database_setup.md) - データベース詳細設定
-- [実装例](./16_basic_examples.md) - 実践的なサンプルコード
-- [トラブルシューティング](./21_debugging.md) - 詳細なデバッグ情報
+- [データベース設定](./05_database_setup.md) - データベース詳細設定
+- [実装例](./06_basic_examples.md) - 実践的なサンプルコード
+- [FAQ](./07_faq.md) - よくある質問とトラブルシューティング
 
 ## 📞 サポート
 
 インストールに関する問題がある場合：
 
 1. [GitHub Issues](https://github.com/animalmatsuzawa/mimizam/issues) で問題を報告
-2. [テストスイート](./22_testing.md) で環境確認
-3. [FAQ](./27_faq.md) で既知の問題を確認
+2. 基本的な動作確認を実行
+3. [FAQ](./07_faq.md) で既知の問題を確認

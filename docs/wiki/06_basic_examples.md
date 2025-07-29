@@ -329,12 +329,10 @@ robust_audio_processing()
 
 ## 🔗 関連ドキュメント
 
-- [統合API](./07_unified_api.md) - Mimizamクラスの詳細
-- [低レベルAPI](./08_lowlevel_api.md) - 詳細な制御
-- [データベース設定](./10_database_setup.md) - バックエンド設定
-- [音声指紋生成](./13_fingerprint_generation.md) - アルゴリズム詳細
-- [高度な使用例](./17_advanced_examples.md) - より複雑な実装例
-- [トラブルシューティング](./21_debugging.md) - 問題解決ガイド
+- [基本的な使用方法](./03_basic_usage.md) - 基本操作パターン
+- [データベース設定](./05_database_setup.md) - バックエンド設定
+- [システムアーキテクチャ](./04_architecture.md) - 全体構成の理解
+- [FAQ](./07_faq.md) - よくある質問とトラブルシューティング
 
 ## 💡 ベストプラクティス
 

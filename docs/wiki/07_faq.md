@@ -691,10 +691,8 @@ print(f"平均指紋数/曲: {stats['fingerprints']['avg_per_song']:.1f}")
 
 - [基本的な使用方法](./03_basic_usage.md) - 基本操作
 - [インストールガイド](./02_installation.md) - セットアップ
-- [データベース設定](./10_database_setup.md) - データベース構成
-- [パフォーマンス最適化](./12_performance_optimization.md) - 性能向上
-- [デバッグとトラブルシューティング](./21_debugging.md) - 問題解決
-- [高度な使用例](./17_advanced_examples.md) - 応用技術
+- [データベース設定](./05_database_setup.md) - データベース構成
+- [基本的な使用例](./06_basic_examples.md) - 実践的なサンプルコード
 
 ## 💡 よくある質問のベストプラクティス
 

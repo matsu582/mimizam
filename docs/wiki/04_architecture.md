@@ -520,11 +520,9 @@ def setup_custom_backend(backend_type: str):
 
 ## 🔗 関連ドキュメント
 
-- [統合API](./07_unified_api.md) - 統合API層の詳細
-- [低レベルAPI](./08_lowlevel_api.md) - コア処理層の詳細
-- [データベース設定](./10_database_setup.md) - データベース層の詳細
-- [音声指紋生成](./13_fingerprint_generation.md) - 指紋生成アルゴリズム
-- [パフォーマンス最適化](./12_performance_optimization.md) - 性能向上テクニック
+- [データベース設定](./05_database_setup.md) - データベース層の詳細
+- [基本的な使用例](./06_basic_examples.md) - 実践的なサンプルコード
+- [FAQ](./07_faq.md) - よくある質問とトラブルシューティング
 
 ## 💡 設計原則
 

@@ -177,5 +177,5 @@ fingerprinter = AudioFingerprinter(
 
 - [インストールガイド](./02_installation.md) - 詳細なセットアップ手順
 - [基本的な使用方法](./03_basic_usage.md) - より詳細な使用例
-- [データベース設定](./10_database_setup.md) - データベース選択と設定
-- [実装例](./16_basic_examples.md) - 実践的なサンプルコード
+- [データベース設定](./05_database_setup.md) - データベース選択と設定
+- [実装例](./06_basic_examples.md) - 実践的なサンプルコード

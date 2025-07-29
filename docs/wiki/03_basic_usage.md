@@ -423,8 +423,6 @@ with create_mimizam_sqlite("music.db", **config) as mimizam:
 
 基本的な使用方法を理解したら、以下のドキュメントで詳細を学習してください：
 
-- [統合API](./07_unified_api.md) - 全APIの詳細リファレンス
-- [データベース設定](./10_database_setup.md) - 各データベースの詳細設定
-- [音声指紋生成](./13_fingerprint_generation.md) - アルゴリズムの詳細
-- [実装例](./16_basic_examples.md) - より実践的な例
-- [高度な使用例](./17_advanced_examples.md) - 上級者向けの使用方法
+- [データベース設定](./05_database_setup.md) - 各データベースの詳細設定
+- [実装例](./06_basic_examples.md) - より実践的な例
+- [FAQ](./07_faq.md) - よくある質問とトラブルシューティング
