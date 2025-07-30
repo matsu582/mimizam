@@ -1,17 +1,21 @@
 # 音声指紋エンジン
 
+> 関連するソースファイル
+
 このドキュメントでは、生の音声信号をShazam風アルゴリズムを使用してコンパクトな指紋ハッシュに変換するコア音声指紋エンジンについて説明します。エンジンは、スペクトログラム生成、ピーク検出、ハッシュ作成、適応的パラメータ最適化を含みます。
 
 他のコンポーネントについては、[データベース層](./03_2_database_layer.md)および[マッチング・識別システム](./03_3_matching_identification.md)を参照してください。
 
 ## 概要
 
-音声指紋エンジンは、Avery Wangの2003年Shazamアルゴリズムに基づくコンステレーションマップアプローチを実装しています。システムは以下の4つの主要段階で音声を処理します：
+音声指紋エンジンは、Avery Li-Chun Wangの2003年Shazamアルゴリズムに基づくコンステレーションマップアプローチを実装しています。システムは以下の4つの主要段階で音声を処理します：
 
-1. **スペクトログラム生成**: 短時間フーリエ変換（STFT）による時間-周波数解析
-2. **ピーク検出**: 局所最大値アルゴリズムによるスペクトルピークの特定
-3. **ハッシュ生成**: アンカー・ターゲットピークペアリング
-4. **適応的パラメータ調整**: 音声特性に基づく自動最適化
+| 処理段階 | 説明 | 主要技術 |
+|---------|------|---------|
+| **スペクトログラム生成** | 短時間フーリエ変換（STFT）による時間-周波数解析 | librosa STFT、ハニング窓 |
+| **ピーク検出** | 局所最大値アルゴリズムによるスペクトルピークの特定 | 適応的閾値、近傍抑制 |
+| **ハッシュ生成** | アンカー・ターゲットピークペアリング | SHA-1ハッシュ、時間量子化 |
+| **適応的パラメータ調整** | 音声特性に基づく自動最適化 | 動的範囲分析、品質評価 |
 
 ## 音声指紋パイプライン
 
@@ -182,7 +186,17 @@ def _create_hash(self, anchor_freq, target_freq, time_delta):
 
 ### Numba JIT最適化
 
-数値計算集約的な関数でNumba JIT最適化を利用できます。
+mimizamは、数値計算集約的な関数でNumba JIT最適化を活用し、大幅な性能向上を実現します。
+
+| 最適化技術 | 性能向上 | 適用範囲 |
+|-----------|---------|---------|
+| **Numba JIT最適化** | 3-10倍高速化 | ピーク検出、ハッシュ生成 |
+| **適応的パラメータ調整** | 音声特性に基づく最適化 | 全処理段階 |
+| **パフォーマンス監視** | リアルタイム性能追跡 | システム全体 |
+
+#### キーアルゴリズム
+
+**Numba最適化ピーク検出**
 
 ```python
 try:
@@ -190,7 +204,7 @@ try:
     
     @jit(nopython=True)
     def _find_peaks_optimized(spectrogram, threshold, min_distance):
-        """Numba最適化されたピーク検出"""
+        """Numba最適化されたピーク検出アルゴリズム"""
         peaks = []
         rows, cols = spectrogram.shape
         
@@ -216,68 +230,169 @@ try:
     NUMBA_AVAILABLE = True
 except ImportError:
     NUMBA_AVAILABLE = False
+
+def _fallback_peak_detection(spectrogram, threshold, min_distance):
+    """フォールバックピーク検出（Numba未使用）"""
+    from scipy.ndimage import maximum_filter
+    import numpy as np
+    
+    # 局所最大値フィルタを適用
+    neighborhood_size = (min_distance, min_distance)
+    local_maxima = maximum_filter(spectrogram, size=neighborhood_size) == spectrogram
+    
+    # 閾値を適用
+    threshold_mask = spectrogram > threshold
+    
+    # ピークマスクを作成
+    peak_mask = local_maxima & threshold_mask
+    
+    # ピーク座標を取得
+    peak_coords = np.where(peak_mask)
+    peaks = list(zip(peak_coords[1], peak_coords[0]))  # (time, frequency)
+    
+    return peaks
+```
+
+**ハッシュ生成プロセス**
+
+```python
+def _generate_hashes(self, peaks):
+    """アンカー・ターゲットペアリングによるハッシュ生成"""
+    fingerprints = []
+    
+    for i, anchor_peak in enumerate(peaks):
+        anchor_time, anchor_freq = anchor_peak
+        
+        # ターゲットゾーン内のピークを検索
+        for j in range(i + 1, min(i + self.target_zone_size + 1, len(peaks))):
+            target_peak = peaks[j]
+            target_time, target_freq = target_peak
+            
+            # 時間差を計算
+            time_delta = target_time - anchor_time
+            
+            # 最大時間差を超える場合はスキップ
+            if time_delta > self.max_time_delta:
+                break
+            
+            # ハッシュを生成
+            hash_value = self._create_hash(anchor_freq, target_freq, time_delta)
+            
+            fingerprints.append({
+                'hash': hash_value,
+                'time_offset': anchor_time,
+                'anchor_freq': anchor_freq,
+                'target_freq': target_freq,
+                'time_delta': time_delta
+            })
+    
+    return fingerprints
 ```
 
 ### 適応的パラメータ調整
 
-音声特性に基づいてパラメータを自動調整します。
+音声特性に基づく自動パラメータ最適化システムにより、様々な音声コンテンツに対して最適な性能を実現します。
+
+#### 音声特性分析
+
+| 分析項目 | 測定方法 | 調整対象パラメータ |
+|---------|---------|------------------|
+| **動的範囲** | max(audio) - min(audio) | peak_threshold |
+| **RMSエネルギー** | sqrt(mean(audio²)) | min_peak_distance |
+| **ゼロ交差率** | 符号変化の頻度 | window_size |
+| **スペクトル重心** | 周波数重心の計算 | target_zone_size |
 
 ```python
 class AdaptiveParameterTuner:
     def __init__(self, fingerprinter):
         self.fingerprinter = fingerprinter
+        self.optimization_history = []
     
     def analyze_audio_characteristics(self, audio_data):
-        """音声特性を分析"""
+        """包括的な音声特性分析"""
         import numpy as np
+        import librosa
         
-        # 動的範囲を計算
+        # 基本統計量
         dynamic_range = np.max(audio_data) - np.min(audio_data)
-        
-        # RMS エネルギーを計算
         rms_energy = np.sqrt(np.mean(audio_data ** 2))
         
-        # ゼロ交差率を計算
+        # ゼロ交差率
         zero_crossings = np.sum(np.diff(np.sign(audio_data)) != 0)
         zero_crossing_rate = zero_crossings / len(audio_data)
         
-        # スペクトル重心を計算
+        # スペクトル特性
         spectrogram = self.fingerprinter._generate_spectrogram(audio_data)
         spectral_centroid = np.mean(np.sum(spectrogram * np.arange(spectrogram.shape[0])[:, np.newaxis], axis=0) / np.sum(spectrogram, axis=0))
+        
+        # スペクトル密度
+        spectral_density = np.mean(np.sum(spectrogram > -60, axis=0))  # -60dB以上の周波数成分
+        
+        # ノイズレベル推定
+        noise_floor = np.percentile(spectrogram, 10)  # 下位10%をノイズフロアとして推定
         
         return {
             'dynamic_range': dynamic_range,
             'rms_energy': rms_energy,
             'zero_crossing_rate': zero_crossing_rate,
-            'spectral_centroid': spectral_centroid
+            'spectral_centroid': spectral_centroid,
+            'spectral_density': spectral_density,
+            'noise_floor': noise_floor
         }
     
     def adjust_parameters(self, characteristics):
-        """特性に基づいてパラメータを調整"""
+        """音声特性に基づく最適パラメータ調整"""
         adjustments = {}
         
         # 動的範囲に基づく調整
         if characteristics['dynamic_range'] < 0.1:
-            adjustments['peak_threshold'] = self.fingerprinter.peak_threshold * 0.8
+            adjustments['peak_threshold'] = self.fingerprinter.peak_threshold * 0.7
         elif characteristics['dynamic_range'] > 0.8:
-            adjustments['peak_threshold'] = self.fingerprinter.peak_threshold * 1.2
+            adjustments['peak_threshold'] = self.fingerprinter.peak_threshold * 1.3
         
         # エネルギーレベルに基づく調整
         if characteristics['rms_energy'] < 0.01:
-            adjustments['min_peak_distance'] = max(5, self.fingerprinter.min_peak_distance - 2)
+            adjustments['min_peak_distance'] = max(5, self.fingerprinter.min_peak_distance - 3)
         elif characteristics['rms_energy'] > 0.1:
-            adjustments['min_peak_distance'] = self.fingerprinter.min_peak_distance + 2
+            adjustments['min_peak_distance'] = self.fingerprinter.min_peak_distance + 3
         
-        # スペクトル特性に基づく調整
-        if characteristics['spectral_centroid'] > 1000:
+        # スペクトル密度に基づく調整
+        if characteristics['spectral_density'] < 50:
             adjustments['target_zone_size'] = max(3, self.fingerprinter.target_zone_size - 1)
+        elif characteristics['spectral_density'] > 200:
+            adjustments['target_zone_size'] = min(8, self.fingerprinter.target_zone_size + 1)
+        
+        # ノイズレベルに基づく調整
+        if characteristics['noise_floor'] > -40:  # 高ノイズ環境
+            adjustments['peak_threshold'] = adjustments.get('peak_threshold', self.fingerprinter.peak_threshold) * 1.2
+            adjustments['min_peak_distance'] = adjustments.get('min_peak_distance', self.fingerprinter.min_peak_distance) + 2
         
         return adjustments
     
     def apply_adjustments(self, adjustments):
-        """調整をfingerprinterに適用"""
+        """調整をfingerprinterに適用し、履歴を記録"""
+        original_params = {}
         for param, value in adjustments.items():
+            original_params[param] = getattr(self.fingerprinter, param)
             setattr(self.fingerprinter, param, value)
+        
+        # 最適化履歴を記録
+        self.optimization_history.append({
+            'original_params': original_params,
+            'adjusted_params': adjustments,
+            'timestamp': time.time()
+        })
+    
+    def get_optimization_summary(self):
+        """最適化履歴の要約を取得"""
+        if not self.optimization_history:
+            return "最適化履歴なし"
+        
+        return {
+            'optimization_count': len(self.optimization_history),
+            'most_recent': self.optimization_history[-1],
+            'parameter_trends': self._analyze_parameter_trends()
+        }
 ```
 
 ## 可視化機能
