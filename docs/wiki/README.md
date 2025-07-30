@@ -7,15 +7,32 @@
 ### 🚀 はじめに
 - [概要とクイックスタート](./01_overview.md) - mimizamの紹介と基本的な使い方
 - [インストールガイド](./02_installation.md) - セットアップと依存関係
-- [基本的な使用方法](./03_basic_usage.md) - 実践的な使用例とパターン
 
-### 🏗️ システム理解
-- [システムアーキテクチャ](./04_architecture.md) - 全体構成とコンポーネント
-- [データベース設定ガイド](./05_database_setup.md) - データベース設定
+### 🏗️ コアアーキテクチャ
+- [システムアーキテクチャ](./03_core_architecture.md) - 全体構成とコンポーネント
+- [音声指紋エンジン](./04_audio_fingerprinting_engine.md) - 音声処理とスペクトログラム解析
+- [データベース層](./05_database_layer.md) - データベース抽象化とバックエンド
+- [マッチング・識別システム](./06_matching_identification.md) - 検索とスコアリング
 
-### 💻 実践ガイド
-- [基本的な使用例](./06_basic_examples.md) - すぐに使えるサンプルコード
-- [よくある質問（FAQ）](./07_faq.md) - トラブルシューティングとヒント
+### 🔧 API リファレンス
+- [高レベルAPI](./07_high_level_api.md) - Mimizamクラスとファクトリ関数
+- [低レベルコンポーネント](./08_low_level_components.md) - 個別コンポーネントの詳細
+
+### 🗄️ データベースバックエンド
+- [データベースバックエンド概要](./09_database_backends.md) - 対応データベースの比較
+- [SQLiteバックエンド](./10_sqlite_backend.md) - 軽量ファイルベースDB
+- [MySQLバックエンド](./11_mysql_backend.md) - 本番環境向けRDBMS
+- [PostgreSQLバックエンド](./12_postgresql_backend.md) - 高機能RDBMS
+- [Elasticsearchバックエンド](./13_elasticsearch_backend.md) - 分散検索エンジン
+
+### 💻 実例とチュートリアル
+- [基本的な使用例](./14_basic_usage_examples.md) - すぐに使えるサンプルコード
+- [動画処理](./15_video_processing.md) - 動画からの音声抽出と指紋生成
+- [パフォーマンス最適化](./16_performance_optimization.md) - 高速化技術
+
+### 🧪 テストと開発
+- [テストと開発](./17_testing_development.md) - テストスイートと開発環境
+- [パフォーマンス分析](./18_performance_analysis.md) - 性能測定と分析ツール
 
 ---
 
@@ -49,8 +66,8 @@ with create_mimizam_sqlite("my_music.db") as mimizam:
 1. **[概要](./01_overview.md)** でmimizamの全体像を理解
 2. **[インストール](./02_installation.md)** でセットアップを完了
 3. **[基本使用方法](./03_basic_usage.md)** で基本操作を習得
-4. **[実用例](./06_basic_examples.md)** で実践的な使い方を学習
-5. **[FAQ](./07_faq.md)** で問題解決方法を確認
+4. **[実用例](./14_basic_usage_examples.md)** で実践的な使い方を学習
+5. **[FAQ](./19_faq.md)** で問題解決方法を確認
 
 ## 🔗 関連リンク
 
