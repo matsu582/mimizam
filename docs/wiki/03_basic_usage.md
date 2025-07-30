@@ -375,50 +375,6 @@ def music_identification_app():
 # music_identification_app()
 ```
 
-## 💡 ベストプラクティス
-
-### 1. リソース管理
-```python
-# ✅ 推奨: コンテキストマネージャーを使用
-with create_mimizam_sqlite("music.db") as mimizam:
-    # 処理
-    pass  # 自動的にリソースが解放される
-
-# ❌ 非推奨: 手動管理
-mimizam = create_mimizam_sqlite("music.db")
-# 処理
-mimizam.close()  # 忘れやすい
-```
-
-### 2. エラーハンドリング
-```python
-# ✅ 推奨: 適切な例外処理
-try:
-    song_id = mimizam.add_song("music/song.wav", "楽曲", "アーティスト")
-except AudioProcessingError:
-    print("音声処理に失敗しました")
-except DatabaseError:
-    print("データベース操作に失敗しました")
-```
-
-### 3. 設定の選択
-```python
-# 用途に応じた設定選択
-if need_high_accuracy:
-    # 高精度設定
-    config = {'n_fft': 4096, 'min_amplitude': -70}
-elif need_high_speed:
-    # 高速設定
-    config = {'n_fft': 1024, 'min_amplitude': -40}
-else:
-    # デフォルト設定
-    config = {}
-
-with create_mimizam_sqlite("music.db", **config) as mimizam:
-    # 処理
-    pass
-```
-
 ## 🔗 次のステップ
 
 基本的な使用方法を理解したら、以下のドキュメントで詳細を学習してください：
