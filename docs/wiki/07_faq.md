@@ -295,30 +295,31 @@ def process_large_dataset_efficiently(file_paths, batch_size=10):
 
 **A:** 以下の設定手法を試してください：
 
-**1. Numba機能の有効化**
+**1. パラメータ調整による高速化**
 ```python
-fingerprinter = AudioFingerprinter(enable_numba_optimization=True)
-```
-
-**2. パラメータ調整**
-```python
-# 高速化重視の設定
+# 高速化重視の設定（精度とのトレードオフ）
 fast_fingerprinter = AudioFingerprinter(
     n_fft=1024,        # 小さなFFTサイズ
     hop_length=512,    # 大きなホップ長
-    enable_numba_optimization=True
+    min_amplitude=-40  # 閾値を上げて処理量削減
 )
 ```
 
-**3. パラメータ調整による高速化**
+**2. データベース設定の調整**
 ```python
-# より高速な設定（精度とのトレードオフ）
-fast_fingerprinter = AudioFingerprinter(
-    n_fft=1024,        # 小さなFFTサイズ
-    hop_length=512,    # 大きなホップ長
-    enable_numba_optimization=True
+# SQLiteの場合、WALモードで高速化
+mimizam = create_mimizam_sqlite("music.db")
+
+# 大規模データの場合はMySQLやPostgreSQLを検討
+mimizam = create_mimizam_mysql(
+    host="localhost",
+    database="music_db",
+    username="user",
+    password="password"
 )
 ```
+
+**注意:** Numba機能は現在無効化されており、有効にしても性能向上は期待できません（Q7参照）。
 
 ### Q14: 大規模データベースでの検索が遅いです
 
