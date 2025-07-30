@@ -1,0 +1,462 @@
+# コアアーキテクチャ
+
+このドキュメントでは、mimizamシステムの全体的なアーキテクチャと主要コンポーネントについて詳しく説明します。
+
+個別コンポーネントの詳細については、以下を参照してください：
+- [音声指紋エンジン](./03_1_audio_fingerprinting_engine.md) - 音声処理とスペクトログラム解析
+- [データベース層](./03_2_database_layer.md) - データベース抽象化とバックエンド
+- [マッチング・識別システム](./03_3_matching_identification.md) - 検索とスコアリング
+
+## システム概要
+
+mimizamは、音声指紋の生成から楽曲識別まで、エンドツーエンドの音声認識パイプラインを提供する階層化されたアーキテクチャを採用しています。
+
+### アーキテクチャ層
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    アプリケーション層                        │
+├─────────────────────────────────────────────────────────────┤
+│  CLIツール  │  デモアプリ  │  カスタムアプリケーション      │
+└─────────────────────────────────────────────────────────────┘
+                              │
+┌─────────────────────────────────────────────────────────────┐
+│                     統合API層                               │
+├─────────────────────────────────────────────────────────────┤
+│           Mimizamクラス（統合インターフェース）              │
+│  create_mimizam_*() ファクトリ関数                          │
+└─────────────────────────────────────────────────────────────┘
+                              │
+┌─────────────────────────────────────────────────────────────┐
+│                    コア処理層                               │
+├─────────────────────────────────────────────────────────────┤
+│ AudioFingerprinter │ FingerprintDatabase │ AdaptiveParameters │
+│ SpectrogramAnalyzer │ HashGenerator │ PerformanceMonitor    │
+└─────────────────────────────────────────────────────────────┘
+                              │
+┌─────────────────────────────────────────────────────────────┐
+│                   データベース層                            │
+├─────────────────────────────────────────────────────────────┤
+│  SQLite  │  MySQL  │  PostgreSQL  │  Elasticsearch         │
+└─────────────────────────────────────────────────────────────┘
+```
+
+## 主要コンポーネント
+
+### 1. アプリケーション層
+
+#### CLIツール
+コマンドライン経由でmimizamの機能にアクセスするためのツールです。
+
+```bash
+# 楽曲の追加
+python -m mimizam add-song song.wav --name "楽曲名"
+
+# 音声識別
+python -m mimizam identify query.wav
+
+# データベース統計
+python -m mimizam stats
+```
+
+#### デモアプリケーション
+mimizamの機能を実演するサンプルアプリケーションです。
+
+```python
+# examples/mimizam_demo.py
+from mimizam import create_mimizam_sqlite
+
+def demo_basic_usage():
+    mimizam = create_mimizam_sqlite("demo.db")
+    
+    # デモ楽曲の追加
+    mimizam.add_song("demo_song.wav", song_name="デモ楽曲")
+    
+    # 識別テスト
+    matches = mimizam.identify("test_clip.wav")
+    return matches
+```
+
+### 2. 統合API層
+
+#### Mimizamクラス
+全ての機能を統合した高レベルインターフェースです。
+
+```python
+class Mimizam:
+    def __init__(self, fingerprinter, database):
+        self.fingerprinter = fingerprinter
+        self.database = database
+    
+    def add_song(self, audio_path, song_name, **metadata):
+        """楽曲をデータベースに追加"""
+        
+    def identify(self, audio_path, threshold=0.1):
+        """音声ファイルから楽曲を識別"""
+        
+    def get_song_count(self):
+        """データベース内の楽曲数を取得"""
+```
+
+#### ファクトリ関数
+各データベースバックエンドに対応した便利な作成関数です。
+
+```python
+def create_mimizam_sqlite(db_path, **params):
+    """SQLiteバックエンドでMimizamインスタンスを作成"""
+    
+def create_mimizam_mysql(host, user, password, database, **params):
+    """MySQLバックエンドでMimizamインスタンスを作成"""
+    
+def create_mimizam_postgresql(host, user, password, database, **params):
+    """PostgreSQLバックエンドでMimizamインスタンスを作成"""
+    
+def create_mimizam_elasticsearch(host, port, index_name, **params):
+    """ElasticsearchバックエンドでMimizamインスタンスを作成"""
+```
+
+### 3. コア処理層
+
+#### AudioFingerprinter
+音声ファイルから指紋を生成する中核コンポーネントです。
+
+```python
+class AudioFingerprinter:
+    def __init__(self, **params):
+        self.sample_rate = params.get('sample_rate', 22050)
+        self.n_fft = params.get('n_fft', 2048)
+        self.hop_length = params.get('hop_length', 512)
+    
+    def generate_fingerprints(self, audio_path):
+        """音声ファイルから指紋を生成"""
+        
+    def generate_spectrogram(self, audio_data):
+        """スペクトログラムを生成"""
+        
+    def detect_peaks(self, spectrogram):
+        """スペクトログラムからピークを検出"""
+```
+
+#### FingerprintDatabase
+指紋の保存と検索を管理するコンポーネントです。
+
+```python
+class FingerprintDatabase:
+    def __init__(self, backend):
+        self.backend = backend
+    
+    def store_fingerprints(self, song_id, fingerprints):
+        """指紋をデータベースに保存"""
+        
+    def search_fingerprints(self, query_fingerprints):
+        """指紋を検索してマッチを取得"""
+        
+    def get_song_info(self, song_id):
+        """楽曲情報を取得"""
+```
+
+#### AdaptiveParameters
+音声特性に基づいてパラメータを自動調整するコンポーネントです。
+
+```python
+class AdaptiveParameters:
+    def analyze_audio_characteristics(self, audio_data):
+        """音声特性を分析"""
+        
+    def adjust_parameters(self, characteristics):
+        """特性に基づいてパラメータを調整"""
+        
+    def get_optimized_config(self):
+        """最適化された設定を取得"""
+```
+
+### 4. データベース層
+
+#### 抽象基底クラス
+全てのデータベースバックエンドが実装する共通インターフェースです。
+
+```python
+from abc import ABC, abstractmethod
+
+class DatabaseBackend(ABC):
+    @abstractmethod
+    def connect(self):
+        """データベースに接続"""
+        
+    @abstractmethod
+    def create_tables(self):
+        """必要なテーブルを作成"""
+        
+    @abstractmethod
+    def insert_song(self, song_name, **metadata):
+        """楽曲情報を挿入"""
+        
+    @abstractmethod
+    def insert_fingerprints(self, song_id, fingerprints):
+        """指紋を挿入"""
+        
+    @abstractmethod
+    def search_fingerprints(self, fingerprints):
+        """指紋を検索"""
+```
+
+#### 具体的なバックエンド実装
+
+```python
+# SQLiteバックエンド
+class SQLiteBackend(DatabaseBackend):
+    def __init__(self, db_path):
+        self.db_path = db_path
+        self.connection = None
+
+# MySQLバックエンド
+class MySQLBackend(DatabaseBackend):
+    def __init__(self, host, user, password, database):
+        self.config = {
+            'host': host,
+            'user': user,
+            'password': password,
+            'database': database
+        }
+
+# PostgreSQLバックエンド
+class PostgreSQLBackend(DatabaseBackend):
+    def __init__(self, host, user, password, database):
+        self.connection_string = f"postgresql://{user}:{password}@{host}/{database}"
+
+# Elasticsearchバックエンド
+class ElasticsearchBackend(DatabaseBackend):
+    def __init__(self, host, port, index_name):
+        self.client = Elasticsearch([{'host': host, 'port': port}])
+        self.index_name = index_name
+```
+
+## データフロー
+
+### 楽曲追加プロセス
+
+```
+音声ファイル
+    │
+    ▼
+音声読み込み (librosa)
+    │
+    ▼
+スペクトログラム生成 (STFT)
+    │
+    ▼
+ピーク検出 (局所最大値)
+    │
+    ▼
+ハッシュ生成 (アンカー・ターゲット)
+    │
+    ▼
+データベース保存
+```
+
+### 音声識別プロセス
+
+```
+クエリ音声
+    │
+    ▼
+指紋生成 (上記と同様)
+    │
+    ▼
+データベース検索
+    │
+    ▼
+マッチング・スコアリング
+    │
+    ▼
+結果ランキング
+    │
+    ▼
+識別結果
+```
+
+## 設定管理
+
+### パラメータ設定
+システム全体の動作は、設定パラメータによって制御されます。
+
+```python
+# デフォルト設定
+DEFAULT_CONFIG = {
+    # 音声処理パラメータ
+    'sample_rate': 22050,
+    'n_fft': 2048,
+    'hop_length': 512,
+    'window': 'hann',
+    
+    # ピーク検出パラメータ
+    'peak_threshold': 0.15,
+    'min_peak_distance': 10,
+    'peak_neighborhood_size': 20,
+    
+    # ハッシュ生成パラメータ
+    'target_zone_size': 5,
+    'max_time_delta': 200,
+    'hash_time_quantization': 1,
+    
+    # 識別パラメータ
+    'match_threshold': 0.1,
+    'max_matches': 10
+}
+```
+
+### 適応的設定
+音声特性に基づく自動パラメータ調整：
+
+```python
+def adapt_parameters(audio_characteristics):
+    """音声特性に基づいてパラメータを調整"""
+    config = DEFAULT_CONFIG.copy()
+    
+    # 動的範囲に基づく調整
+    if audio_characteristics['dynamic_range'] < 20:
+        config['peak_threshold'] *= 0.8
+    
+    # ノイズレベルに基づく調整
+    if audio_characteristics['noise_level'] > 0.1:
+        config['min_peak_distance'] *= 1.2
+    
+    return config
+```
+
+## エラーハンドリング
+
+### 例外階層
+```python
+class MimizamError(Exception):
+    """mimizam基底例外"""
+
+class AudioProcessingError(MimizamError):
+    """音声処理関連エラー"""
+
+class DatabaseError(MimizamError):
+    """データベース関連エラー"""
+
+class FingerprintError(MimizamError):
+    """指紋生成関連エラー"""
+```
+
+### エラー処理戦略
+```python
+def robust_add_song(mimizam, audio_path, song_name):
+    """堅牢な楽曲追加処理"""
+    try:
+        mimizam.add_song(audio_path, song_name=song_name)
+        return True
+    except AudioProcessingError as e:
+        logger.error(f"音声処理エラー: {e}")
+        return False
+    except DatabaseError as e:
+        logger.error(f"データベースエラー: {e}")
+        return False
+    except Exception as e:
+        logger.error(f"予期しないエラー: {e}")
+        return False
+```
+
+## パフォーマンス考慮事項
+
+### メモリ管理
+- **音声ファイル読み込み**: `librosa.load()`により音声ファイル全体をメモリに読み込み
+- **スペクトログラム処理**: 大容量ファイルでは段階的な処理を実装
+- **指紋キャッシュ**: 頻繁にアクセスされる指紋のメモリキャッシュ
+
+### 処理最適化
+- **Numba JIT最適化**: 数値計算集約的な関数で利用可能
+- **ベクトル化**: NumPy配列操作による高速化
+- **並列処理**: バッチ処理での複数ファイル同時処理
+
+### データベース最適化
+- **インデックス戦略**: 指紋検索用の最適化されたインデックス
+- **接続プール**: データベース接続の効率的な管理
+- **クエリ最適化**: データベース固有の最適化技術
+
+## 拡張性
+
+### 新しいデータベースバックエンドの追加
+```python
+class RedisBackend(DatabaseBackend):
+    """Redis用の新しいバックエンド実装例"""
+    
+    def __init__(self, host, port, db):
+        import redis
+        self.client = redis.Redis(host=host, port=port, db=db)
+    
+    def connect(self):
+        return self.client.ping()
+    
+    def create_tables(self):
+        # Redisではテーブル作成は不要
+        pass
+    
+    def insert_song(self, song_name, **metadata):
+        song_id = self.client.incr('song_counter')
+        song_key = f'song:{song_id}'
+        self.client.hset(song_key, mapping={
+            'name': song_name,
+            **metadata
+        })
+        return song_id
+    
+    def insert_fingerprints(self, song_id, fingerprints):
+        for fp in fingerprints:
+            fp_key = f'fp:{fp["hash"]}'
+            self.client.sadd(fp_key, f'{song_id}:{fp["time_offset"]}')
+    
+    def search_fingerprints(self, fingerprints):
+        matches = {}
+        for fp in fingerprints:
+            fp_key = f'fp:{fp["hash"]}'
+            results = self.client.smembers(fp_key)
+            for result in results:
+                song_id, time_offset = result.decode().split(':')
+                song_id = int(song_id)
+                time_offset = float(time_offset)
+                
+                if song_id not in matches:
+                    matches[song_id] = []
+                matches[song_id].append({
+                    'query_time': fp['time_offset'],
+                    'db_time': time_offset
+                })
+        
+        return matches
+
+# ファクトリ関数の追加
+def create_mimizam_redis(host='localhost', port=6379, db=0, **params):
+    """Redis用のmimizamインスタンスを作成"""
+    from mimizam.backends.redis_backend import RedisBackend
+    from mimizam import AudioFingerprinter, FingerprintDatabase, Mimizam
+    
+    backend = RedisBackend(host, port, db)
+    fingerprinter = AudioFingerprinter(**params)
+    database = FingerprintDatabase(backend)
+    
+    return Mimizam(fingerprinter, database)
+```
+
+### カスタムスコアリング手法の追加
+```python
+def custom_scoring_method(matches):
+    """カスタムスコアリング手法の実装例"""
+    scored_matches = []
+    
+    for song_id, match_list in matches.items():
+        # カスタムスコア計算ロジック
+        score = calculate_custom_score(match_list)
+        
+        scored_matches.append({
+            'song_id': song_id,
+            'score': score,
+            'match_count': len(match_list)
+        })
+    
+    return sorted(scored_matches, key=lambda x: x['score'], reverse=True)
+```
+
+このアーキテクチャにより、mimizamは柔軟性と拡張性を保ちながら、高性能な音声指紋システムを提供します。
