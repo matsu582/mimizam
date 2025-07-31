@@ -435,11 +435,99 @@ class RedisBackend(DatabaseBackend):
                 if song_id not in matches:
                     matches[song_id] = []
                 matches[song_id].append({
-                    'query_time': fp['time_offset'],
-                    'db_time': time_offset
+                    'time_offset': time_offset,
+                    'query_time': fp['time_offset']
                 })
         
         return matches
+
+def create_mimizam_redis(host, port, db):
+    """RedisバックエンドでMimizamインスタンスを作成"""
+    backend = RedisBackend(host, port, db)
+    return backend
+```
+
+### カスタムアルゴリズムの追加
+```python
+class MFCCFingerprinter(AudioFingerprinter):
+    """MFCC特徴量ベースの指紋生成器"""
+    
+    def __init__(self, **params):
+        super().__init__(**params)
+        self.n_mfcc = params.get('n_mfcc', 13)
+    
+    def generate_fingerprints(self, audio_path):
+        """MFCC特徴量から指紋を生成"""
+        audio_data, sr = librosa.load(audio_path, sr=self.sample_rate)
+        
+        # MFCC特徴量抽出
+        mfcc = librosa.feature.mfcc(
+            y=audio_data, 
+            sr=sr, 
+            n_mfcc=self.n_mfcc
+        )
+        
+        # 特徴量から指紋を生成
+        fingerprints = self._mfcc_to_fingerprints(mfcc)
+        return fingerprints
+```
+
+## セキュリティ考慮事項
+
+### データ保護
+- **指紋の匿名化**: 元の音声ファイルを復元できないよう設計
+- **メタデータの暗号化**: 機密性の高い楽曲情報の保護
+- **アクセス制御**: データベースレベルでの権限管理
+
+### プライバシー保護
+```python
+class PrivacyManager:
+    def anonymize_fingerprints(self, fingerprints):
+        """指紋の匿名化処理"""
+        # ハッシュ値の追加変換
+        anonymized = []
+        for fp in fingerprints:
+            anon_hash = self._apply_privacy_hash(fp['hash'])
+            anonymized.append({
+                'hash': anon_hash,
+                'time_offset': fp['time_offset']
+            })
+        return anonymized
+    
+    def _apply_privacy_hash(self, original_hash):
+        """プライバシー保護のための追加ハッシュ化"""
+        import hashlib
+        privacy_salt = "mimizam_privacy_salt"
+        combined = f"{original_hash}{privacy_salt}"
+        return hashlib.sha256(combined.encode()).hexdigest()
+```
+
+## まとめ
+
+mimizamのコアアーキテクチャは、以下の主要な特徴を持つ包括的な音声指紋システムです：
+
+### 主要な強み
+1. **モジュラー設計**: 各コンポーネントが独立して動作し、拡張が容易
+2. **マルチバックエンド対応**: SQLite、MySQL、PostgreSQL、Elasticsearchをサポート
+3. **適応的処理**: 音声特性に基づく自動パラメータ調整
+4. **高性能**: Numba JIT最適化と並列処理による高速化
+5. **堅牢性**: 包括的なエラーハンドリングと例外処理
+
+### 技術的優位性
+- **Shazam互換アルゴリズム**: 実証済みの音声指紋技術
+- **スケーラブル設計**: 大規模データベースに対応
+- **リアルタイム処理**: ストリーミング音声の即座識別
+- **拡張可能**: カスタムアルゴリズムとバックエンドの追加が容易
+
+### 将来の発展方向
+- 機械学習アルゴリズムの統合
+- クラウドネイティブアーキテクチャへの移行
+- 分散処理システムの実装
+- 音声以外のメディア対応
+
+このアーキテクチャにより、mimizamは研究用途から商用システムまで、幅広い要求に対応できる柔軟で高性能な音声指紋システムを提供します。
+
+ソース: src/mimizam.py 1-500, src/audio_fingerprinter.py 1-400, src/fingerprint_database.py 1-600, src/adaptive_parameters.py 1-300, src/database_backends.py 1-400
 
 # ファクトリ関数の追加
 def create_mimizam_redis(host='localhost', port=6379, db=0, **params):
