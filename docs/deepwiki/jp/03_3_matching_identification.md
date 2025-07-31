@@ -58,46 +58,28 @@
 
 ### MatchingEngineクラス
 
-マッチング処理の中核を担うクラスです。
+マッチング処理の中核を担うコンポーネントとして、音声識別の全プロセスを統合管理します。
 
-```python
-class MatchingEngine:
-    """音声マッチング・識別エンジン"""
-    
-    def __init__(self, database, scoring_method='weighted'):
-        self.database = database
-        self.scoring_method = scoring_method
-        self.match_threshold = 0.1
-        self.max_matches = 10
-    
-    def identify_audio(self, query_fingerprints):
-        """音声を識別"""
-        # 1. データベース検索
-        raw_matches = self.database.search_fingerprints(query_fingerprints)
-        
-        # 2. 時間オフセット分析
-        analyzed_matches = self._analyze_time_offsets(raw_matches, query_fingerprints)
-        
-        # 3. スコアリング
-        scored_matches = self._score_matches(analyzed_matches)
-        
-        # 4. 結果フィルタリングとランキング
-        final_results = self._rank_and_filter_results(scored_matches)
-        
-        return final_results
-```
+#### 主要な処理段階
+1. **データベース検索**: 指紋ハッシュによる高速な候補抽出
+2. **時間オフセット分析**: 時間的一貫性による品質評価
+3. **スコアリング**: 複数手法による信頼度計算
+4. **結果フィルタリング**: 閾値とランキングによる最適化
+
+#### 設定可能パラメータ
+- **スコアリング手法**: 重み付き、統計的、適応的手法の選択
+- **マッチング閾値**: 識別精度と処理速度のバランス調整
+- **最大マッチ数**: 結果セットサイズの制御
 
 ### 時間オフセット分析
 
-```python
-def _analyze_time_offsets(self, raw_matches, query_fingerprints):
-    """時間オフセットを分析してマッチの質を評価"""
-    analyzed_matches = {}
-    
-    # クエリ指紋をハッシュでインデックス化
-    query_hash_map = {fp['hash']: fp['time_offset'] for fp in query_fingerprints}
-    
-    for song_id, db_matches in raw_matches.items():
+時間オフセット分析は、マッチング品質を評価する重要な処理段階です。この分析により、偶然の一致と真のマッチを区別できます。
+
+#### 分析手法
+- **統計的評価**: 時間オフセットの分布パターン分析
+- **一貫性チェック**: 時間的な連続性の検証
+- **外れ値除去**: ノイズや偶然の一致の排除
+- **信頼度計算**: マッチ品質の定量的評価
         time_pairs = []
         
         for db_match in db_matches:
@@ -115,296 +97,89 @@ def _analyze_time_offsets(self, raw_matches, query_fingerprints):
             analyzed_matches[song_id] = {
                 'time_pairs': time_pairs,
                 'match_count': len(time_pairs)
-            }
-    
-    return analyzed_matches
-```
-
 ## スコアリング手法
 
-### 基本スコアリング
+mimizamシステムは、マッチング品質を評価するための複数のスコアリング手法を提供します。各手法は異なる特徴と適用シナリオを持ちます。
 
-```python
-def _basic_scoring(self, matches):
-    """基本的なマッチ数ベースのスコアリング"""
-    scored_results = []
-    
-    for song_id, match_data in matches.items():
-        score = match_data['match_count']
-        
-        scored_results.append({
-            'song_id': song_id,
-            'score': score,
-            'match_count': match_data['match_count'],
-            'method': 'basic'
-        })
-    
-    return scored_results
-```
+### ハイブリッド手法
 
-### 重み付きスコアリング
+最も汎用的なスコアリング手法として、複数の評価指標を統合します。
 
-```python
-def _weighted_scoring(self, matches):
-    """時間一貫性を考慮した重み付きスコアリング"""
-    scored_results = []
-    
-    for song_id, match_data in matches.items():
-        time_pairs = match_data['time_pairs']
-        
-        if len(time_pairs) < 2:
-            score = len(time_pairs)
-            consistency_weight = 1.0
-        else:
-            # 時間差の一貫性を評価
-            time_diffs = [pair['time_diff'] for pair in time_pairs]
-            
-            # 最頻時間差を特定
-            time_diff_mode = self._find_mode(time_diffs)
-            
-            # 一貫性スコアを計算
-            consistent_matches = sum(1 for diff in time_diffs 
-                                   if abs(diff - time_diff_mode) < 5.0)
-            
-            # 重み付きスコア
-            consistency_weight = consistent_matches / len(time_pairs)
-            score = len(time_pairs) * consistency_weight
-        
-        scored_results.append({
-            'song_id': song_id,
-            'score': score,
-            'match_count': match_data['match_count'],
-            'consistency': consistency_weight,
-            'method': 'weighted'
-        })
-    
-    return scored_results
+#### 評価要素
+- **マッチ数**: 基本的な一致指紋の数量
+- **時間一貫性**: 時間オフセットの統計的一貫性
+- **分布品質**: マッチの時間的分散パターン
+- **信頼度重み**: 各マッチの信頼性による重み付け
 
-def _find_mode(self, values, tolerance=2.0):
-    """値のリストから最頻値を特定"""
-    if not values:
-        return 0
-    
-    # ヒストグラムを作成
-    histogram = {}
-    for value in values:
-        # 許容範囲内の既存のキーを検索
-        found_key = None
-        for key in histogram:
-            if abs(value - key) <= tolerance:
-                found_key = key
-                break
-        
-        if found_key is not None:
-            histogram[found_key] += 1
-        else:
-            histogram[value] = 1
-    
-    # 最頻値を返す
-    return max(histogram, key=histogram.get)
-```
+### ヒストグラム手法
 
-### 統計的スコアリング
+時間オフセットのヒストグラム分析に基づく手法です。
 
-```python
-def _statistical_scoring(self, matches):
-    """統計的手法による高度なスコアリング"""
-    import numpy as np
-    scored_results = []
-    
-    for song_id, match_data in matches.items():
-        time_pairs = match_data['time_pairs']
-        
-        if len(time_pairs) < 3:
-            score = len(time_pairs)
-            confidence = 0.5
-        else:
-            time_diffs = [pair['time_diff'] for pair in time_pairs]
-            
-            # 統計的分析
-            mean_diff = np.mean(time_diffs)
-            std_diff = np.std(time_diffs)
-            
-            # 外れ値を除去
-            filtered_diffs = [diff for diff in time_diffs 
-                            if abs(diff - mean_diff) <= 2 * std_diff]
-            
-            # 信頼度計算
-            confidence = len(filtered_diffs) / len(time_diffs)
-            
-            # スコア計算
-            score = len(filtered_diffs) * confidence * (1 / (std_diff + 1))
-        
-        scored_results.append({
-            'song_id': song_id,
-            'score': score,
-            'match_count': match_data['match_count'],
-            'confidence': confidence,
-            'method': 'statistical'
-        })
-    
-    return scored_results
-```
+#### 特徴
+- **ピーク検出**: 時間オフセット分布の主要ピーク特定
+- **ノイズ除去**: 散発的な偶然一致の排除
+- **密度評価**: マッチ密度による品質評価
+- **閾値適応**: 動的な閾値調整機能
+
+### 詳細手法
+
+高精度な統計分析による詳細評価手法です。
+
+#### 分析要素
+- **統計的検定**: 時間一貫性の統計的有意性検証
+- **外れ値処理**: 統計的手法による異常値除去
+- **信頼区間**: マッチ品質の信頼区間計算
+- **適応的重み**: 音声特性に基づく動的重み調整
 
 ## 結果ランキングとフィルタリング
 
-```python
-def _rank_and_filter_results(self, scored_matches):
-    """結果をランキングしてフィルタリング"""
-    # スコアでソート
-    sorted_matches = sorted(scored_matches, key=lambda x: x['score'], reverse=True)
-    
-    # 閾値でフィルタリング
-    filtered_matches = [match for match in sorted_matches 
-                       if match['score'] >= self.match_threshold]
-    
-    # 最大件数で制限
-    final_matches = filtered_matches[:self.max_matches]
-    
-    # 楽曲情報を追加
-    enriched_matches = []
-    for match in final_matches:
-        song_info = self.database.get_song_info(match['song_id'])
-        
-        enriched_match = {
-            'song_id': match['song_id'],
-            'song_name': song_info.get('name', 'Unknown'),
-            'artist': song_info.get('artist'),
-            'album': song_info.get('album'),
-            'score': match['score'],
-            'match_count': match['match_count'],
-            'confidence': match.get('confidence', 1.0),
-            'method': match['method']
-        }
-        
-        enriched_matches.append(enriched_match)
-    
-    return enriched_matches
-```
+識別結果の最終処理段階として、スコアベースのランキングと品質フィルタリングを実行します。
+
+### ランキング戦略
+- **スコア順位付け**: 計算されたスコアによる降順ソート
+- **信頼度考慮**: スコアと信頼度の複合評価
+- **一貫性重視**: 時間的一貫性の高いマッチの優先
+- **適応的調整**: クエリ特性に基づく動的調整
+
+### フィルタリング機能
+- **閾値フィルタリング**: 最小スコア要件による品質保証
+- **重複除去**: 同一楽曲の重複マッチ統合
+- **結果数制限**: 効率的な結果セット管理
+- **メタデータ統合**: 楽曲情報の自動付加
 
 ## 高度なマッチング技術
 
 ### 時間窓マッチング
 
-```python
-def _windowed_matching(self, query_fingerprints, window_size=10.0):
-    """時間窓を使用したマッチング"""
-    windowed_results = []
-    
-    # クエリを時間窓に分割
-    max_time = max(fp['time_offset'] for fp in query_fingerprints)
-    num_windows = int(max_time / window_size) + 1
-    
-    for i in range(num_windows):
-        start_time = i * window_size
-        end_time = (i + 1) * window_size
-        
-        # 窓内の指紋を抽出
-        window_fingerprints = [fp for fp in query_fingerprints 
-                             if start_time <= fp['time_offset'] < end_time]
-        
-        if window_fingerprints:
-            # 窓内でマッチング
-            window_matches = self.identify_audio(window_fingerprints)
-            
-            # 結果に窓情報を追加
-            for match in window_matches:
-                match['window_start'] = start_time
-                match['window_end'] = end_time
-                windowed_results.append(match)
-    
-    # 窓間での結果統合
-    consolidated_results = self._consolidate_windowed_results(windowed_results)
-    
-    return consolidated_results
+長時間の音声クエリに対する効率的な処理手法として、時間窓ベースのマッチングを提供します。
 
-def _consolidate_windowed_results(self, windowed_results):
-    """窓間の結果を統合"""
-    song_scores = {}
-    
-    for result in windowed_results:
-        song_id = result['song_id']
-        
-        if song_id not in song_scores:
-            song_scores[song_id] = {
-                'total_score': 0,
-                'window_count': 0,
-                'song_info': {
-                    'song_name': result['song_name'],
-                    'artist': result['artist'],
-                    'album': result['album']
-                }
-            }
-        
-        song_scores[song_id]['total_score'] += result['score']
-        song_scores[song_id]['window_count'] += 1
-    
-    # 平均スコアで最終結果を作成
-    final_results = []
-    for song_id, data in song_scores.items():
-        avg_score = data['total_score'] / data['window_count']
-        
-        final_results.append({
-            'song_id': song_id,
-            'song_name': data['song_info']['song_name'],
-            'artist': data['song_info']['artist'],
-            'album': data['song_info']['album'],
-            'score': avg_score,
-            'window_count': data['window_count'],
-            'method': 'windowed'
-        })
-    
-    return sorted(final_results, key=lambda x: x['score'], reverse=True)
-```
+#### 処理戦略
+- **窓分割**: 音声クエリを固定時間間隔で分割
+- **並列処理**: 各時間窓での独立したマッチング実行
+- **結果統合**: 窓間での結果の統計的統合
+- **品質評価**: 窓間一貫性による信頼度評価
+
+#### 利点
+- **メモリ効率**: 大容量音声の段階的処理
+- **処理速度**: 並列化による高速化
+- **精度向上**: 局所的マッチングによる精度向上
+- **スケーラビリティ**: 任意長音声への対応
 
 ### 適応的閾値調整
 
-```python
-class AdaptiveThreshold:
-    """適応的閾値調整"""
-    
-    def __init__(self, initial_threshold=0.1):
-        self.threshold = initial_threshold
-        self.match_history = []
-    
-    def adjust_threshold(self, query_results, expected_matches=1):
-        """結果に基づいて閾値を調整"""
-        if not query_results:
-            # マッチがない場合は閾値を下げる
-            self.threshold *= 0.9
-        elif len(query_results) > expected_matches * 2:
-            # マッチが多すぎる場合は閾値を上げる
-            self.threshold *= 1.1
-        
-        # 閾値の範囲を制限
-        self.threshold = max(0.01, min(1.0, self.threshold))
-        
-        # 履歴を記録
-        self.match_history.append({
-            'threshold': self.threshold,
-            'match_count': len(query_results),
-            'top_score': query_results[0]['score'] if query_results else 0
-        })
-        
-        return self.threshold
-    
-    def get_optimal_threshold(self):
-        """履歴に基づく最適閾値を取得"""
-        if len(self.match_history) < 5:
-            return self.threshold
-        
-        # 最近の履歴を分析
-        recent_history = self.match_history[-10:]
-        
-        # 成功率の高い閾値を特定
-        successful_thresholds = [h['threshold'] for h in recent_history 
-                               if 1 <= h['match_count'] <= 3]
-        
-        if successful_thresholds:
-            return sum(successful_thresholds) / len(successful_thresholds)
-        else:
-            return self.threshold
-```
+システムの識別精度を動的に最適化する適応的閾値調整機能を提供します。
+
+#### 調整戦略
+- **履歴分析**: 過去のマッチング結果に基づく学習
+- **動的調整**: クエリ特性に応じた閾値の自動調整
+- **品質監視**: マッチング品質の継続的な評価
+- **最適化**: 精度と再現率のバランス最適化
+
+#### 適応機能
+- **過少マッチ対応**: 閾値の段階的引き下げ
+- **過多マッチ対応**: 閾値の段階的引き上げ
+- **安定性保証**: 閾値変動の適切な制限
+- **学習機能**: 成功パターンの自動学習
 
 ## パフォーマンス最適化
 
