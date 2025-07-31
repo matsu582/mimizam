@@ -27,45 +27,11 @@ MySQLバックエンドは、本番環境での使用に適した実績豊富な
 
 ### ファクトリ関数
 
-```python
-from mimizam import create_mimizam_mysql
-
-# 基本的な接続
-mimizam = create_mimizam_mysql(
-    host="localhost",
-    user="mimizam_user",
-    password="secure_password",
-    database="music_db"
-)
-
-# 詳細設定
-mimizam = create_mimizam_mysql(
-    host="mysql.example.com",
-    port=3306,
-    user="mimizam_user",
-    password="secure_password",
-    database="music_production",
-    charset="utf8mb4",
-    autocommit=True,
-    pool_size=10
-)
-```
+MySQLバックエンドは、豊富な接続オプションを提供する専用ファクトリ関数を通じて初期化されます。基本的な接続設定から、文字セット、自動コミット、接続プールサイズまで、本番環境に必要な詳細設定が可能です。
 
 ### SSL接続
 
-```python
-# SSL接続の設定
-mimizam = create_mimizam_mysql(
-    host="secure-mysql.example.com",
-    user="mimizam_user",
-    password="secure_password",
-    database="music_db",
-    ssl_disabled=False,
-    ssl_ca="/path/to/ca.pem",
-    ssl_cert="/path/to/client-cert.pem",
-    ssl_key="/path/to/client-key.pem"
-)
-```
+セキュアな本番環境では、SSL/TLS暗号化接続が重要です。証明書ベースの認証により、データ転送の機密性と整合性を保護します。
 
 ## データベース設定
 
