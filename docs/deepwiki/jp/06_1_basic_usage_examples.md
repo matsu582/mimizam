@@ -99,80 +99,23 @@ if song_id:
 
 ### 4. フォルダから一括登録
 
-```python
-def add_songs_from_folder(folder_path):
-    """フォルダ内の音声ファイルを一括登録"""
-    
-    if not os.path.exists(folder_path):
-        print(f"フォルダが見つかりません: {folder_path}")
-        return
-    
-    # サポートする音声ファイル形式
-    supported_formats = ('.wav', '.mp3', '.flac', '.m4a')
-    
-    added_count = 0
-    error_count = 0
-    
-    print(f"フォルダを処理中: {folder_path}")
-    
-    for filename in os.listdir(folder_path):
-        if filename.lower().endswith(supported_formats):
-            filepath = os.path.join(folder_path, filename)
-            
-            # ファイル名から楽曲名を抽出
-            song_name = os.path.splitext(filename)[0]
-            
-            try:
-                song_id = mimizam.add_song(
-                    filepath,
-                    song_name=song_name
-                )
-                
-                print(f"✓ 登録完了: {filename} (ID: {song_id})")
-                added_count += 1
-                
-            except Exception as e:
-                print(f"✗ 登録エラー: {filename} - {e}")
-                error_count += 1
-    
-    print(f"\n処理結果:")
-    print(f"  成功: {added_count}曲")
-    print(f"  エラー: {error_count}曲")
-    print(f"  総楽曲数: {mimizam.get_song_count()}")
+フォルダ内の音声ファイルを一括でデータベースに登録する機能です。
 
-# 使用例
-music_folder = "path/to/your/music/folder"
-add_songs_from_folder(music_folder)
-```
+#### 主要機能
+- **ファイル形式対応**: WAV、MP3、FLAC、M4A等の主要音声形式をサポート
+- **自動メタデータ抽出**: ファイル名から楽曲名を自動抽出
+- **エラーハンドリング**: 個別ファイルのエラーが全体処理に影響しない設計
+- **進捗表示**: 処理状況と結果統計のリアルタイム表示
 
 ### 5. 楽曲リストの表示
 
-```python
-def list_all_songs():
-    """データベース内の全楽曲を表示"""
-    
-    song_count = mimizam.get_song_count()
-    
-    if song_count == 0:
-        print("データベースに楽曲が登録されていません")
-        return
-    
-    print(f"\n=== 楽曲リスト (総数: {song_count}) ===")
-    
-    for song_id in range(1, song_count + 1):
-        try:
-            song_info = mimizam.get_song_info(song_id)
-            
-            print(f"{song_id:3d}. {song_info['name']}")
-            if song_info.get('artist'):
-                print(f"     アーティスト: {song_info['artist']}")
-            
-        except Exception as e:
-            print(f"{song_id:3d}. [エラー: {e}]")
+データベースに登録された全楽曲の一覧表示機能です。
 
-# 実行
-list_all_songs()
-```
+#### 表示機能
+- **楽曲情報**: ID、楽曲名、アーティスト情報の構造化表示
+- **統計情報**: 総楽曲数と登録状況の概要
+- **エラー処理**: 破損データや欠損情報の適切な処理
+- **フォーマット**: 読みやすい整列表示形式
 
 ## 音声識別
 
