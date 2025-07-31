@@ -2,487 +2,377 @@
 
 > 関連するソースファイル
 
-このドキュメントでは、mimizamシステムのテスト手法、開発環境の構築、デバッグ技術について説明します。品質保証と継続的な開発のためのベストプラクティスを提供します。
+このドキュメントでは、mimizam音声指紋システムに貢献する開発者向けのガイダンスを提供します。テストインフラ、開発環境セットアップ、テスト構成、パフォーマンス評価ワークフローについて説明します。基本的な使用方法とAPIリファレンスについては、[はじめに](./02_getting_started.md)と[APIリファレンス](./04_api_reference.md)を参照してください。
 
-## 概要
+## 開発環境セットアップ
 
-テストと開発セクションでは、mimizamの開発プロセス、テスト戦略、品質保証手法について包括的に説明します。単体テストから統合テスト、パフォーマンステストまで、実用的なテスト手法を提供します。
+### Python要件
 
-## 開発環境の構築
+mimizamシステムは`pyproject.toml`で指定されているPython 3.9以上を必要とします。
 
-### 1. 開発環境セットアップ
+### 依存関係構造
 
-```python
-# requirements-dev.txt
-pytest>=7.0.0
-pytest-cov>=4.0.0
-pytest-mock>=3.10.0
-pytest-benchmark>=4.0.0
-black>=22.0.0
-flake8>=5.0.0
-mypy>=1.0.0
-pre-commit>=2.20.0
-jupyter>=1.0.0
-matplotlib>=3.5.0
-seaborn>=0.11.0
-```
+プロジェクトはコア依存関係とオプションのバックエンド固有パッケージを持つモジュラー依存関係構造を使用しています：
+
+| 依存関係カテゴリ | パッケージ | 目的 |
+|-----------------|-----------|------|
+| **コア音声処理** | `numpy`, `librosa`, `scipy`, `soundfile`, `numba` | 音声解析と指紋生成 |
+| **パフォーマンスライブラリ** | `psutil`, `resampy` | 最適化された数学演算 |
+| **テストインフラ** | `testcontainers`, `coverage`, `pytest` | 分離されたテスト環境 |
+| **データベースバックエンド** | `mysql-connector-python`, `psycopg-binary`, `elasticsearch` | オプションのデータベースサポート |
+
+### 開発用インストール
 
 ```bash
-# 開発環境のセットアップ
-pip install -r requirements-dev.txt
+# 開発依存関係を含む完全インストール
+pip install -e ".[dev,mysql,postgresql,elasticsearch]"
 
-# pre-commitフックの設定
-pre-commit install
+# 基本開発セットアップ（SQLiteのみ）
+pip install -e ".[dev]"
 
-# テスト実行
-pytest tests/ -v --cov=src/
+# 特定のバックエンドのみ
+pip install -e ".[dev,mysql]"
 ```
 
-### 2. プロジェクト構造
+## テストアーキテクチャ
+
+### テストスイート構成
+
+mimizamのテストスイートは、包括的なカバレッジと信頼性の高い実行を確保するために構造化されています：
 
 ```
-mimizam/
-├── src/
-│   ├── __init__.py
-│   ├── audio_fingerprinter.py
-│   ├── fingerprint_database.py
-│   ├── backends/
-│   └── exceptions.py
-├── tests/
-│   ├── __init__.py
+tests/
+├── unit/                    # 単体テスト
 │   ├── test_audio_fingerprinter.py
-│   ├── test_fingerprint_database.py
-│   ├── test_backends/
-│   ├── fixtures/
-│   └── conftest.py
-├── examples/
-├── docs/
-└── scripts/
+│   ├── test_database_layer.py
+│   └── test_backends/
+├── integration/             # 統合テスト
+│   ├── test_end_to_end.py
+│   └── test_database_integration.py
+├── performance/             # パフォーマンステスト
+│   ├── test_fingerprint_speed.py
+│   └── test_memory_usage.py
+├── fixtures/                # テストデータ
+│   ├── audio_samples/
+│   └── database_schemas/
+└── conftest.py             # 共有フィクスチャ
 ```
 
-## 単体テスト
+### コアコンポーネントテスト
 
-### 3. AudioFingerprinterのテスト
+#### 音声処理パイプラインテスト
+
+音声指紋エンジンの各段階を検証：
 
 ```python
-# tests/test_audio_fingerprinter.py
-import pytest
-import numpy as np
-import tempfile
-import os
-from unittest.mock import patch, MagicMock
+def test_spectrogram_generation():
+    """スペクトログラム生成の正確性をテスト"""
+    fingerprinter = AudioFingerprinter()
+    spectrogram = fingerprinter.generate_spectrogram(test_audio_path)
+    
+    assert spectrogram.shape[0] == expected_frequency_bins
+    assert spectrogram.shape[1] == expected_time_frames
+    assert np.all(spectrogram >= 0)  # 非負値の確認
 
-from src.audio_fingerprinter import AudioFingerprinter
-from src.exceptions import AudioProcessingError
-
-class TestAudioFingerprinter:
-    """AudioFingerprinterの単体テスト"""
+def test_peak_detection_accuracy():
+    """ピーク検出アルゴリズムの精度をテスト"""
+    peaks = fingerprinter.detect_peaks(synthetic_audio)
     
-    @pytest.fixture
-    def fingerprinter(self):
-        """テスト用fingerprinterインスタンス"""
-        return AudioFingerprinter(
-            sample_rate=22050,
-            n_fft=2048,
-            hop_length=512,
-            peak_threshold=0.15
-        )
-    
-    @pytest.fixture
-    def sample_audio_data(self):
-        """サンプル音声データ"""
-        # 1秒間のサイン波を生成
-        duration = 1.0
-        sample_rate = 22050
-        frequency = 440  # A4音
-        
-        t = np.linspace(0, duration, int(sample_rate * duration))
-        audio_data = np.sin(2 * np.pi * frequency * t).astype(np.float32)
-        
-        return audio_data, sample_rate
-    
-    @pytest.fixture
-    def temp_audio_file(self, sample_audio_data):
-        """一時音声ファイル"""
-        audio_data, sample_rate = sample_audio_data
-        
-        # 一時ファイルを作成
-        with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as f:
-            temp_path = f.name
-        
-        # librosで音声ファイルを保存
-        import soundfile as sf
-        sf.write(temp_path, audio_data, sample_rate)
-        
-        yield temp_path
-        
-        # クリーンアップ
-        if os.path.exists(temp_path):
-            os.unlink(temp_path)
-    
-    def test_initialization(self):
-        """初期化テスト"""
-        fingerprinter = AudioFingerprinter(
-            sample_rate=44100,
-            n_fft=4096,
-            peak_threshold=0.2
-        )
-        
-        assert fingerprinter.sample_rate == 44100
-        assert fingerprinter.n_fft == 4096
-        assert fingerprinter.peak_threshold == 0.2
-    
-    def test_generate_spectrogram(self, fingerprinter, temp_audio_file):
-        """スペクトログラム生成テスト"""
-        spectrogram = fingerprinter.generate_spectrogram(temp_audio_file)
-        
-        # 形状をチェック
-        assert spectrogram.ndim == 2
-        assert spectrogram.shape[0] > 0  # 周波数ビン
-        assert spectrogram.shape[1] > 0  # 時間フレーム
-        
-        # データ型をチェック
-        assert spectrogram.dtype == np.float64
-    
-    def test_detect_peaks(self, fingerprinter, temp_audio_file):
-        """ピーク検出テスト"""
-        peaks = fingerprinter.detect_peaks(temp_audio_file)
-        
-        # ピークが検出されることを確認
-        assert isinstance(peaks, list)
-        assert len(peaks) > 0
-        
-        # ピーク形式をチェック
-        for peak in peaks[:5]:  # 最初の5個をチェック
-            assert isinstance(peak, tuple)
-            assert len(peak) == 2
-            assert isinstance(peak[0], (int, np.integer))  # time
-            assert isinstance(peak[1], (int, np.integer))  # frequency
-    
-    def test_generate_fingerprints(self, fingerprinter, temp_audio_file):
-        """指紋生成テスト"""
-        fingerprints = fingerprinter.generate_fingerprints(temp_audio_file)
-        
-        # 指紋が生成されることを確認
-        assert isinstance(fingerprints, list)
-        assert len(fingerprints) > 0
-        
-        # 指紋形式をチェック
-        for fp in fingerprints[:5]:
-            assert isinstance(fp, dict)
-            assert 'hash' in fp
-            assert 'time_offset' in fp
-            assert isinstance(fp['hash'], (int, np.integer))
-            assert isinstance(fp['time_offset'], (float, np.floating))
-    
-    def test_generate_fingerprints_from_data(self, fingerprinter, sample_audio_data):
-        """音声データからの指紋生成テスト"""
-        audio_data, sample_rate = sample_audio_data
-        
-        fingerprints = fingerprinter.generate_fingerprints_from_data(
-            audio_data, sample_rate
-        )
-        
-        assert isinstance(fingerprints, list)
-        assert len(fingerprints) > 0
-    
-    def test_file_not_found_error(self, fingerprinter):
-        """ファイル未存在エラーテスト"""
-        with pytest.raises(AudioProcessingError):
-            fingerprinter.generate_fingerprints("nonexistent_file.wav")
-    
-    @patch('librosa.load')
-    def test_audio_loading_error(self, mock_load, fingerprinter):
-        """音声読み込みエラーテスト"""
-        mock_load.side_effect = Exception("Loading failed")
-        
-        with pytest.raises(AudioProcessingError):
-            fingerprinter.generate_fingerprints("test.wav")
-    
-    def test_empty_audio_data(self, fingerprinter):
-        """空の音声データテスト"""
-        empty_audio = np.array([])
-        
-        with pytest.raises(AudioProcessingError):
-            fingerprinter.generate_fingerprints_from_data(empty_audio, 22050)
-    
-    def test_parameter_validation(self):
-        """パラメータ検証テスト"""
-        # 無効なサンプリングレート
-        with pytest.raises(ValueError):
-            AudioFingerprinter(sample_rate=0)
-        
-        # 無効なFFTサイズ
-        with pytest.raises(ValueError):
-            AudioFingerprinter(n_fft=0)
-        
-        # 無効な閾値
-        with pytest.raises(ValueError):
-            AudioFingerprinter(peak_threshold=-1)
+    # 既知の周波数ピークが検出されることを確認
+    detected_frequencies = [peak[1] for peak in peaks]
+    assert 440 in detected_frequencies  # A4音の検出
 ```
 
-### 4. FingerprintDatabaseのテスト
+#### データベース層テスト
+
+各データベースバックエンドの機能を検証：
 
 ```python
-# tests/test_fingerprint_database.py
-import pytest
-import tempfile
-import os
-from unittest.mock import Mock, patch
-
-from src.fingerprint_database import FingerprintDatabase
-from src.backends.sqlite_backend import SQLiteBackend
-from src.exceptions import DatabaseError
-
-class TestFingerprintDatabase:
-    """FingerprintDatabaseの単体テスト"""
+@pytest.mark.parametrize("backend_type", ["sqlite", "mysql", "postgresql"])
+def test_fingerprint_storage_retrieval(backend_type):
+    """指紋の保存と取得をテスト"""
+    backend = create_test_backend(backend_type)
+    database = FingerprintDatabase(backend)
     
-    @pytest.fixture
-    def temp_db_path(self):
-        """一時データベースファイル"""
-        with tempfile.NamedTemporaryFile(suffix='.db', delete=False) as f:
-            temp_path = f.name
-        
-        yield temp_path
-        
-        if os.path.exists(temp_path):
-            os.unlink(temp_path)
+    # 指紋保存
+    song_id = database.store_song("test_song", test_fingerprints)
     
-    @pytest.fixture
-    def database(self, temp_db_path):
-        """テスト用データベース"""
-        backend = SQLiteBackend(temp_db_path)
-        return FingerprintDatabase(backend)
-    
-    @pytest.fixture
-    def sample_fingerprints(self):
-        """サンプル指紋データ"""
-        return [
-            {'hash': 12345, 'time_offset': 1.0},
-            {'hash': 67890, 'time_offset': 2.0},
-            {'hash': 11111, 'time_offset': 3.0}
-        ]
-    
-    def test_store_song(self, database, sample_fingerprints):
-        """楽曲保存テスト"""
-        song_id = database.store_song(
-            "Test Song",
-            sample_fingerprints,
-            artist="Test Artist",
-            album="Test Album"
-        )
-        
-        assert isinstance(song_id, int)
-        assert song_id > 0
-    
-    def test_get_song_info(self, database, sample_fingerprints):
-        """楽曲情報取得テスト"""
-        # 楽曲を保存
-        song_id = database.store_song("Test Song", sample_fingerprints)
-        
-        # 楽曲情報を取得
-        song_info = database.get_song_info(song_id)
-        
-        assert song_info is not None
-        assert song_info['id'] == song_id
-        assert song_info['name'] == "Test Song"
-    
-    def test_get_song_count(self, database, sample_fingerprints):
-        """楽曲数取得テスト"""
-        initial_count = database.get_song_count()
-        
-        # 楽曲を追加
-        database.store_song("Song 1", sample_fingerprints)
-        database.store_song("Song 2", sample_fingerprints)
-        
-        final_count = database.get_song_count()
-        assert final_count == initial_count + 2
-    
-    def test_search_fingerprints(self, database, sample_fingerprints):
-        """指紋検索テスト"""
-        # 楽曲を保存
-        song_id = database.store_song("Test Song", sample_fingerprints)
-        
-        # 検索用指紋（一部マッチ）
-        query_fingerprints = [
-            {'hash': 12345, 'time_offset': 1.0},
-            {'hash': 99999, 'time_offset': 4.0}  # マッチしない
-        ]
-        
-        matches = database.search_fingerprints(query_fingerprints)
-        
-        assert isinstance(matches, dict)
-        assert song_id in matches
-        assert len(matches[song_id]) > 0
-    
-    def test_delete_song(self, database, sample_fingerprints):
-        """楽曲削除テスト"""
-        # 楽曲を保存
-        song_id = database.store_song("Test Song", sample_fingerprints)
-        
-        # 削除前の確認
-        assert database.get_song_info(song_id) is not None
-        
-        # 削除実行
-        success = database.delete_song(song_id)
-        assert success is True
-        
-        # 削除後の確認
-        assert database.get_song_info(song_id) is None
-    
-    def test_empty_fingerprints(self, database):
-        """空の指紋リストテスト"""
-        song_id = database.store_song("Empty Song", [])
-        
-        assert isinstance(song_id, int)
-        
-        # 検索しても結果が返らないことを確認
-        matches = database.search_fingerprints([{'hash': 12345, 'time_offset': 1.0}])
-        assert song_id not in matches
-    
-    def test_backend_error_handling(self, temp_db_path):
-        """バックエンドエラーハンドリングテスト"""
-        # 無効なバックエンドをモック
-        mock_backend = Mock()
-        mock_backend.connect.side_effect = Exception("Connection failed")
-        
-        with pytest.raises(DatabaseError):
-            FingerprintDatabase(mock_backend)
-    
-    def test_duplicate_song_names(self, database, sample_fingerprints):
-        """重複楽曲名テスト"""
-        # 同じ名前の楽曲を複数保存
-        song_id1 = database.store_song("Duplicate Name", sample_fingerprints)
-        song_id2 = database.store_song("Duplicate Name", sample_fingerprints)
-        
-        assert song_id1 != song_id2
-        
-        # 両方とも取得できることを確認
-        song_info1 = database.get_song_info(song_id1)
-        song_info2 = database.get_song_info(song_id2)
-        
-        assert song_info1['name'] == song_info2['name']
-        assert song_info1['id'] != song_info2['id']
+    # 取得と検証
+    retrieved = database.get_song_fingerprints(song_id)
+    assert len(retrieved) == len(test_fingerprints)
 ```
 
-## 統合テスト
+### マッチングシステムテスト
 
-### 5. エンドツーエンドテスト
+#### 識別精度テスト
 
 ```python
-# tests/test_integration.py
+def test_identification_accuracy():
+    """楽曲識別の精度をテスト"""
+    # 既知の楽曲を追加
+    song_id = mimizam.add_song(original_audio, "test_song")
+    
+    # ノイズを追加した音声で識別テスト
+    noisy_audio = add_gaussian_noise(original_audio, snr_db=20)
+    matches = mimizam.identify_audio_data(noisy_audio, sample_rate)
+    
+    assert len(matches) > 0
+    assert matches[0]['song_id'] == song_id
+    assert matches[0]['confidence'] > 0.8
+```
+
+#### 統合テスト
+
+```python
+def test_complete_workflow():
+    """完全なワークフローの統合テスト"""
+    # 1. 楽曲追加
+    song_ids = []
+    for audio_file in test_audio_files:
+        song_id = mimizam.add_song(audio_file, f"song_{len(song_ids)}")
+        song_ids.append(song_id)
+    
+    # 2. 各楽曲の識別テスト
+    for i, audio_file in enumerate(test_audio_files):
+        matches = mimizam.identify(audio_file)
+        assert matches[0]['song_id'] == song_ids[i]
+```
+
+### パフォーマンステストインフラ
+
+#### Testcontainers統合
+
+実際のデータベース環境での分離されたテスト：
+
+```python
 import pytest
-import tempfile
-import os
-import numpy as np
-import soundfile as sf
+from testcontainers.mysql import MySqlContainer
+from testcontainers.postgres import PostgresContainer
 
-from src.mimizam import Mimizam
-from src.audio_fingerprinter import AudioFingerprinter
-from src.fingerprint_database import FingerprintDatabase
-from src.backends.sqlite_backend import SQLiteBackend
+@pytest.fixture(scope="session")
+def mysql_container():
+    """MySQL testcontainerの設定"""
+    with MySqlContainer("mysql:8.0") as mysql:
+        yield mysql
 
-class TestIntegration:
-    """統合テスト"""
+@pytest.fixture(scope="session") 
+def postgres_container():
+    """PostgreSQL testcontainerの設定"""
+    with PostgresContainer("postgres:13") as postgres:
+        yield postgres
+
+def test_mysql_performance(mysql_container):
+    """MySQL環境でのパフォーマンステスト"""
+    connection_url = mysql_container.get_connection_url()
+    backend = MySQLBackend.from_url(connection_url)
     
-    @pytest.fixture
-    def temp_db_path(self):
-        """一時データベースファイル"""
-        with tempfile.NamedTemporaryFile(suffix='.db', delete=False) as f:
-            temp_path = f.name
-        
-        yield temp_path
-        
-        if os.path.exists(temp_path):
-            os.unlink(temp_path)
+    # 大量データでのパフォーマンステスト
+    start_time = time.time()
+    for i in range(1000):
+        backend.store_fingerprints(f"song_{i}", generate_test_fingerprints())
     
-    @pytest.fixture
-    def mimizam_instance(self, temp_db_path):
-        """Mimizamインスタンス"""
-        fingerprinter = AudioFingerprinter()
-        backend = SQLiteBackend(temp_db_path)
-        database = FingerprintDatabase(backend)
-        
-        return Mimizam(fingerprinter, database)
+    duration = time.time() - start_time
+    assert duration < 30.0  # 30秒以内での完了を期待
+```
+
+#### 音声データ生成
+
+```python
+def generate_test_audio(duration=10.0, sample_rate=22050):
+    """テスト用音声データの生成"""
+    t = np.linspace(0, duration, int(sample_rate * duration))
     
-    @pytest.fixture
-    def test_audio_files(self):
-        """テスト用音声ファイル"""
-        files = []
-        
-        for i, freq in enumerate([440, 880, 1320]):  # A4, A5, E6
-            # 音声データを生成
-            duration = 2.0
-            sample_rate = 22050
-            t = np.linspace(0, duration, int(sample_rate * duration))
-            audio_data = np.sin(2 * np.pi * freq * t).astype(np.float32)
-            
-            # 一時ファイルに保存
-            with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as f:
-                temp_path = f.name
-            
-            sf.write(temp_path, audio_data, sample_rate)
-            files.append(temp_path)
-        
-        yield files
-        
-        # クリーンアップ
-        for file_path in files:
-            if os.path.exists(file_path):
-                os.unlink(file_path)
+    # 複数の周波数成分を持つ複雑な信号
+    frequencies = [440, 880, 1320, 1760]  # A4, A5, E6, A6
+    audio = np.zeros_like(t)
     
-    def test_complete_workflow(self, mimizam_instance, test_audio_files):
-        """完全なワークフローテスト"""
-        # 1. 楽曲を追加
-        song_ids = []
-        for i, audio_file in enumerate(test_audio_files):
-            song_id = mimizam_instance.add_song(
-                audio_file,
-                song_name=f"Test Song {i+1}",
-                artist=f"Test Artist {i+1}"
-            )
-            song_ids.append(song_id)
-        
-        # 2. 楽曲数を確認
-        assert mimizam_instance.get_song_count() == len(test_audio_files)
-        
-        # 3. 各楽曲を識別
-        for i, audio_file in enumerate(test_audio_files):
-            matches = mimizam_instance.identify(audio_file)
-            
-            assert len(matches) > 0
-            best_match = matches[0]
-            assert best_match['song_id'] == song_ids[i]
-            assert best_match['confidence'] > 0.5
+    for freq in frequencies:
+        audio += np.sin(2 * np.pi * freq * t) * np.random.uniform(0.5, 1.0)
     
-    def test_audio_data_identification(self, mimizam_instance, test_audio_files):
-        """音声データ識別テスト"""
-        # 楽曲を追加
-        song_id = mimizam_instance.add_song(
-            test_audio_files[0],
-            song_name="Test Song"
-        )
-        
-        # 音声データを読み込み
-        import librosa
-        audio_data, sr = librosa.load(test_audio_files[0], sr=22050)
-        
-        # 音声データから識別
-        matches = mimizam_instance.identify_audio_data(audio_data, sr)
+    # ノイズ追加
+    noise = np.random.normal(0, 0.1, audio.shape)
+    audio = audio + noise
+    
+    return audio.astype(np.float32)
+```
+
+### パフォーマンス指標収集
+
+#### テスト実行ワークフロー
+
+```python
+def test_fingerprint_generation_speed():
+    """指紋生成速度のベンチマーク"""
+    audio_data = generate_test_audio(duration=30.0)
+    fingerprinter = AudioFingerprinter()
+    
+    start_time = time.time()
+    fingerprints = fingerprinter.generate_fingerprints_from_data(
+        audio_data, 22050
+    )
+    generation_time = time.time() - start_time
+    
+    # パフォーマンス指標
+    fingerprints_per_second = len(fingerprints) / generation_time
+    audio_duration_ratio = 30.0 / generation_time
+    
+    assert fingerprints_per_second > 100  # 最低100指紋/秒
+    assert audio_duration_ratio > 1.0     # リアルタイムより高速
+```
+
+### 単体テスト実行
+
+```bash
+# 基本的な単体テスト
+pytest tests/unit/ -v
+
+# カバレッジ付きテスト
+pytest tests/unit/ --cov=src/ --cov-report=html
+
+# 特定のバックエンドテスト
+pytest tests/unit/test_backends/test_mysql.py -v
+
+# パフォーマンステスト
+pytest tests/performance/ --benchmark-only
+```
+
+### Mimizam高レベルAPIテスト
+
+#### エンドツーエンドワークフローテスト
+
+```python
+def test_complete_identification_workflow():
+    """完全な識別ワークフローのテスト"""
+    mimizam = create_mimizam_sqlite(":memory:")
+    
+    # 1. 楽曲ライブラリの構築
+    song_ids = []
+    for audio_file in test_audio_collection:
+        song_id = mimizam.add_song(audio_file, song_name=audio_file.stem)
+        song_ids.append(song_id)
+    
+    # 2. 識別精度の検証
+    for i, audio_file in enumerate(test_audio_collection):
+        matches = mimizam.identify(audio_file)
         
         assert len(matches) > 0
-        assert matches[0]['song_id'] == song_id
+        assert matches[0]['song_id'] == song_ids[i]
+        assert matches[0]['confidence'] > 0.7
+
+def test_cross_backend_compatibility():
+    """複数バックエンド間の互換性テスト"""
+    backends = ['sqlite', 'mysql', 'postgresql']
     
-    def test_partial_audio_identification(self, mimizam_instance, test_audio_files):
-        """部分音声識別テスト"""
-        # 楽曲を追加
-        song_id = mimizam_instance.add_song(
-            test_audio_files[0],
-            song_name="Full Song"
-        )
+    for backend_type in backends:
+        mimizam = create_test_mimizam(backend_type)
         
-        # 音声の一部を切り出し
-        import librosa
+        # 同じ楽曲で同じ結果が得られることを確認
+        song_id = mimizam.add_song(reference_audio, "test_song")
+        matches = mimizam.identify(reference_audio)
+        
+        assert matches[0]['song_id'] == song_id
+        assert matches[0]['confidence'] > 0.9
+```
+
+### テスト実行ワークフロー
+
+#### 単体テスト実行
+
+```bash
+# 基本的な単体テスト
+pytest tests/unit/ -v
+
+# 特定のコンポーネントテスト
+pytest tests/unit/test_audio_fingerprinter.py::test_peak_detection -v
+
+# カバレッジレポート生成
+pytest tests/unit/ --cov=src/ --cov-report=html --cov-report=term
+```
+
+#### 統合テスト実行
+
+```bash
+# データベース統合テスト（testcontainers使用）
+pytest tests/integration/ -v --tb=short
+
+# 特定のバックエンドテスト
+pytest tests/integration/ -k "mysql" -v
+
+# パフォーマンステスト
+pytest tests/performance/ --benchmark-only --benchmark-sort=mean
+```
+
+### パフォーマンステスト
+
+#### テストデータ要件
+
+パフォーマンステストには以下のテストデータセットを使用：
+
+```python
+# テストデータ生成
+def create_performance_test_dataset():
+    """パフォーマンステスト用データセット作成"""
+    dataset = {
+        'short_clips': generate_audio_clips(duration=5.0, count=100),
+        'medium_clips': generate_audio_clips(duration=30.0, count=50), 
+        'long_clips': generate_audio_clips(duration=180.0, count=10),
+        'noisy_clips': add_noise_variants(base_clips, noise_levels=[0.1, 0.3, 0.5])
+    }
+    return dataset
+
+@pytest.mark.performance
+def test_batch_processing_speed():
+    """バッチ処理速度のテスト"""
+    dataset = create_performance_test_dataset()
+    mimizam = create_mimizam_sqlite(":memory:")
+    
+    start_time = time.time()
+    for audio_clip in dataset['medium_clips']:
+        mimizam.add_song(audio_clip, song_name=f"song_{len(song_ids)}")
+    
+    processing_time = time.time() - start_time
+    songs_per_second = len(dataset['medium_clips']) / processing_time
+    
+    assert songs_per_second > 1.0  # 最低1楽曲/秒の処理速度
+```
+
+### 継続的統合考慮事項
+
+#### データベースバックエンドテストマトリックス
+
+CI環境では以下のマトリックスでテストを実行：
+
+| Python版 | SQLite | MySQL | PostgreSQL | Elasticsearch |
+|----------|--------|-------|------------|---------------|
+| 3.9      | ✓      | ✓     | ✓          | ✓             |
+| 3.10     | ✓      | ✓     | ✓          | ✓             |
+| 3.11     | ✓      | ✓     | ✓          | ✓             |
+| 3.12     | ✓      | ✓     | ✓          | ✓             |
+
+#### テスト分類とタグ付け
+
+```python
+# テストマーカーの使用例
+@pytest.mark.unit
+def test_fingerprint_generation():
+    """単体テスト"""
+    pass
+
+@pytest.mark.integration  
+def test_database_integration():
+    """統合テスト"""
+    pass
+
+@pytest.mark.performance
+def test_processing_speed():
+    """パフォーマンステスト"""
+    pass
+
+@pytest.mark.slow
+def test_large_dataset_processing():
+    """時間のかかるテスト"""
+    pass
+```
         full_audio, sr = librosa.load(test_audio_files[0], sr=22050)
         
         # 中間部分を抽出（0.5秒〜1.5秒）
