@@ -21,82 +21,39 @@
 
 ## AudioFingerprinterクラス
 
-### クラス定義
+### クラス設計
 
-```python
-class AudioFingerprinter:
-    """
-    音声指紋生成の中核クラス
-    
-    音声ファイルからスペクトログラムを生成し、ピークを検出して
-    一意の指紋ハッシュを作成します。
-    """
-    
-    def __init__(self, **params):
-        """
-        AudioFingerprinterを初期化
-        
-        Args:
-            **params: 設定パラメータ
-                - sample_rate (int): サンプリングレート（デフォルト: 22050）
-                - n_fft (int): FFTサイズ（デフォルト: 2048）
-                - hop_length (int): ホップ長（デフォルト: 512）
-                - window (str): 窓関数（デフォルト: 'hann'）
-                - peak_threshold (float): ピーク検出閾値（デフォルト: 0.15）
-                - min_peak_distance (int): ピーク間最小距離（デフォルト: 10）
-                - target_zone_size (int): ターゲットゾーンサイズ（デフォルト: 5）
-                - max_time_delta (int): 最大時間差（デフォルト: 200）
-        """
-        # 音声処理パラメータ
-        self.sample_rate = params.get('sample_rate', 22050)
-        self.n_fft = params.get('n_fft', 2048)
-        self.hop_length = params.get('hop_length', 512)
-        self.window = params.get('window', 'hann')
-        
-        # ピーク検出パラメータ
-        self.peak_threshold = params.get('peak_threshold', 0.15)
-        self.min_peak_distance = params.get('min_peak_distance', 10)
-        
-        # ハッシュ生成パラメータ
-        self.target_zone_size = params.get('target_zone_size', 5)
-        self.max_time_delta = params.get('max_time_delta', 200)
-```
+AudioFingerprinterクラスは、音声指紋生成の中核となるコンポーネントです。音声ファイルからスペクトログラムを生成し、ピークを検出して一意の指紋ハッシュを作成します。
+
+#### 設計原則
+- **モジュラー構造**: 独立した処理段階による明確な責任分離
+- **パラメータ化**: 様々な音声特性に対応する柔軟な設定
+- **最適化**: Numba JITコンパイルによる高速処理
+- **拡張性**: 新しいアルゴリズムの容易な統合
+
+#### 主要パラメータカテゴリ
+- **音声処理**: サンプリングレート、FFTサイズ、ホップ長、窓関数
+- **ピーク検出**: 検出閾値、最小距離、近傍サイズ
+- **ハッシュ生成**: ターゲットゾーンサイズ、最大時間差
+- **最適化**: 適応的パラメータ調整、並列処理設定
 
 ### 主要メソッド
 
 #### generate_fingerprints()
 
-```python
-def generate_fingerprints(self, audio_path):
-    """
-    音声ファイルから指紋を生成
-    
-    Args:
-        audio_path (str): 音声ファイルのパス
-    
-    Returns:
-        list: 指紋のリスト
-            各指紋は以下の辞書:
-            - hash (int): ハッシュ値
-            - time_offset (float): 時間オフセット
-            - anchor_freq (int): アンカー周波数
-            - target_freq (int): ターゲット周波数
-            - time_delta (int): 時間差
-    
-    Raises:
-        AudioProcessingError: 音声処理エラー
-        FileNotFoundError: ファイルが見つからない
-    
-    Example:
-        >>> fingerprinter = AudioFingerprinter()
-        >>> fingerprints = fingerprinter.generate_fingerprints("song.wav")
-        >>> print(f"生成された指紋数: {len(fingerprints)}")
-    """
-    import librosa
-    
-    try:
-        # 音声ファイルを読み込み
-        audio_data, sr = librosa.load(audio_path, sr=self.sample_rate)
+音声ファイルから指紋を生成するメインメソッドです。完全な指紋生成パイプラインを実行します。
+
+##### 処理フロー
+- **音声読み込み**: 対応フォーマットの自動検出と正規化
+- **スペクトログラム生成**: STFT変換による時間-周波数表現
+- **ピーク検出**: 局所最大値の特定と閾値フィルタリング
+- **ハッシュ生成**: アンカー-ターゲットペアからの一意ハッシュ作成
+
+##### 返却データ構造
+- **ハッシュ値**: SHA-256による一意識別子
+- **時間オフセット**: 楽曲内での正確な位置情報
+- **周波数情報**: アンカーとターゲットの周波数座標
+- **時間差**: アンカー-ターゲット間の時間関係
         
         # 指紋を生成
         return self._process_audio_data(audio_data)
@@ -140,106 +97,37 @@ def generate_spectrogram(self, audio_path):
     magnitude = np.abs(stft)
     
     # デシベルスケールに変換
-    spectrogram_db = librosa.amplitude_to_db(magnitude, ref=np.max)
-    
-    return spectrogram_db
-```
-
 #### detect_peaks()
 
-```python
-def detect_peaks(self, audio_path):
-    """
-    ピークを検出
-    
-    Args:
-        audio_path (str): 音声ファイルのパス
-    
-    Returns:
-        list: ピーク座標のリスト
-            各要素は (time_bin, frequency_bin) のタプル
-    
-    Example:
-        >>> peaks = fingerprinter.detect_peaks("song.wav")
-        >>> print(f"検出されたピーク数: {len(peaks)}")
-        >>> for time, freq in peaks[:5]:
-        ...     print(f"時間: {time}, 周波数: {freq}")
-    """
-    # スペクトログラムを生成
-    spectrogram = self.generate_spectrogram(audio_path)
-    
-    # ピークを検出
-    return self._detect_peaks_from_spectrogram(spectrogram)
-```
+スペクトログラムから音響ピークを検出する特徴抽出メソッドです。
 
-### 内部メソッド
+##### ピーク検出アルゴリズム
+- **局所最大値検出**: 時間-周波数空間での顕著な特徴点の特定
+- **閾値フィルタリング**: ノイズ除去と重要ピークの選別
+- **近傍抑制**: 重複ピークの除去と最適化
+- **座標正規化**: 時間と周波数の正確な座標変換
+
+### 内部処理アーキテクチャ
 
 #### _process_audio_data()
 
-```python
-def _process_audio_data(self, audio_data):
-    """音声データから指紋を生成する内部メソッド"""
-    # スペクトログラムを生成
-    spectrogram = self._generate_spectrogram_from_data(audio_data)
-    
-    # ピークを検出
-    peaks = self._detect_peaks_from_spectrogram(spectrogram)
-    
-    # ハッシュを生成
-    fingerprints = self._generate_hashes(peaks)
-    
-    return fingerprints
-```
+音声データから指紋を生成する内部処理パイプラインです。スペクトログラム生成、ピーク検出、ハッシュ生成の各段階を統合管理します。
 
 #### _detect_peaks_from_spectrogram()
 
-```python
-def _detect_peaks_from_spectrogram(self, spectrogram):
-    """スペクトログラムからピークを検出"""
-    from scipy.ndimage import maximum_filter
-    import numpy as np
-    
-    # 局所最大値フィルタを適用
-    neighborhood_size = (self.min_peak_distance, self.min_peak_distance)
-    local_maxima = maximum_filter(spectrogram, size=neighborhood_size) == spectrogram
-    
-    # 閾値を適用
-    threshold_mask = spectrogram > self.peak_threshold
-    
-    # ピークマスクを作成
-    peak_mask = local_maxima & threshold_mask
-    
-    # ピーク座標を取得
-    peak_coords = np.where(peak_mask)
-    peaks = list(zip(peak_coords[1], peak_coords[0]))  # (time, frequency)
-    
-    return peaks
-```
+スペクトログラムからピークを検出する核心アルゴリズムです。局所最大値フィルタと閾値処理を組み合わせて、音響的に重要な特徴点を効率的に抽出します。
 
 ## FingerprintDatabaseクラス
 
-### クラス定義
+### クラス設計
 
-```python
-class FingerprintDatabase:
-    """
-    指紋データベースの統合インターフェース
-    
-    異なるデータベースバックエンドに対する統一されたインターフェースを提供し、
-    指紋の保存、検索、楽曲管理機能を実装します。
-    """
-    
-    def __init__(self, backend):
-        """
-        FingerprintDatabaseを初期化
-        
-        Args:
-            backend (DatabaseBackend): データベースバックエンド
-        """
-        self.backend = backend
-        self.backend.connect()
-        self.backend.create_tables()
-```
+FingerprintDatabaseクラスは、異なるデータベースバックエンドに対する統一されたインターフェースを提供し、指紋の保存、検索、楽曲管理機能を実装します。
+
+#### 設計原則
+- **抽象化**: データベース固有の実装詳細を隠蔽
+- **統一性**: 全バックエンドで一貫したAPI提供
+- **拡張性**: 新しいデータベースシステムの容易な追加
+- **最適化**: 各バックエンドの特性を活用した性能最適化
 
 ### 主要メソッド
 
