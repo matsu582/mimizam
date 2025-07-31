@@ -197,106 +197,48 @@ def search_fingerprints(self, query_fingerprints):
     try:
         return self.backend.search_fingerprints(query_fingerprints)
     except Exception as e:
-        raise DatabaseError(f"指紋検索エラー: {e}")
-```
-
 ## DatabaseBackendクラス（抽象基底クラス）
 
-### クラス定義
+### インターフェース設計
 
-```python
-from abc import ABC, abstractmethod
+DatabaseBackendクラスは、全てのデータベースバックエンドが実装する必要がある共通インターフェースを定義する抽象基底クラスです。
 
-class DatabaseBackend(ABC):
-    """
-    データベースバックエンドの抽象基底クラス
-    
-    全てのデータベースバックエンドが実装する必要がある
-    共通インターフェースを定義します。
-    """
-    
-    @abstractmethod
-    def connect(self):
-        """データベースに接続"""
-        pass
-    
-    @abstractmethod
-    def disconnect(self):
-        """データベース接続を切断"""
-        pass
-    
-    @abstractmethod
-    def create_tables(self):
-        """必要なテーブルを作成"""
-        pass
-    
-    @abstractmethod
-    def insert_song(self, song_name, **metadata):
-        """楽曲情報を挿入"""
-        pass
-    
-    @abstractmethod
-    def insert_fingerprints(self, song_id, fingerprints):
-        """指紋を挿入"""
-        pass
-    
-    @abstractmethod
-    def search_fingerprints(self, fingerprints):
-        """指紋を検索"""
-        pass
-    
-    @abstractmethod
-    def get_song_info(self, song_id):
-        """楽曲情報を取得"""
-        pass
-    
-    @abstractmethod
-    def get_song_count(self):
-        """楽曲数を取得"""
-        pass
-    
-    @abstractmethod
-    def delete_song(self, song_id):
-        """楽曲を削除"""
-        pass
-```
+#### 統一インターフェース
+- **接続管理**: データベース接続の確立と切断
+- **スキーマ管理**: テーブル作成とスキーマ初期化
+- **楽曲管理**: 楽曲情報の挿入、取得、削除
+- **指紋管理**: 指紋データの挿入と検索
+- **統計機能**: データベース統計情報の取得
+
+#### 抽象化の利点
+- **移植性**: アプリケーションコードの変更なしでバックエンド切り替え
+- **一貫性**: 全バックエンドで統一されたAPI提供
+- **拡張性**: 新しいデータベースシステムの容易な追加
+- **保守性**: インターフェース変更の影響範囲を最小化
 
 ## MatchingEngineクラス
 
-### クラス定義
+### エンジン設計
 
-```python
-class MatchingEngine:
-    """
-    音声マッチング・識別エンジン
-    
-    クエリ指紋をデータベース内の指紋と照合し、
-    最適なマッチを特定します。
-    """
-    
-    def __init__(self, database, scoring_method='weighted'):
-        """
-        MatchingEngineを初期化
-        
-        Args:
-            database (FingerprintDatabase): 指紋データベース
-            scoring_method (str): スコアリング手法
-                - 'basic': 基本的なマッチ数ベース
-                - 'weighted': 時間一貫性を考慮した重み付き
-                - 'statistical': 統計的手法による高度なスコアリング
-        """
-        self.database = database
-        self.scoring_method = scoring_method
-        self.match_threshold = 0.1
-        self.max_matches = 10
-```
+MatchingEngineクラスは、クエリ指紋をデータベース内の指紋と照合し、最適なマッチを特定する音声マッチング・識別エンジンです。
 
-### 主要メソッド
+#### 設計原則
+- **精度重視**: 高精度な音声識別アルゴリズム
+- **柔軟性**: 複数のスコアリング手法をサポート
+- **効率性**: 大規模データベースでの高速検索
+- **拡張性**: カスタムマッチングアルゴリズムの追加対応
+
+#### スコアリング手法
+- **基本スコアリング**: マッチ数ベースの単純な評価
+- **重み付きスコアリング**: 時間一貫性を考慮した高度な評価
+- **統計的スコアリング**: 統計的手法による精密な信頼度計算
+- **ハイブリッドスコアリング**: 複数手法の組み合わせによる最適化
+
+### 主要機能
 
 #### identify_audio()
 
-```python
-def identify_audio(self, query_fingerprints):
+音声識別のメインメソッドとして、クエリ指紋から最適なマッチを特定します。
     """
     音声を識別
     
@@ -355,326 +297,122 @@ class SpectrogramAnalyzer:
         Args:
             sample_rate (int): サンプリングレート
             n_fft (int): FFTサイズ
-            hop_length (int): ホップ長
-        """
-        self.sample_rate = sample_rate
-        self.n_fft = n_fft
-        self.hop_length = hop_length
-```
-
-### 主要メソッド
+### 主要機能
 
 #### analyze_audio()
 
-```python
-def analyze_audio(self, audio_data):
-    """
-    音声データを解析
-    
-    Args:
-        audio_data (numpy.ndarray): 音声データ
-    
-    Returns:
-        dict: 解析結果
-            - spectrogram (numpy.ndarray): スペクトログラム
-            - frequencies (numpy.ndarray): 周波数軸
-            - times (numpy.ndarray): 時間軸
-            - characteristics (dict): 音声特性
-    
-    Example:
-        >>> analyzer = SpectrogramAnalyzer()
-        >>> result = analyzer.analyze_audio(audio_data)
-        >>> print(f"スペクトログラム形状: {result['spectrogram'].shape}")
-    """
-    import librosa
-    import numpy as np
-    
-    # STFT計算
-    stft = librosa.stft(
-        audio_data,
-        n_fft=self.n_fft,
-        hop_length=self.hop_length
-    )
-    
-    # スペクトログラム生成
-    magnitude = np.abs(stft)
-    spectrogram_db = librosa.amplitude_to_db(magnitude, ref=np.max)
-    
-    # 軸情報を生成
-    frequencies = librosa.fft_frequencies(sr=self.sample_rate, n_fft=self.n_fft)
-    times = librosa.frames_to_time(
-        np.arange(spectrogram_db.shape[1]),
-        sr=self.sample_rate,
-        hop_length=self.hop_length
-    )
-    
-    # 音声特性を分析
-    characteristics = self._analyze_characteristics(audio_data, spectrogram_db)
-    
-    return {
-        'spectrogram': spectrogram_db,
-        'frequencies': frequencies,
-        'times': times,
-        'characteristics': characteristics
-    }
-```
+音声データを解析してスペクトログラムと音響特性を抽出するメインメソッドです。
+
+##### 解析プロセス
+- **STFT変換**: 短時間フーリエ変換による時間-周波数分解
+- **スペクトログラム生成**: 振幅スペクトラムのデシベル変換
+- **軸情報生成**: 正確な時間と周波数の座標系構築
+- **特性分析**: 音響特徴量の自動抽出と分類
+
+##### 返却データ構造
+- **スペクトログラム**: 時間-周波数表現の2次元配列
+- **周波数軸**: 正確な周波数ビン情報
+- **時間軸**: フレーム単位の時間座標
+- **音響特性**: 動的範囲、スペクトル重心、調波構造等
 
 ## HashGeneratorクラス
 
-### クラス定義
+### クラス設計
 
-```python
-class HashGenerator:
-    """
-    ハッシュ生成専用クラス
-    
-    ピーク座標から一意の指紋ハッシュを生成します。
-    """
-    
-    def __init__(self, target_zone_size=5, max_time_delta=200):
-        """
-        HashGeneratorを初期化
-        
-        Args:
-            target_zone_size (int): ターゲットゾーンサイズ
-            max_time_delta (int): 最大時間差
-        """
-        self.target_zone_size = target_zone_size
-        self.max_time_delta = max_time_delta
-```
+HashGeneratorクラスは、ピーク座標から一意の指紋ハッシュを生成する専用コンポーネントです。
 
-### 主要メソッド
+#### 設計原則
+- **一意性**: 音響特徴の固有性を保証するハッシュ生成
+- **効率性**: 高速なハッシュ計算アルゴリズム
+- **堅牢性**: ノイズや歪みに対する耐性
+- **スケーラビリティ**: 大量ピークデータの効率的処理
+
+### 主要機能
 
 #### generate_hashes()
 
-```python
-def generate_hashes(self, peaks):
-    """
-    ピークからハッシュを生成
-    
-    Args:
-        peaks (list): ピーク座標のリスト
-            各要素は (time, frequency) のタプル
-    
-    Returns:
-        list: 指紋ハッシュのリスト
-            各要素は以下の辞書:
-            - hash (int): ハッシュ値
-            - time_offset (float): 時間オフセット
-            - anchor_freq (int): アンカー周波数
-            - target_freq (int): ターゲット周波数
-            - time_delta (int): 時間差
-    
-    Example:
-        >>> generator = HashGenerator()
-        >>> hashes = generator.generate_hashes(peaks)
-        >>> print(f"生成されたハッシュ数: {len(hashes)}")
-    """
-    fingerprints = []
-    
-    for i, anchor_peak in enumerate(peaks):
-        anchor_time, anchor_freq = anchor_peak
-        
-        # ターゲットゾーン内のピークを検索
-        for j in range(i + 1, min(i + self.target_zone_size + 1, len(peaks))):
-            target_peak = peaks[j]
-            target_time, target_freq = target_peak
-            
-            # 時間差を計算
-            time_delta = target_time - anchor_time
-            
-            # 最大時間差を超える場合はスキップ
-            if time_delta > self.max_time_delta:
-                break
-            
-            # ハッシュを生成
-            hash_value = self._create_hash(anchor_freq, target_freq, time_delta)
-            
-            fingerprints.append({
-                'hash': hash_value,
-                'time_offset': anchor_time,
-                'anchor_freq': anchor_freq,
-                'target_freq': target_freq,
-                'time_delta': time_delta
-            })
-    
-    return fingerprints
-```
+ピーク座標から指紋ハッシュを生成するメインメソッドです。
+
+##### ハッシュ生成アルゴリズム
+- **アンカー-ターゲット方式**: Shazam互換のペア生成手法
+- **ターゲットゾーン**: 効率的な近傍ピーク選択
+- **時間制約**: 最大時間差による品質制御
+- **SHA-256ハッシュ**: 暗号学的に安全な一意識別子生成
+
+##### 返却データ構造
+- **ハッシュ値**: 一意の指紋識別子
+- **時間オフセット**: 楽曲内での正確な位置
+- **周波数情報**: アンカーとターゲットの周波数座標
+- **時間関係**: ペア間の時間的関係性
 
 ## AdaptiveParameterTunerクラス
 
-### クラス定義
+### クラス設計
 
-```python
-class AdaptiveParameterTuner:
-    """
-    適応的パラメータ調整クラス
-    
-    音声特性に基づいてシステムパラメータを自動調整します。
-    """
-    
-    def __init__(self, fingerprinter):
-        """
-        AdaptiveParameterTunerを初期化
-        
-        Args:
-            fingerprinter (AudioFingerprinter): 音声指紋生成器
-        """
-        self.fingerprinter = fingerprinter
-        self.adjustment_history = []
-```
+AdaptiveParameterTunerクラスは、音声特性に基づいてシステムパラメータを自動調整する適応的最適化コンポーネントです。
 
-### 主要メソッド
+#### 設計原則
+- **適応性**: 音声特性に応じた動的パラメータ調整
+- **学習機能**: 過去の調整履歴からの最適化学習
+- **自動化**: 手動調整不要の完全自動最適化
+- **履歴管理**: 調整過程の完全な記録と分析
+
+### 主要機能
 
 #### tune_parameters()
 
-```python
-def tune_parameters(self, audio_data):
-    """
-    音声データに基づいてパラメータを調整
-    
-    Args:
-        audio_data (numpy.ndarray): 音声データ
-    
-    Returns:
-        dict: 調整されたパラメータ
-    
-    Example:
-        >>> tuner = AdaptiveParameterTuner(fingerprinter)
-        >>> adjusted_params = tuner.tune_parameters(audio_data)
-        >>> print(f"調整されたパラメータ: {adjusted_params}")
-    """
-    # 音声特性を分析
-    characteristics = self._analyze_audio_characteristics(audio_data)
-    
-    # パラメータを調整
-    adjustments = self._calculate_adjustments(characteristics)
-    
-    # 調整を適用
-    self._apply_adjustments(adjustments)
-    
-    # 履歴を記録
-    self.adjustment_history.append({
-        'characteristics': characteristics,
-        'adjustments': adjustments,
-        'timestamp': time.time()
-    })
-    
-    return adjustments
-```
+音声データに基づいてシステムパラメータを自動調整するメインメソッドです。
 
-## 使用例
+##### 調整プロセス
+- **特性分析**: 音声の動的範囲、周波数分布、ノイズレベル分析
+- **パラメータ計算**: 特性に基づく最適パラメータの算出
+- **調整適用**: システム全体への動的パラメータ反映
+- **履歴記録**: 調整過程と結果の詳細記録
+
+##### 最適化対象
+- **ピーク検出閾値**: 音声特性に応じた動的調整
+- **ターゲットゾーンサイズ**: 音響密度に基づく最適化
+- **時間窓パラメータ**: 楽曲構造に適応した設定
+- **フィルタリング設定**: ノイズ特性に応じた調整
+
+## 実装パターン
 
 ### 低レベルコンポーネントの直接使用
 
-```python
-from mimizam.audio_fingerprinter import AudioFingerprinter
-from mimizam.backends.sqlite_backend import SQLiteBackend
-from mimizam.fingerprint_database import FingerprintDatabase
-from mimizam.matching_engine import MatchingEngine
+低レベルコンポーネントを直接使用することで、mimizamシステムの詳細な制御とカスタマイゼーションが可能になります。
 
-# 個別コンポーネントを初期化
-fingerprinter = AudioFingerprinter(
-    sample_rate=22050,
-    peak_threshold=0.15,
-    target_zone_size=5
-)
-
-backend = SQLiteBackend("music.db")
-database = FingerprintDatabase(backend)
-matching_engine = MatchingEngine(database, scoring_method='weighted')
-
-# 音声指紋を生成
-fingerprints = fingerprinter.generate_fingerprints("song.wav")
-print(f"生成された指紋数: {len(fingerprints)}")
-
-# データベースに保存
-song_id = database.store_song("My Song", fingerprints, artist="Artist")
-print(f"楽曲ID: {song_id}")
-
-# 音声を識別
-query_fingerprints = fingerprinter.generate_fingerprints("query.wav")
-matches = matching_engine.identify_audio(query_fingerprints)
-
-for match in matches:
-    print(f"マッチ: {match['song_name']} (スコア: {match['score']:.3f})")
-```
+#### 基本的な実装パターン
+- **個別初期化**: 各コンポーネントの独立した設定と初期化
+- **パイプライン構築**: カスタム処理フローの構築
+- **パラメータ調整**: 用途に特化した細かな設定調整
+- **結果分析**: 各段階での詳細な処理結果確認
 
 ### カスタムスコアリング手法の実装
 
-```python
-class CustomMatchingEngine(MatchingEngine):
-    """カスタムスコアリング手法を実装したマッチングエンジン"""
-    
-    def _custom_scoring(self, matches):
-        """カスタムスコアリング手法"""
-        scored_results = []
-        
-        for song_id, match_data in matches.items():
-            time_pairs = match_data['time_pairs']
-            
-            # カスタムスコア計算ロジック
-            base_score = len(time_pairs)
-            
-            # 時間分布の均一性を評価
-            if len(time_pairs) > 1:
-                time_offsets = [pair['query_time'] for pair in time_pairs]
-                time_span = max(time_offsets) - min(time_offsets)
-                distribution_score = time_span / len(time_pairs) if time_span > 0 else 1
-            else:
-                distribution_score = 1
-            
-            # 最終スコア
-            final_score = base_score * distribution_score
-            
-            scored_results.append({
-                'song_id': song_id,
-                'score': final_score,
-                'match_count': len(time_pairs),
-                'distribution_score': distribution_score,
-                'method': 'custom'
-            })
-        
-        return scored_results
+独自のスコアリングアルゴリズムを実装することで、特定の用途に最適化されたマッチング精度を実現できます。
 
-# カスタムエンジンを使用
-custom_engine = CustomMatchingEngine(database, scoring_method='custom')
-results = custom_engine.identify_audio(query_fingerprints)
-```
+#### カスタマイゼーション要素
+- **スコア計算ロジック**: 用途に応じた独自の評価基準
+- **時間分布分析**: マッチの時間的一貫性評価
+- **統計的手法**: 高度な統計分析による信頼度計算
+- **複合評価**: 複数の評価軸を組み合わせた総合判定
 
-### 専用解析ツールの使用
+### 専用解析ツールの活用
 
-```python
-from mimizam.spectrogram_analyzer import SpectrogramAnalyzer
-from mimizam.hash_generator import HashGenerator
-from mimizam.adaptive_parameter_tuner import AdaptiveParameterTuner
+各コンポーネントの専用解析機能を活用することで、システムの動作を詳細に理解し最適化できます。
 
-# 専用解析ツールを初期化
-analyzer = SpectrogramAnalyzer(sample_rate=22050)
-hash_generator = HashGenerator(target_zone_size=5)
-tuner = AdaptiveParameterTuner(fingerprinter)
+#### 解析機能
+- **スペクトログラム解析**: 音響特徴の視覚的確認と分析
+- **ハッシュ生成分析**: 指紋品質と分布の評価
+- **適応的調整**: 音声特性に基づく自動最適化
+- **パフォーマンス分析**: 各処理段階の効率性評価
 
-# 音声データを読み込み
-import librosa
-audio_data, sr = librosa.load("song.wav", sr=22050)
-
-# スペクトログラム解析
-analysis_result = analyzer.analyze_audio(audio_data)
-spectrogram = analysis_result['spectrogram']
-characteristics = analysis_result['characteristics']
-
-print(f"音声特性: {characteristics}")
-
-# 適応的パラメータ調整
-adjusted_params = tuner.tune_parameters(audio_data)
-print(f"調整されたパラメータ: {adjusted_params}")
-
-# ピーク検出とハッシュ生成
-peaks = fingerprinter._detect_peaks_from_spectrogram(spectrogram)
-hashes = hash_generator.generate_hashes(peaks)
-
-print(f"検出されたピーク数: {len(peaks)}")
-print(f"生成されたハッシュ数: {len(hashes)}")
-```
+## まとめ
 
 低レベルコンポーネントを直接使用することで、mimizamシステムの詳細な制御とカスタマイゼーションが可能になります。これらのコンポーネントは、特定の要件に合わせた独自の音声指紋システムを構築する際の基盤として活用できます。
+
+### 技術的優位性
+- **柔軟性**: 各コンポーネントの独立した制御と調整
+- **拡張性**: カスタムアルゴリズムの容易な統合
+- **透明性**: 内部処理の完全な可視性と制御
+- **最適化**: 用途に特化した性能調整
