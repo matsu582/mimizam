@@ -21,83 +21,33 @@
 
 ## Mimizamクラス
 
-### クラス定義
+### クラス設計
 
-```python
-class Mimizam:
-    """
-    mimizam統合インターフェース
-    
-    音声指紋生成、データベース管理、楽曲識別の全機能を
-    統合した高レベルインターフェースを提供します。
-    """
-    
-    def __init__(self, fingerprinter, database):
-        """
-        Mimizamインスタンスを初期化
-        
-        Args:
-            fingerprinter (AudioFingerprinter): 音声指紋生成器
-            database (FingerprintDatabase): 指紋データベース
-        """
-        self.fingerprinter = fingerprinter
-        self.database = database
-```
+Mimizamクラスは、音声指紋生成、データベース管理、楽曲識別の全機能を統合した高レベルインターフェースを提供します。
+
+#### 設計原則
+- **統合性**: 複数のコンポーネントを単一インターフェースで管理
+- **抽象化**: 内部実装の複雑さを隠蔽
+- **一貫性**: 統一されたメソッド命名と引数構造
+- **拡張性**: 将来の機能追加に対応する柔軟な設計
 
 ### 楽曲管理メソッド
 
 #### add_song()
 
-```python
-def add_song(self, audio_path, song_name, **metadata):
-    """
-    楽曲をデータベースに追加
-    
-    Args:
-        audio_path (str): 音声ファイルのパス
-        song_name (str): 楽曲名
-        **metadata: 追加のメタデータ
-            - artist (str): アーティスト名
-            - album (str): アルバム名
-            - duration (float): 再生時間（秒）
-            - genre (str): ジャンル
-            - year (int): リリース年
-            - track_number (int): トラック番号
-    
-    Returns:
-        int: 楽曲ID
-    
-    Raises:
-        AudioProcessingError: 音声ファイルの読み込みまたは処理エラー
-        DatabaseError: データベース操作エラー
-        FileNotFoundError: 音声ファイルが見つからない
-    
-    Example:
-        >>> mimizam = create_mimizam_sqlite("music.db")
-        >>> song_id = mimizam.add_song(
-        ...     "path/to/song.wav",
-        ...     song_name="My Favorite Song",
-        ...     artist="Artist Name",
-        ...     album="Album Name",
-        ...     year=2023
-        ... )
-        >>> print(f"楽曲ID: {song_id}")
-    """
-    try:
-        # 音声ファイルの存在確認
-        if not os.path.exists(audio_path):
-            raise FileNotFoundError(f"音声ファイルが見つかりません: {audio_path}")
-        
-        # 指紋を生成
-        fingerprints = self.fingerprinter.generate_fingerprints(audio_path)
-        
-        # メタデータに追加情報を設定
-        metadata['file_path'] = audio_path
-        if 'duration' not in metadata:
-            metadata['duration'] = self._get_audio_duration(audio_path)
-        
-        # データベースに保存
-        song_id = self.database.store_song(song_name, fingerprints, **metadata)
+楽曲をデータベースに追加する主要メソッドです。音声ファイルから指紋を生成し、メタデータと共にデータベースに保存します。
+
+##### 機能概要
+- **音声処理**: 対応フォーマットの自動検出と読み込み
+- **指紋生成**: 高精度な音声指紋の自動生成
+- **メタデータ管理**: 楽曲情報の構造化保存
+- **エラー処理**: ファイル不存在やフォーマットエラーの適切な処理
+
+##### サポートメタデータ
+- **基本情報**: アーティスト名、アルバム名、再生時間
+- **分類情報**: ジャンル、リリース年、トラック番号
+- **技術情報**: ファイルパス、音声品質、エンコード情報
+- **カスタム情報**: ユーザー定義の追加属性
         
         return song_id
         
@@ -151,103 +101,40 @@ def get_song_info(self, song_id):
 
 #### get_song_count()
 
-```python
-def get_song_count(self):
-    """
-    データベース内の楽曲数を取得
-    
-    Returns:
-        int: 楽曲数
-    
-    Example:
-        >>> count = mimizam.get_song_count()
-        >>> print(f"データベース内楽曲数: {count}")
-    """
-    return self.database.get_song_count()
-```
+データベース内の楽曲数を取得する統計メソッドです。
+
+##### 機能
+- **楽曲数取得**: データベース内の総楽曲数の即座取得
+- **統計情報**: システム利用状況の把握
+- **管理支援**: データベース容量とパフォーマンス管理
 
 #### delete_song()
 
-```python
-def delete_song(self, song_id):
-    """
-    楽曲を削除
-    
-    Args:
-        song_id (int): 削除する楽曲ID
-    
-    Returns:
-        bool: 削除成功フラグ
-    
-    Raises:
-        DatabaseError: データベース操作エラー
-        ValueError: 無効な楽曲ID
-    
-    Example:
-        >>> success = mimizam.delete_song(1)
-        >>> if success:
-        ...     print("楽曲を削除しました")
-    """
-    try:
-        return self.database.delete_song(song_id)
-    except Exception as e:
-        if isinstance(e, (DatabaseError, ValueError)):
-            raise
-        else:
-            raise DatabaseError(f"楽曲削除エラー: {e}")
-```
+指定された楽曲をデータベースから完全に削除するメソッドです。
+
+##### 削除処理
+- **楽曲削除**: 楽曲レコードとメタデータの完全削除
+- **指紋削除**: 関連する全音声指紋データの削除
+- **整合性保証**: データベース整合性の自動維持
+- **エラー処理**: 無効ID や削除失敗の適切な処理
 
 ### 音声識別メソッド
 
 #### identify()
 
-```python
-def identify(self, audio_path, threshold=None):
-    """
-    音声ファイルから楽曲を識別
-    
-    Args:
-        audio_path (str): 識別する音声ファイルのパス
-        threshold (float, optional): マッチング閾値
-    
-    Returns:
-        list: マッチした楽曲のリスト
-            各要素は以下の辞書:
-            - song_id (int): 楽曲ID
-            - song_name (str): 楽曲名
-            - artist (str): アーティスト名
-            - album (str): アルバム名
-            - score (float): マッチスコア
-            - confidence (float): 信頼度
-            - match_count (int): マッチ数
-            - time_offset (float): 時間オフセット
-    
-    Raises:
-        AudioProcessingError: 音声処理エラー
-        FileNotFoundError: 音声ファイルが見つからない
-    
-    Example:
-        >>> matches = mimizam.identify("query.wav")
-        >>> if matches:
-        ...     best_match = matches[0]
-        ...     print(f"識別結果: {best_match['song_name']}")
-        ...     print(f"信頼度: {best_match['confidence']:.3f}")
-        ... else:
-        ...     print("マッチする楽曲が見つかりませんでした")
-    """
-    try:
-        # 音声ファイルの存在確認
-        if not os.path.exists(audio_path):
-            raise FileNotFoundError(f"音声ファイルが見つかりません: {audio_path}")
-        
-        # 指紋を生成
-        query_fingerprints = self.fingerprinter.generate_fingerprints(audio_path)
-        
-        # 識別を実行
-        return self._identify_fingerprints(query_fingerprints, threshold)
-        
-    except Exception as e:
-        if isinstance(e, (AudioProcessingError, FileNotFoundError)):
+音声ファイルから楽曲を識別するメインメソッドです。高精度な音声指紋マッチングにより楽曲を特定します。
+
+##### 識別プロセス
+- **音声読み込み**: 対応フォーマットの自動検出と読み込み
+- **指紋生成**: クエリ音声からの特徴抽出
+- **データベース検索**: 効率的な指紋マッチング
+- **結果ランキング**: 信頼度に基づく結果順位付け
+
+##### 返却情報
+- **楽曲情報**: ID、楽曲名、アーティスト、アルバム
+- **マッチング情報**: スコア、信頼度、マッチ数
+- **時間情報**: 時間オフセット、マッチ位置
+- **品質指標**: 識別精度と信頼性評価
             raise
         else:
             raise AudioProcessingError(f"音声識別エラー: {e}")
@@ -310,107 +197,43 @@ def generate_spectrogram(self, audio_path):
     
     Returns:
         numpy.ndarray: スペクトログラム（時間×周波数）
-    
-    Raises:
-        AudioProcessingError: 音声処理エラー
-        FileNotFoundError: 音声ファイルが見つからない
-    
-    Example:
-        >>> spectrogram = mimizam.generate_spectrogram("song.wav")
-        >>> print(f"スペクトログラム形状: {spectrogram.shape}")
-    """
-    try:
-        if not os.path.exists(audio_path):
-            raise FileNotFoundError(f"音声ファイルが見つかりません: {audio_path}")
-        
-        return self.fingerprinter.generate_spectrogram(audio_path)
-        
-    except Exception as e:
-        if isinstance(e, (AudioProcessingError, FileNotFoundError)):
-            raise
-        else:
-            raise AudioProcessingError(f"スペクトログラム生成エラー: {e}")
-```
+#### generate_spectrogram()
+
+音声ファイルからスペクトログラムを生成する低レベルメソッドです。
+
+##### 機能概要
+- **時間周波数変換**: 音声信号の時間-周波数表現への変換
+- **スペクトログラム生成**: 高解像度な音響特徴の可視化
+- **前処理**: 音声品質の正規化と最適化
+- **エラー処理**: ファイル形式や品質問題の適切な処理
 
 #### detect_peaks()
 
-```python
-def detect_peaks(self, audio_path):
-    """
-    ピークを検出
-    
-    Args:
-        audio_path (str): 音声ファイルのパス
-    
-    Returns:
-        list: 検出されたピーク座標のリスト
-            各要素は (time, frequency) のタプル
-    
-    Raises:
-        AudioProcessingError: 音声処理エラー
-        FileNotFoundError: 音声ファイルが見つからない
-    
-    Example:
-        >>> peaks = mimizam.detect_peaks("song.wav")
-        >>> print(f"検出されたピーク数: {len(peaks)}")
-        >>> for time, freq in peaks[:5]:
-        ...     print(f"時間: {time}, 周波数: {freq}")
-    """
-    try:
-        if not os.path.exists(audio_path):
-            raise FileNotFoundError(f"音声ファイルが見つかりません: {audio_path}")
-        
-        return self.fingerprinter.detect_peaks(audio_path)
-        
-    except Exception as e:
-        if isinstance(e, (AudioProcessingError, FileNotFoundError)):
-            raise
-        else:
-            raise AudioProcessingError(f"ピーク検出エラー: {e}")
-```
+スペクトログラムから音響ピークを検出する特徴抽出メソッドです。
+
+##### ピーク検出
+- **局所最大値検出**: 時間-周波数空間での顕著な特徴点抽出
+- **閾値処理**: ノイズ除去と重要ピークの選別
+- **座標取得**: 時間と周波数の正確な座標情報
+- **品質管理**: 検出精度の最適化と調整
 
 ## ファクトリ関数
 
 ### create_mimizam_sqlite()
 
-```python
-def create_mimizam_sqlite(db_path, **params):
-    """
-    SQLiteバックエンドでMimizamインスタンスを作成
-    
-    Args:
-        db_path (str): SQLiteデータベースファイルのパス
-        **params: AudioFingerprinterのパラメータ
-            - sample_rate (int): サンプリングレート（デフォルト: 22050）
-            - n_fft (int): FFTサイズ（デフォルト: 2048）
-            - hop_length (int): ホップ長（デフォルト: 512）
-            - peak_threshold (float): ピーク検出閾値（デフォルト: 0.15）
-            - min_peak_distance (int): ピーク間最小距離（デフォルト: 10）
-            - target_zone_size (int): ターゲットゾーンサイズ（デフォルト: 5）
-            - max_time_delta (int): 最大時間差（デフォルト: 200）
-    
-    Returns:
-        Mimizam: 設定済みのMimizamインスタンス
-    
-    Example:
-        >>> # 基本的な使用
-        >>> mimizam = create_mimizam_sqlite("music.db")
-        >>> 
-        >>> # カスタムパラメータ
-        >>> mimizam = create_mimizam_sqlite(
-        ...     "music.db",
-        ...     sample_rate=44100,
-        ...     peak_threshold=0.1,
-        ...     target_zone_size=3
-        ... )
-    """
-    from mimizam.backends.sqlite_backend import SQLiteBackend
-    from mimizam.audio_fingerprinter import AudioFingerprinter
-    from mimizam.fingerprint_database import FingerprintDatabase
-    
-    # バックエンドを作成
-    backend = SQLiteBackend(db_path)
-    
+SQLiteバックエンドを使用したMimizamインスタンスを作成するファクトリ関数です。
+
+#### 機能概要
+- **簡単セットアップ**: 最小限の設定でSQLiteベースシステムを構築
+- **自動初期化**: データベーススキーマの自動作成と設定
+- **パラメータ調整**: 音声処理パラメータのカスタマイズ対応
+- **エラー処理**: データベース接続とファイル問題の適切な処理
+
+#### 設定可能パラメータ
+- **音声処理**: サンプリングレート、FFTサイズ、ホップ長
+- **ピーク検出**: 検出閾値、最小距離、ターゲットゾーンサイズ
+- **マッチング**: 最大時間差、スコアリング手法
+- **データベース**: ファイルパス、接続設定、最適化オプション
     # 指紋生成器を作成
     fingerprinter = AudioFingerprinter(**params)
     
@@ -476,323 +299,133 @@ def create_mimizam_mysql(host, user, password, database, port=3306, **params):
 
 ### create_mimizam_postgresql()
 
-```python
-def create_mimizam_postgresql(host, user, password, database, port=5432, **params):
-    """
-    PostgreSQLバックエンドでMimizamインスタンスを作成
-    
-    Args:
-        host (str): PostgreSQLサーバーのホスト
-        user (str): ユーザー名
-        password (str): パスワード
-        database (str): データベース名
-        port (int, optional): ポート番号（デフォルト: 5432）
-        **params: AudioFingerprinterのパラメータ
-    
-    Returns:
-        Mimizam: 設定済みのMimizamインスタンス
-    
-    Example:
-        >>> mimizam = create_mimizam_postgresql(
-        ...     host="postgres.example.com",
-        ...     user="mimizam_user",
-        ...     password="secure_password",
-        ...     database="music_db"
-        ... )
-        >>> 
-        >>> # SSL接続
-        >>> mimizam = create_mimizam_postgresql(
-        ...     host="postgres.example.com",
-        ...     user="mimizam_user",
-        ...     password="secure_password",
-        ...     database="music_db",
-        ...     sslmode="require"
-        ... )
-    """
-    from mimizam.backends.postgresql_backend import PostgreSQLBackend
-    from mimizam.audio_fingerprinter import AudioFingerprinter
-    from mimizam.fingerprint_database import FingerprintDatabase
-    
-    # バックエンドを作成
-    backend = PostgreSQLBackend(host, user, password, database, port)
-    
-    # 指紋生成器を作成
-    fingerprinter = AudioFingerprinter(**params)
-    
-    # データベースを作成
-    database = FingerprintDatabase(backend)
-    
-    # Mimizamインスタンスを作成
-    return Mimizam(fingerprinter, database)
-```
+PostgreSQLバックエンドを使用したMimizamインスタンスを作成するエンタープライズ向けファクトリ関数です。
+
+#### 機能概要
+- **高性能データベース**: PostgreSQLの高度な機能を活用
+- **スケーラビリティ**: 大規模データセットに対応
+- **セキュリティ**: SSL接続と認証機能の完全サポート
+- **トランザクション**: ACID準拠の信頼性の高いデータ処理
+
+#### 接続設定
+- **基本接続**: ホスト、ユーザー、パスワード、データベース名
+- **セキュリティ**: SSL/TLS暗号化接続オプション
+- **パフォーマンス**: 接続プールとキャッシュ設定
+- **監視**: 接続状態とパフォーマンス監視機能
 
 ### create_mimizam_elasticsearch()
 
-```python
-def create_mimizam_elasticsearch(hosts, index_name="mimizam", **params):
-    """
-    ElasticsearchバックエンドでMimizamインスタンスを作成
-    
-    Args:
-        hosts (str or list): Elasticsearchホスト
-        index_name (str, optional): インデックス名（デフォルト: "mimizam"）
-        **params: AudioFingerprinterのパラメータ
-    
-    Returns:
-        Mimizam: 設定済みのMimizamインスタンス
-    
-    Example:
-        >>> # 単一ノード
-        >>> mimizam = create_mimizam_elasticsearch(
-        ...     hosts="localhost:9200",
-        ...     index_name="music_fingerprints"
-        ... )
-        >>> 
-        >>> # 複数ノード
-        >>> mimizam = create_mimizam_elasticsearch(
-        ...     hosts=[
-        ...         {"host": "es1.example.com", "port": 9200},
-        ...         {"host": "es2.example.com", "port": 9200}
-        ...     ],
-        ...     index_name="music_fingerprints"
-        ... )
-        >>> 
-        >>> # 認証付き
-        >>> mimizam = create_mimizam_elasticsearch(
-        ...     hosts="es.example.com:9200",
-        ...     index_name="music_fingerprints",
-        ...     username="elastic",
-        ...     password="password",
-        ...     use_ssl=True
-        ... )
-    """
-    from mimizam.backends.elasticsearch_backend import ElasticsearchBackend
-    from mimizam.audio_fingerprinter import AudioFingerprinter
-    from mimizam.fingerprint_database import FingerprintDatabase
-    
-    # バックエンドを作成
-    backend = ElasticsearchBackend(hosts, index_name)
-    
-    # 指紋生成器を作成
-    fingerprinter = AudioFingerprinter(**params)
-    
-    # データベースを作成
-    database = FingerprintDatabase(backend)
-    
-    # Mimizamインスタンスを作成
-    return Mimizam(fingerprinter, database)
-```
+Elasticsearchバックエンドを使用したMimizamインスタンスを作成する分散検索向けファクトリ関数です。
+
+#### 機能概要
+- **分散検索**: 高速な全文検索と音声指紋検索
+- **スケーラビリティ**: 水平スケーリングによる大容量対応
+- **リアルタイム**: 近リアルタイムでの検索とインデックス更新
+- **分析機能**: 高度な検索分析と統計機能
+
+#### クラスター設定
+- **ノード管理**: 単一ノードから複数ノードクラスターまで対応
+- **インデックス設定**: カスタムインデックス名とマッピング設定
+- **セキュリティ**: 認証、SSL/TLS、ロールベースアクセス制御
+- **監視**: クラスター状態とパフォーマンス監視
 
 ## 便利メソッド
 
 ### バッチ処理
 
-```python
-def batch_add_songs(mimizam, file_list, progress_callback=None):
-    """
-    複数の楽曲をバッチで追加
-    
-    Args:
-        mimizam (Mimizam): Mimizamインスタンス
-        file_list (list): 音声ファイルパスのリスト
-        progress_callback (callable, optional): 進捗コールバック関数
-    
-    Returns:
-        dict: 処理結果
-            - success_count (int): 成功数
-            - error_count (int): エラー数
-            - errors (list): エラー詳細
-    
-    Example:
-        >>> files = ["song1.wav", "song2.mp3", "song3.flac"]
-        >>> 
-        >>> def progress(current, total, filename):
-        ...     print(f"処理中 {current}/{total}: {filename}")
-        >>> 
-        >>> result = batch_add_songs(mimizam, files, progress)
-        >>> print(f"成功: {result['success_count']}, エラー: {result['error_count']}")
-    """
-    import os
-    
-    success_count = 0
-    error_count = 0
-    errors = []
-    
-    for i, filepath in enumerate(file_list):
-        try:
-            if progress_callback:
-                progress_callback(i + 1, len(file_list), os.path.basename(filepath))
-            
-            song_name = os.path.splitext(os.path.basename(filepath))[0]
-            mimizam.add_song(filepath, song_name=song_name)
-            success_count += 1
-            
-        except Exception as e:
-            error_count += 1
-            errors.append({
-                'file': filepath,
-                'error': str(e)
-            })
-    
-    return {
-        'success_count': success_count,
-        'error_count': error_count,
-        'errors': errors
-    }
-```
+大量の音声ファイルを効率的に処理するためのバッチ処理機能を提供します。
+
+#### バッチ処理機能
+- **一括追加**: 複数音声ファイルの自動処理
+- **進捗監視**: リアルタイムでの処理状況表示
+- **エラー処理**: 個別ファイルエラーの適切な処理と継続
+- **結果レポート**: 詳細な処理結果と統計情報
+
+#### 処理最適化
+- **並列処理**: マルチスレッドによる高速化
+- **メモリ管理**: 大量ファイル処理時のメモリ効率化
+- **エラー回復**: 一時的なエラーからの自動回復
+- **進捗保存**: 中断時の処理状態保存と再開機能
 
 ### 統計情報
 
-```python
-def get_database_statistics(mimizam):
-    """
-    データベース統計情報を取得
-    
-    Args:
-        mimizam (Mimizam): Mimizamインスタンス
-    
-    Returns:
-        dict: 統計情報
-            - song_count (int): 楽曲数
-            - fingerprint_count (int): 指紋数
-            - avg_fingerprints_per_song (float): 楽曲あたり平均指紋数
-            - database_size (str): データベースサイズ
-    
-    Example:
-        >>> stats = get_database_statistics(mimizam)
-        >>> print(f"楽曲数: {stats['song_count']}")
-        >>> print(f"指紋数: {stats['fingerprint_count']}")
-    """
-    song_count = mimizam.get_song_count()
-    
-    # データベース固有の統計を取得
-    db_stats = mimizam.database.get_statistics()
-    
-    fingerprint_count = db_stats.get('fingerprint_count', 0)
-    avg_fingerprints = fingerprint_count / song_count if song_count > 0 else 0
-    
-    return {
-        'song_count': song_count,
-        'fingerprint_count': fingerprint_count,
-        'avg_fingerprints_per_song': avg_fingerprints,
-        'database_size': db_stats.get('database_size', 'Unknown'),
-        'backend_type': db_stats.get('backend_type', 'Unknown')
-    }
-```
+システムの利用状況とパフォーマンスを監視するための包括的な統計情報機能を提供します。
 
-## 使用例
+#### 統計項目
+- **楽曲統計**: 総楽曲数、アーティスト数、アルバム数
+- **指紋統計**: 総指紋数、楽曲あたり平均指紋数、指紋密度
+- **データベース統計**: データベースサイズ、インデックスサイズ、使用容量
+- **パフォーマンス統計**: 検索速度、追加速度、システム負荷
 
-### 基本的な使用例
+#### 監視機能
+- **リアルタイム監視**: システム状態の継続的な監視
+- **トレンド分析**: 時系列での利用傾向分析
+- **アラート機能**: 異常値検出と通知機能
+- **レポート生成**: 定期的な統計レポートの自動生成
 
-```python
-from mimizam import create_mimizam_sqlite
+## 実装パターン
 
-# インスタンス作成
-mimizam = create_mimizam_sqlite("music.db")
+### 基本的な実装パターン
 
-# 楽曲追加
-song_id = mimizam.add_song(
-    "path/to/song.wav",
-    song_name="My Favorite Song",
-    artist="Artist Name",
-    album="Album Name"
-)
-print(f"楽曲ID: {song_id}")
+標準的なmimizam使用パターンでは、以下のワークフローを推奨します：
 
-# 音声識別
-matches = mimizam.identify("path/to/query.wav")
+#### 初期化フェーズ
+- **インスタンス作成**: 適切なバックエンドの選択と設定
+- **データベース設定**: スキーマ初期化と最適化設定
+- **パラメータ調整**: 用途に応じた音声処理パラメータの設定
 
-if matches:
-    best_match = matches[0]
-    print(f"識別結果: {best_match['song_name']}")
-    print(f"アーティスト: {best_match['artist']}")
-    print(f"信頼度: {best_match['confidence']:.3f}")
-else:
-    print("マッチする楽曲が見つかりませんでした")
+#### 楽曲管理フェーズ
+- **楽曲追加**: メタデータ付きでの楽曲登録
+- **品質確認**: 追加された楽曲の指紋品質検証
+- **統計確認**: データベース状態の定期的な確認
 
-# 統計情報
-print(f"データベース内楽曲数: {mimizam.get_song_count()}")
-```
+#### 識別フェーズ
+- **音声識別**: クエリ音声からの楽曲特定
+- **結果評価**: 識別結果の信頼度と精度評価
+- **結果活用**: 識別結果の適切な処理と活用
 
-### 高度な使用例
+### 高度な実装パターン
 
-```python
-import os
-from mimizam import create_mimizam_mysql
+エンタープライズ環境や大規模システムでの実装パターン：
 
-# MySQL接続
-mimizam = create_mimizam_mysql(
-    host="localhost",
-    user="mimizam_user",
-    password="secure_password",
-    database="music_production",
-    # カスタムパラメータ
-    sample_rate=44100,
-    peak_threshold=0.1,
-    target_zone_size=3
-)
+#### スケーラブル設計
+- **データベース選択**: PostgreSQLやElasticsearchによる高性能化
+- **バッチ処理**: 大量楽曲の効率的な一括処理
+- **並列処理**: マルチスレッドによる処理速度向上
 
-# バッチ処理
-music_dir = "path/to/music/collection"
-audio_files = []
+#### 監視と最適化
+- **統計監視**: システム利用状況の継続的な監視
+- **パフォーマンス分析**: 処理速度と精度の定期的な評価
+- **最適化調整**: 運用データに基づくパラメータ調整
 
-for root, dirs, files in os.walk(music_dir):
-    for file in files:
-        if file.endswith(('.wav', '.mp3', '.flac')):
-            audio_files.append(os.path.join(root, file))
+### 可視化と分析
 
-def show_progress(current, total, filename):
-    percent = (current / total) * 100
-    print(f"[{percent:5.1f}%] {filename}")
+システムの動作を理解し最適化するための分析手法：
 
-result = batch_add_songs(mimizam, audio_files, show_progress)
-print(f"処理完了: 成功 {result['success_count']}, エラー {result['error_count']}")
+#### 音響分析
+- **スペクトログラム可視化**: 音声特徴の視覚的確認
+- **ピーク分析**: 検出された特徴点の分布確認
+- **品質評価**: 指紋生成品質の定量的評価
 
-# エラー詳細表示
-for error in result['errors']:
-    print(f"エラー: {error['file']} - {error['error']}")
+#### システム分析
+- **処理時間分析**: 各処理段階の時間測定
+- **精度分析**: 識別精度の統計的評価
+- **リソース分析**: CPU、メモリ使用量の監視
 
-# 統計情報
-stats = get_database_statistics(mimizam)
-print(f"データベース統計:")
-print(f"  楽曲数: {stats['song_count']}")
-print(f"  指紋数: {stats['fingerprint_count']}")
-print(f"  平均指紋数/楽曲: {stats['avg_fingerprints_per_song']:.1f}")
-```
-
-### 可視化例
-
-```python
-import matplotlib.pyplot as plt
-import numpy as np
-
-# スペクトログラムとピーク検出の可視化
-spectrogram = mimizam.generate_spectrogram("song.wav")
-peaks = mimizam.detect_peaks("song.wav")
-
-fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 8))
-
-# スペクトログラム表示
-im = ax1.imshow(spectrogram, aspect='auto', origin='lower', cmap='viridis')
-ax1.set_title('スペクトログラム')
-ax1.set_ylabel('周波数')
-plt.colorbar(im, ax=ax1)
-
-# ピーク検出結果表示
-ax2.imshow(spectrogram, aspect='auto', origin='lower', cmap='viridis', alpha=0.7)
-if peaks:
-    peak_times = [p[0] for p in peaks]
-    peak_freqs = [p[1] for p in peaks]
-    ax2.scatter(peak_times, peak_freqs, c='red', s=10, alpha=0.8)
-
-ax2.set_title('検出されたピーク')
-ax2.set_xlabel('時間')
-ax2.set_ylabel('周波数')
-
-plt.tight_layout()
-plt.show()
-
-print(f"検出されたピーク数: {len(peaks)}")
-```
+## まとめ
 
 高レベルAPIにより、mimizamの強力な機能を簡単に利用できます。ファクトリ関数を使用することで、異なるデータベースバックエンド間での切り替えも容易に行えます。
+
+### API設計の特徴
+- **統合性**: 全機能への統一されたアクセスポイント
+- **簡潔性**: 最小限のコードで最大の機能を提供
+- **柔軟性**: 様々な用途と要求に対応する設定オプション
+- **拡張性**: 将来の機能追加に対応する設計
+
+### 技術的優位性
+- **使いやすさ**: 直感的なメソッド名と一貫したインターフェース
+- **信頼性**: 包括的なエラーハンドリングと例外処理
+- **パフォーマンス**: 最適化されたデフォルト設定と調整可能性
+- **互換性**: 複数のデータベースバックエンドへの統一アクセス
+
+このAPIにより、開発者は音声指紋技術の複雑さを意識することなく、高精度な音声識別システムを構築できます。
