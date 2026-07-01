@@ -30,6 +30,17 @@ class Song:
 
 
 @dataclass
+class Video:
+    """データベース内の映像を表現"""
+    id: str
+    title: str
+    file_path: str
+    duration: Optional[float] = None
+    frame_count: Optional[int] = None
+    created_at: Optional[str] = None
+
+
+@dataclass
 class DatabaseConfig:
     """データベース接続設定"""
     backend: str  # 'sqlite', 'mysql', 'postgres', 'elasticsearch'
@@ -157,6 +168,7 @@ class DatabaseBackend(ABC):
 __all__ = [
     'Fingerprint',
     'Song',
+    'Video',
     'DatabaseConfig',
     'DatabaseBackend'
 ]

@@ -1,11 +1,13 @@
 """
-mimizam - Shazam風音声指紋システム
+mimizam - 音声・映像指紋システム
 
-音声指紋と識別のためのShazamアルゴリズムのPython実装です。
-音声指紋を生成してデータベースと照合することで、音声を識別します。
+Shazam風音声指紋 + AKAZE/VLAD/PCAベースの映像指紋を提供。
+音声・映像の指紋を生成してデータベースと照合することで、
+メディアを識別します。
 
 主要コンポーネント:
 - AudioFingerprinter: 音声指紋生成
+- VideoFingerprinter: 映像指紋生成
 - FingerprintDatabase: データベース管理
 - FingerprintMatcher: 音声マッチング
 """
@@ -28,7 +30,15 @@ from .src.fingerprint_database import (
     create_postgresql_config, 
     create_elasticsearch_config
 )
-from .src.database_base import DatabaseConfig, Song, Fingerprint
+from .src.database_base import DatabaseConfig, Song, Fingerprint, Video
+from .src.video_fingerprinter import (
+    VideoFingerprinter,
+    VideoFingerprintConfig,
+    FrameSelector,
+    VLADEncoder,
+    VideoFingerprint,
+)
+from .src.video_database import VideoFingerprintDatabase
 from .src.adaptive_parameters import AdaptiveParameterTuner,PerformanceMonitor
 
 __version__ = "1.0.3"
@@ -47,6 +57,15 @@ __all__ = [
     'Peak',
     'SpectrogramAnalyzer',
     'HashGenerator',
+    
+    # 映像フィンガープリンティング
+    'VideoFingerprinter',
+    'VideoFingerprintConfig',
+    'FrameSelector',
+    'VLADEncoder',
+    'VideoFingerprint',
+    'VideoFingerprintDatabase',
+    'Video',
     
     # データベース
     'FingerprintDatabase',
