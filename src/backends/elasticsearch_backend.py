@@ -18,10 +18,10 @@
 - パフォーマンスと可用性のバランスを考慮
 """
 
-from typing import List, Optional, Dict, Tuple
+from typing import List, Optional, Dict, Any, Tuple
 from datetime import datetime
 import traceback
-from ..database_base import DatabaseBackend, DatabaseConfig, Song, Fingerprint
+from ..database_base import DatabaseBackend, DatabaseConfig, Song, Video, Fingerprint
 from ..exceptions import ConnectionError, QueryError
 
 try:
@@ -540,3 +540,339 @@ class ElasticsearchBackend(DatabaseBackend):
             self.logger.error(f"Elasticsearch fingerprint retrieval error: {e}")
         
         return fingerprints
+
+    # ===== 映像指紋メソッド =====
+
+    def _ensure_video_indices(self) -> None:
+        """映像指紋用インデックスを作成（存在しない場合のみ）"""
+        videos_idx = f"{self.songs_index.rsplit('_', 1)[0]}_videos"
+        vfp_idx = f"{self.songs_index.rsplit('_', 1)[0]}_video_fingerprints"
+        ffp_idx = f"{self.songs_index.rsplit('_', 1)[0]}_frame_fingerprints"
+
+        self._videos_index = videos_idx
+        self._video_fp_index = vfp_idx
+        self._frame_fp_index = ffp_idx
+
+        try:
+            if not self.client.indices.exists(index=videos_idx):
+                self.client.indices.create(index=videos_idx, body={
+                    "settings": {
+                        "number_of_shards": 1,
+                        "number_of_replicas": 0,
+                    },
+                    "mappings": {"properties": {
+                        "id": {"type": "keyword"},
+                        "title": {"type": "text", "fields": {
+                            "keyword": {"type": "keyword"}
+                        }},
+                        "file_path": {"type": "keyword"},
+                        "duration": {"type": "double"},
+                        "frame_count": {"type": "integer"},
+                        "created_at": {"type": "date"},
+                    }},
+                })
+
+            if not self.client.indices.exists(index=vfp_idx):
+                self.client.indices.create(index=vfp_idx, body={
+                    "settings": {
+                        "number_of_shards": 1,
+                        "number_of_replicas": 0,
+                    },
+                    "mappings": {"properties": {
+                        "video_id": {"type": "keyword"},
+                        "fingerprint": {"type": "binary"},
+                        "dimensions": {"type": "integer"},
+                        "descriptor_count": {"type": "integer"},
+                    }},
+                })
+
+            if not self.client.indices.exists(index=ffp_idx):
+                self.client.indices.create(index=ffp_idx, body={
+                    "settings": {
+                        "number_of_shards": 1,
+                        "number_of_replicas": 0,
+                    },
+                    "mappings": {"properties": {
+                        "video_id": {"type": "keyword"},
+                        "frame_index": {"type": "integer"},
+                        "timestamp": {"type": "double"},
+                        "fingerprint": {"type": "binary"},
+                    }},
+                })
+        except ElasticsearchException as e:
+            self.logger.error(
+                f"Elasticsearch video index creation error: {e}"
+            )
+
+    def add_video(self, video: Video) -> bool:
+        """Elasticsearchに映像メタデータを追加"""
+        try:
+            self._ensure_video_indices()
+            doc = {
+                "id": video.id,
+                "title": video.title,
+                "file_path": video.file_path,
+                "duration": video.duration,
+                "frame_count": video.frame_count,
+                "created_at": datetime.now().isoformat(),
+            }
+            resp = self.client.index(
+                index=self._videos_index, id=video.id,
+                body=doc, refresh=False, timeout="60s",
+            )
+            return resp.get("result") in ("created", "updated")
+        except ElasticsearchException as e:
+            self.logger.error(f"Elasticsearch video addition error: {e}")
+            return False
+
+    def add_video_fingerprint(
+        self, video_id: str, fingerprint: bytes, dimensions: int,
+        descriptor_count: int = 0,
+    ) -> bool:
+        """Elasticsearchに映像全体指紋を保存"""
+        import base64
+        try:
+            self._ensure_video_indices()
+            doc = {
+                "video_id": video_id,
+                "fingerprint": base64.b64encode(fingerprint).decode(),
+                "dimensions": dimensions,
+                "descriptor_count": descriptor_count,
+            }
+            resp = self.client.index(
+                index=self._video_fp_index, id=video_id,
+                body=doc, refresh=False, timeout="60s",
+            )
+            return resp.get("result") in ("created", "updated")
+        except ElasticsearchException as e:
+            self.logger.error(
+                f"Elasticsearch video fingerprint save error: {e}"
+            )
+            return False
+
+    def add_frame_fingerprints(
+        self, video_id: str,
+        frames: List[Tuple[int, float, bytes]],
+    ) -> bool:
+        """Elasticsearchにフレーム単位指紋を一括保存"""
+        import base64
+        try:
+            self._ensure_video_indices()
+            self.client.delete_by_query(
+                index=self._frame_fp_index,
+                body={"query": {"term": {"video_id": video_id}}},
+            )
+            actions = []
+            for fidx, ts, fp_blob in frames:
+                actions.append({
+                    "_index": self._frame_fp_index,
+                    "_source": {
+                        "video_id": video_id,
+                        "frame_index": fidx,
+                        "timestamp": float(ts),
+                        "fingerprint": base64.b64encode(fp_blob).decode(),
+                    },
+                })
+            if actions:
+                _, failed = bulk(self.client, actions, chunk_size=5000,
+                                 refresh=False)
+                if failed:
+                    self.logger.error(
+                        f"Bulk frame fingerprint index failed: "
+                        f"{len(failed)} items"
+                    )
+                    return False
+            return True
+        except Exception as e:
+            self.logger.error(
+                f"Elasticsearch frame fingerprint save error: {e}"
+            )
+            return False
+
+    def search_video_fingerprints(
+        self, query_fp: bytes, dimensions: int, top_k: int = 10,
+        threshold: float = 0.3,
+    ) -> List[Dict[str, Any]]:
+        """Elasticsearchで映像全体指紋を検索"""
+        import numpy as np
+        import base64
+
+        try:
+            self._ensure_video_indices()
+            try:
+                self.client.indices.refresh(index=self._video_fp_index)
+            except ElasticsearchException:
+                pass
+
+            resp = self.client.search(
+                index=self._video_fp_index,
+                body={"query": {"match_all": {}}, "size": 10000},
+            )
+
+            query_arr = np.frombuffer(query_fp, dtype=np.float32)
+            candidates: list = []
+
+            for hit in resp["hits"]["hits"]:
+                src = hit["_source"]
+                fp_bytes = base64.b64decode(src["fingerprint"])
+                db_fp = np.frombuffer(fp_bytes, dtype=np.float32)
+                if db_fp.shape[0] != query_arr.shape[0]:
+                    continue
+                sim = float(np.dot(query_arr, db_fp))
+                if sim < threshold:
+                    continue
+
+                vid_id = src["video_id"]
+                video_info = self.get_video(vid_id)
+                candidates.append({
+                    "video_id": vid_id,
+                    "similarity": sim,
+                    "video": video_info,
+                })
+
+            candidates.sort(key=lambda c: c["similarity"], reverse=True)
+            return candidates[:top_k]
+        except ElasticsearchException as e:
+            self.logger.error(
+                f"Elasticsearch video fingerprint search error: {e}"
+            )
+            return []
+
+    def get_frame_fingerprints(
+        self, video_id: str,
+    ) -> List[Tuple[int, float, bytes]]:
+        """Elasticsearchから指定映像のフレーム指紋を取得"""
+        import base64
+
+        results: list = []
+        try:
+            self._ensure_video_indices()
+            try:
+                self.client.indices.refresh(index=self._frame_fp_index)
+            except ElasticsearchException:
+                pass
+
+            resp = self.client.search(
+                index=self._frame_fp_index,
+                body={
+                    "query": {"term": {"video_id": video_id}},
+                    "size": 50000,
+                    "sort": [{"frame_index": {"order": "asc"}}],
+                },
+            )
+            for hit in resp["hits"]["hits"]:
+                src = hit["_source"]
+                fp_bytes = base64.b64decode(src["fingerprint"])
+                results.append((
+                    int(src["frame_index"]),
+                    float(src["timestamp"]),
+                    fp_bytes,
+                ))
+        except ElasticsearchException as e:
+            self.logger.error(
+                f"Elasticsearch frame fingerprint retrieval error: {e}"
+            )
+        return results
+
+    def get_video(self, video_id: str) -> Optional[Video]:
+        """Elasticsearchから映像情報を取得"""
+        try:
+            self._ensure_video_indices()
+            try:
+                self.client.indices.refresh(index=self._videos_index)
+            except ElasticsearchException:
+                pass
+            result = self.client.get(
+                index=self._videos_index, id=video_id
+            )
+            src = result["_source"]
+            return Video(
+                id=src["id"], title=src["title"],
+                file_path=src["file_path"],
+                duration=src.get("duration"),
+                frame_count=src.get("frame_count"),
+                created_at=src.get("created_at"),
+            )
+        except ElasticsearchException:
+            return None
+
+    def list_videos(self) -> List[Video]:
+        """Elasticsearchから全映像をリスト取得"""
+        try:
+            self._ensure_video_indices()
+            try:
+                self.client.indices.refresh(index=self._videos_index)
+            except ElasticsearchException:
+                pass
+            resp = self.client.search(
+                index=self._videos_index,
+                body={
+                    "query": {"match_all": {}},
+                    "size": 10000,
+                    "sort": [{"title.keyword": {"order": "asc"}}],
+                },
+            )
+            return [
+                Video(
+                    id=h["_source"]["id"],
+                    title=h["_source"]["title"],
+                    file_path=h["_source"]["file_path"],
+                    duration=h["_source"].get("duration"),
+                    frame_count=h["_source"].get("frame_count"),
+                    created_at=h["_source"].get("created_at"),
+                )
+                for h in resp["hits"]["hits"]
+            ]
+        except ElasticsearchException as e:
+            self.logger.error(
+                f"Elasticsearch video list retrieval error: {e}"
+            )
+            return []
+
+    def delete_video(self, video_id: str) -> bool:
+        """Elasticsearchから映像と関連指紋を削除"""
+        try:
+            self._ensure_video_indices()
+            self.client.delete(
+                index=self._videos_index, id=video_id
+            )
+            self.client.delete(
+                index=self._video_fp_index, id=video_id,
+                ignore=[404],
+            )
+            self.client.delete_by_query(
+                index=self._frame_fp_index,
+                body={"query": {"term": {"video_id": video_id}}},
+            )
+            return True
+        except ElasticsearchException as e:
+            self.logger.error(
+                f"Elasticsearch video deletion error: {e}"
+            )
+            return False
+
+    def get_video_stats(self) -> Dict[str, int]:
+        """Elasticsearchの映像指紋統計を取得"""
+        stats = {
+            "videos": 0,
+            "video_fingerprints": 0,
+            "frame_fingerprints": 0,
+        }
+        try:
+            self._ensure_video_indices()
+            for idx_name, key in [
+                (self._videos_index, "videos"),
+                (self._video_fp_index, "video_fingerprints"),
+                (self._frame_fp_index, "frame_fingerprints"),
+            ]:
+                try:
+                    self.client.indices.refresh(index=idx_name)
+                    cnt = self.client.count(index=idx_name)
+                    stats[key] = cnt["count"]
+                except ElasticsearchException:
+                    pass
+        except ElasticsearchException as e:
+            self.logger.error(
+                f"Elasticsearch video statistics error: {e}"
+            )
+        return stats

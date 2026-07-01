@@ -30,6 +30,17 @@ class Song:
 
 
 @dataclass
+class Video:
+    """データベース内の映像を表現"""
+    id: str
+    title: str
+    file_path: str
+    duration: Optional[float] = None
+    frame_count: Optional[int] = None
+    created_at: Optional[str] = None
+
+
+@dataclass
 class DatabaseConfig:
     """データベース接続設定"""
     backend: str  # 'sqlite', 'mysql', 'postgres', 'elasticsearch'
@@ -152,11 +163,62 @@ class DatabaseBackend(ABC):
         """指定した楽曲のフィンガープリントを取得。致命的エラー時は例外を投げる可能性がある。"""
         pass
 
+    # ===== 映像指紋メソッド =====
+    # デフォルト実装はNotImplementedError。各バックエンドで上書きして使用。
+
+    def add_video(self, video: 'Video') -> bool:
+        """映像メタデータを追加"""
+        raise NotImplementedError("このバックエンドは映像指紋に未対応です")
+
+    def add_video_fingerprint(
+        self, video_id: str, fingerprint: bytes, dimensions: int,
+        descriptor_count: int = 0
+    ) -> bool:
+        """映像全体指紋を保存（fingerprintはfloat32のバイト列）"""
+        raise NotImplementedError("このバックエンドは映像指紋に未対応です")
+
+    def add_frame_fingerprints(
+        self, video_id: str,
+        frames: List[Tuple[int, float, bytes]]
+    ) -> bool:
+        """フレーム単位指紋を一括保存（各要素は(frame_index, timestamp, fp_bytes)）"""
+        raise NotImplementedError("このバックエンドは映像指紋に未対応です")
+
+    def search_video_fingerprints(
+        self, query_fp: bytes, dimensions: int, top_k: int = 10,
+        threshold: float = 0.3
+    ) -> List[Dict[str, Any]]:
+        """映像全体指紋で候補検索"""
+        raise NotImplementedError("このバックエンドは映像指紋に未対応です")
+
+    def get_frame_fingerprints(
+        self, video_id: str
+    ) -> List[Tuple[int, float, bytes]]:
+        """指定映像のフレーム指紋を取得"""
+        raise NotImplementedError("このバックエンドは映像指紋に未対応です")
+
+    def get_video(self, video_id: str) -> Optional['Video']:
+        """映像情報を取得"""
+        raise NotImplementedError("このバックエンドは映像指紋に未対応です")
+
+    def list_videos(self) -> List['Video']:
+        """全映像をリスト取得"""
+        raise NotImplementedError("このバックエンドは映像指紋に未対応です")
+
+    def delete_video(self, video_id: str) -> bool:
+        """映像と関連指紋を削除"""
+        raise NotImplementedError("このバックエンドは映像指紋に未対応です")
+
+    def get_video_stats(self) -> Dict[str, int]:
+        """映像指紋の統計を取得"""
+        raise NotImplementedError("このバックエンドは映像指紋に未対応です")
+
 
 # エクスポートするシンボルを定義
 __all__ = [
     'Fingerprint',
     'Song',
+    'Video',
     'DatabaseConfig',
     'DatabaseBackend'
 ]
