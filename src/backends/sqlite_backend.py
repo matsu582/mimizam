@@ -1,7 +1,7 @@
 """SQLiteデータベースバックエンド実装"""
 
-from typing import List, Optional, Dict, Tuple
-from ..database_base import DatabaseBackend, DatabaseConfig, Song, Fingerprint
+from typing import List, Optional, Dict, Any, Tuple
+from ..database_base import DatabaseBackend, DatabaseConfig, Song, Video, Fingerprint
 from ..exceptions import ConnectionError, QueryError
 import json
 
@@ -292,3 +292,273 @@ class SQLiteBackend(DatabaseBackend):
             self.logger.error(f"SQLite fingerprint retrieval error: {e}")
         
         return fingerprints
+
+    # ===== 映像指紋メソッド =====
+
+    def _create_video_tables(self) -> bool:
+        """映像指紋テーブルを作成"""
+        try:
+            cursor = self.connection.cursor()
+
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS videos (
+                    id TEXT PRIMARY KEY,
+                    title TEXT NOT NULL,
+                    file_path TEXT NOT NULL,
+                    duration REAL,
+                    frame_count INTEGER,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS video_fingerprints (
+                    video_id TEXT PRIMARY KEY,
+                    fingerprint BLOB NOT NULL,
+                    dimensions INTEGER NOT NULL,
+                    descriptor_count INTEGER DEFAULT 0,
+                    FOREIGN KEY (video_id) REFERENCES videos (id)
+                        ON DELETE CASCADE
+                )
+            """)
+
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS frame_fingerprints (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    video_id TEXT NOT NULL,
+                    frame_index INTEGER NOT NULL,
+                    timestamp REAL NOT NULL,
+                    fingerprint BLOB NOT NULL,
+                    FOREIGN KEY (video_id) REFERENCES videos (id)
+                        ON DELETE CASCADE
+                )
+            """)
+
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_frame_fp_video
+                ON frame_fingerprints (video_id)
+            """)
+
+            self.connection.commit()
+            return True
+        except Exception as e:
+            self.logger.error(f"SQLite video table creation error: {e}")
+            return False
+
+    def add_video(self, video: Video) -> bool:
+        """SQLiteに映像メタデータを追加"""
+        try:
+            self._create_video_tables()
+            cursor = self.connection.cursor()
+            cursor.execute(
+                """INSERT OR REPLACE INTO videos
+                    (id, title, file_path, duration, frame_count)
+                VALUES (?, ?, ?, ?, ?)""",
+                (video.id, video.title, video.file_path,
+                 video.duration, video.frame_count),
+            )
+            self.connection.commit()
+            return True
+        except Exception as e:
+            self.logger.error(
+                f"SQLite video addition error: {e} | "
+                f"Context: {{'video_id': '{video.id}'}}"
+            )
+            return False
+
+    def add_video_fingerprint(
+        self, video_id: str, fingerprint: bytes, dimensions: int,
+        descriptor_count: int = 0,
+    ) -> bool:
+        """SQLiteに映像全体指紋を保存"""
+        try:
+            self._create_video_tables()
+            cursor = self.connection.cursor()
+            cursor.execute(
+                """INSERT OR REPLACE INTO video_fingerprints
+                    (video_id, fingerprint, dimensions, descriptor_count)
+                VALUES (?, ?, ?, ?)""",
+                (video_id, fingerprint, dimensions, descriptor_count),
+            )
+            self.connection.commit()
+            return True
+        except Exception as e:
+            self.logger.error(
+                f"SQLite video fingerprint save error: {e} | "
+                f"Context: {{'video_id': '{video_id}'}}"
+            )
+            return False
+
+    def add_frame_fingerprints(
+        self, video_id: str,
+        frames: List[Tuple[int, float, bytes]],
+    ) -> bool:
+        """SQLiteにフレーム単位指紋を一括保存"""
+        try:
+            self._create_video_tables()
+            cursor = self.connection.cursor()
+            cursor.execute(
+                "DELETE FROM frame_fingerprints WHERE video_id = ?",
+                (video_id,),
+            )
+            rows = [
+                (video_id, fidx, float(ts), fp_blob)
+                for fidx, ts, fp_blob in frames
+            ]
+            cursor.executemany(
+                """INSERT INTO frame_fingerprints
+                    (video_id, frame_index, timestamp, fingerprint)
+                VALUES (?, ?, ?, ?)""",
+                rows,
+            )
+            self.connection.commit()
+            return True
+        except Exception as e:
+            self.logger.error(
+                f"SQLite frame fingerprint save error: {e} | "
+                f"Context: {{'video_id': '{video_id}', 'count': {len(frames)}}}"
+            )
+            return False
+
+    def search_video_fingerprints(
+        self, query_fp: bytes, dimensions: int, top_k: int = 10,
+        threshold: float = 0.3,
+    ) -> List[Dict[str, Any]]:
+        """SQLiteで映像全体指紋を検索"""
+        import numpy as np
+
+        try:
+            self._create_video_tables()
+            cursor = self.connection.cursor()
+            cursor.execute(
+                """SELECT vf.video_id, vf.fingerprint, vf.dimensions,
+                          v.title, v.file_path, v.duration, v.frame_count
+                   FROM video_fingerprints vf
+                   JOIN videos v ON vf.video_id = v.id"""
+            )
+
+            query_arr = np.frombuffer(query_fp, dtype=np.float32)
+            candidates: list = []
+
+            for row in cursor.fetchall():
+                vid_id, fp_blob, dims, title, fpath, dur, fcount = row
+                db_fp = np.frombuffer(fp_blob, dtype=np.float32)
+                if db_fp.shape[0] != query_arr.shape[0]:
+                    continue
+                sim = float(np.dot(query_arr, db_fp))
+                if sim >= threshold:
+                    candidates.append({
+                        "video_id": vid_id,
+                        "similarity": sim,
+                        "video": Video(
+                            id=vid_id, title=title, file_path=fpath,
+                            duration=dur, frame_count=fcount,
+                        ),
+                    })
+
+            candidates.sort(key=lambda c: c["similarity"], reverse=True)
+            return candidates[:top_k]
+        except Exception as e:
+            self.logger.error(f"SQLite video fingerprint search error: {e}")
+            return []
+
+    def get_frame_fingerprints(
+        self, video_id: str,
+    ) -> List[Tuple[int, float, bytes]]:
+        """SQLiteから指定映像のフレーム指紋を取得"""
+        try:
+            self._create_video_tables()
+            cursor = self.connection.cursor()
+            cursor.execute(
+                """SELECT frame_index, timestamp, fingerprint
+                   FROM frame_fingerprints WHERE video_id = ?""",
+                (video_id,),
+            )
+            return [
+                (int(fidx), float(ts), bytes(fp_blob))
+                for fidx, ts, fp_blob in cursor.fetchall()
+            ]
+        except Exception as e:
+            self.logger.error(f"SQLite frame fingerprint retrieval error: {e}")
+            return []
+
+    def get_video(self, video_id: str) -> Optional[Video]:
+        """SQLiteから映像情報を取得"""
+        try:
+            self._create_video_tables()
+            cursor = self.connection.cursor()
+            cursor.execute(
+                """SELECT id, title, file_path, duration, frame_count,
+                          created_at
+                   FROM videos WHERE id = ?""",
+                (video_id,),
+            )
+            row = cursor.fetchone()
+            if row:
+                return Video(
+                    id=row[0], title=row[1], file_path=row[2],
+                    duration=row[3], frame_count=row[4], created_at=row[5],
+                )
+        except Exception as e:
+            self.logger.error(f"SQLite video retrieval error: {e}")
+        return None
+
+    def list_videos(self) -> List[Video]:
+        """SQLiteから全映像をリスト取得"""
+        try:
+            self._create_video_tables()
+            cursor = self.connection.cursor()
+            cursor.execute(
+                """SELECT id, title, file_path, duration, frame_count,
+                          created_at
+                   FROM videos ORDER BY title"""
+            )
+            return [
+                Video(
+                    id=r[0], title=r[1], file_path=r[2],
+                    duration=r[3], frame_count=r[4], created_at=r[5],
+                )
+                for r in cursor.fetchall()
+            ]
+        except Exception as e:
+            self.logger.error(f"SQLite video list retrieval error: {e}")
+            return []
+
+    def delete_video(self, video_id: str) -> bool:
+        """SQLiteから映像と関連指紋を削除"""
+        try:
+            self._create_video_tables()
+            cursor = self.connection.cursor()
+            cursor.execute(
+                "DELETE FROM frame_fingerprints WHERE video_id = ?",
+                (video_id,),
+            )
+            cursor.execute(
+                "DELETE FROM video_fingerprints WHERE video_id = ?",
+                (video_id,),
+            )
+            cursor.execute("DELETE FROM videos WHERE id = ?", (video_id,))
+            self.connection.commit()
+            return True
+        except Exception as e:
+            self.logger.error(
+                f"SQLite video deletion error: {e} | "
+                f"Context: {{'video_id': '{video_id}'}}"
+            )
+            return False
+
+    def get_video_stats(self) -> Dict[str, int]:
+        """SQLiteの映像指紋統計を取得"""
+        stats = {"videos": 0, "video_fingerprints": 0, "frame_fingerprints": 0}
+        try:
+            self._create_video_tables()
+            cursor = self.connection.cursor()
+            cursor.execute("SELECT COUNT(*) FROM videos")
+            stats["videos"] = cursor.fetchone()[0]
+            cursor.execute("SELECT COUNT(*) FROM video_fingerprints")
+            stats["video_fingerprints"] = cursor.fetchone()[0]
+            cursor.execute("SELECT COUNT(*) FROM frame_fingerprints")
+            stats["frame_fingerprints"] = cursor.fetchone()[0]
+        except Exception as e:
+            self.logger.error(f"SQLite video statistics retrieval error: {e}")
+        return stats

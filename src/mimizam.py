@@ -323,23 +323,49 @@ class Mimizam:
             self._video_fingerprinter = VideoFingerprinter()
         return self._video_fingerprinter
 
-    def _get_video_db(self, db_path: Optional[str] = None):
-        """映像指紋DBを取得（遅延インポート）"""
+    def _get_video_db(
+        self,
+        db_path: Optional[str] = None,
+        config: Optional[DatabaseConfig] = None,
+    ):
+        """映像指紋DBを取得（遅延インポート、音声と同じバックエンドを使用）"""
         self._ensure_video_system()
         if self._video_db is None:
             from .video_database import VideoFingerprintDatabase
-            if db_path is None:
-                # 音声DBと同じディレクトリに映像DBを配置
-                if hasattr(self.database, 'config') and self.database.config.file_path:
-                    base_dir = os.path.dirname(
-                        self.database.config.file_path
+            if config is not None:
+                self._video_db = VideoFingerprintDatabase(config=config)
+            elif hasattr(self.database, 'config') and self.database.config:
+                audio_cfg = self.database.config
+                if audio_cfg.backend == 'sqlite':
+                    if db_path is None:
+                        base_dir = os.path.dirname(
+                            audio_cfg.file_path or ""
+                        )
+                        db_path = os.path.join(
+                            base_dir, "video_fingerprints.db"
+                        ) if base_dir else "video_fingerprints.db"
+                    video_cfg = DatabaseConfig(
+                        backend='sqlite', file_path=db_path,
                     )
-                    db_path = os.path.join(
-                        base_dir, "video_fingerprints.db"
-                    ) if base_dir else "video_fingerprints.db"
                 else:
-                    db_path = "video_fingerprints.db"
-            self._video_db = VideoFingerprintDatabase(db_path)
+                    video_cfg = DatabaseConfig(
+                        backend=audio_cfg.backend,
+                        host=audio_cfg.host,
+                        port=audio_cfg.port,
+                        database=audio_cfg.database,
+                        username=audio_cfg.username,
+                        password=audio_cfg.password,
+                        file_path=audio_cfg.file_path,
+                        index_name=audio_cfg.index_name,
+                        ca_certs=audio_cfg.ca_certs,
+                        verify_certs=audio_cfg.verify_certs,
+                        pool_size=audio_cfg.pool_size,
+                        pool_timeout=audio_cfg.pool_timeout,
+                    )
+                self._video_db = VideoFingerprintDatabase(config=video_cfg)
+            else:
+                path = db_path or "video_fingerprints.db"
+                self._video_db = VideoFingerprintDatabase(db_path=path)
         return self._video_db
 
     def add_video(
