@@ -370,7 +370,7 @@ class VLADEncoder:
                 n_clusters=k,
                 batch_size=batch_size,
                 init="k-means++",
-                reassign_ratio=0.01,
+                reassignment_ratio=0.01,
                 random_state=seed,
                 n_init=n_init,
             )
