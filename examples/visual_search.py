@@ -249,23 +249,24 @@ def main() -> int:
         epilog="""\
 使用例:
   # 単一ファイルで検索
-  python visual_search.py /path/to/query.mp4
-
-  # 詳細情報付きで検索
-  python visual_search.py /path/to/query.mp4 --details
-
-  # フォルダ内の全動画で検索
-  python visual_search.py /path/to/folder --details
-
-  # フレーム単位マッチングを無効化（高速モード）
-  python visual_search.py /path/to/query.mp4 --no-frame-matching
-
-  # モデルを指定
   python visual_search.py /path/to/query.mp4 --model model.pkl
 
+  # 詳細情報付きで検索
+  python visual_search.py /path/to/query.mp4 --model model.pkl --details
+
+  # フォルダ内の全動画で検索
+  python visual_search.py /path/to/folder --model model.pkl --details
+
+  # フレーム単位マッチングを無効化（高速モード）
+  python visual_search.py /path/to/query.mp4 --model model.pkl --no-frame-matching
+
   # MySQLバックエンドを使用
-  python visual_search.py /path/to/query.mp4 --db-type mysql \\
+  python visual_search.py /path/to/query.mp4 --model model.pkl --db-type mysql \\
       --db-host localhost --db-name mimizam --db-user user --db-password pass
+
+modelファイルはvisual_fingerprinter.pyの--modelオプションで生成。
+AKAZE記述子→VLAD集約→PCA圧縮の変換パイプラインを保持し、
+登録時と検索時で同じ変換を適用するために必須。
 """,
     )
 
@@ -285,8 +286,10 @@ def main() -> int:
     )
     parser.add_argument(
         "--model", "-m",
-        default=None,
-        help="VLAD/PCAモデルファイルのパス（.pkl）",
+        required=True,
+        help="VLAD/PCAモデルファイルのパス（.pkl、必須）。"
+             "AKAZE記述子→VLAD→PCA変換に使用。"
+             "visual_fingerprinter.py --model で生成",
     )
     parser.add_argument(
         "--db-type",
@@ -335,17 +338,16 @@ def main() -> int:
         logger.info("Mimizamシステムを初期化中...")
         mimizam = create_mimizam_instance(args)
 
-        # VLAD/PCAモデルの読み込み
-        if args.model:
-            if not os.path.isfile(args.model):
-                logger.error(f"モデルファイルが見つかりません: {args.model}")
-                logger.info(
-                    "visual_fingerprinter.py で --model オプションを使って"
-                    "モデルを保存してください"
-                )
-                return 1
-            mimizam.load_video_model(args.model)
-            logger.info(f"モデル読み込み完了: {args.model}")
+        # VLAD/PCAモデルの読み込み（検索時も指紋生成に必須）
+        if not os.path.isfile(args.model):
+            logger.error(f"モデルファイルが見つかりません: {args.model}")
+            logger.info(
+                "visual_fingerprinter.py --model model.pkl で"
+                "モデルを生成してください"
+            )
+            return 1
+        mimizam.load_video_model(args.model)
+        logger.info(f"モデル読み込み完了: {args.model}")
 
         # 映像指紋DB統計を表示
         stats = mimizam.get_video_database_stats(args.video_db)

@@ -229,7 +229,9 @@ def main() -> int:
     parser.add_argument(
         "--model", "-m",
         default=None,
-        help="VLAD/PCAモデルの保存先/読み込み元パス（.pkl）",
+        help="VLAD/PCAモデルの保存先/読み込み元パス（.pkl）。"
+             "K-Means辞書(VLAD量子化用)とPCA変換器を保持。"
+             "検索時にvisual_search.pyで同じモデルを指定する必要あり",
     )
     parser.add_argument(
         "--db-type",
