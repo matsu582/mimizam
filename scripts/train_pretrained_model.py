@@ -335,6 +335,99 @@ def collect_video_descriptors(
     return per_frame
 
 
+def train_codebook_with_collapse_check(
+    descriptors: np.ndarray,
+    k: int,
+    batch_size: int,
+    max_retries: int = 3,
+) -> MiniBatchKMeans:
+    """
+    Codebook Collapse対策付きK-Means学習
+
+    空クラスタや極端な偏りを検出し、自動修復を試みる。
+    """
+    for attempt in range(max_retries):
+        seed = RANDOM_SEED + attempt * 7
+        n_init = 3 + attempt * 2
+
+        codebook = MiniBatchKMeans(
+            n_clusters=k,
+            batch_size=batch_size,
+            init="k-means++",
+            reassign_ratio=0.01,
+            random_state=seed,
+            n_init=n_init,
+            max_iter=300,
+        )
+        codebook.fit(descriptors)
+
+        labels = codebook.predict(descriptors)
+        counts = np.bincount(labels, minlength=k)
+        empty_count = int(np.sum(counts == 0))
+        max_ratio = float(counts.max()) / float(counts.sum())
+
+        if empty_count == 0 and max_ratio < 0.5:
+            logger.info(
+                f"codebook学習完了: "
+                f"割り当て min={counts.min()} "
+                f"max={counts.max()} "
+                f"(最大比率{max_ratio:.1%})"
+            )
+            return codebook
+
+        logger.warning(
+            f"codebook偏り検出 (試行{attempt + 1}): "
+            f"空クラスタ={empty_count}, "
+            f"最大比率={max_ratio:.1%}"
+        )
+
+        if empty_count > 0:
+            codebook = _repair_empty_clusters(
+                codebook, descriptors, counts
+            )
+            labels = codebook.predict(descriptors)
+            counts = np.bincount(labels, minlength=k)
+            empty_after = int(np.sum(counts == 0))
+            if empty_after == 0:
+                logger.info(
+                    f"空クラスタ修復完了: "
+                    f"割り当て min={counts.min()} "
+                    f"max={counts.max()}"
+                )
+                return codebook
+
+    logger.warning("codebook修復の試行回数超過。最後の結果を使用")
+    return codebook
+
+
+def _repair_empty_clusters(
+    codebook: MiniBatchKMeans,
+    descriptors: np.ndarray,
+    counts: np.ndarray,
+) -> MiniBatchKMeans:
+    """空クラスタを最大クラスタの分割で修復"""
+    centers = codebook.cluster_centers_.copy()
+    labels = codebook.predict(descriptors)
+    empty_ids = np.where(counts == 0)[0]
+
+    for eid in empty_ids:
+        largest = int(np.argmax(counts))
+        mask = labels == largest
+        cluster_desc = descriptors[mask]
+
+        std_vec = np.std(cluster_desc, axis=0)
+        std_vec = np.where(std_vec < 1e-8, 1.0, std_vec)
+        offset = std_vec * 0.5
+        centers[eid] = centers[largest] + offset
+        centers[largest] = centers[largest] - offset
+
+        counts[eid] = counts[largest] // 2
+        counts[largest] = counts[largest] - counts[eid]
+
+    codebook.cluster_centers_ = centers
+    return codebook
+
+
 def compute_vlad_vector(
     descriptors: np.ndarray, codebook: MiniBatchKMeans
 ) -> np.ndarray:
@@ -437,14 +530,9 @@ def main():
     k = args.codebook_size
     logger.info(f"K-Means学習中 (K={k}, {len(combined):,}記述子)...")
     start = time.time()
-    codebook = MiniBatchKMeans(
-        n_clusters=k,
-        batch_size=min(10000, len(combined)),
-        random_state=RANDOM_SEED,
-        n_init=3,
-        max_iter=300,
+    codebook = train_codebook_with_collapse_check(
+        combined, k, min(10000, len(combined))
     )
-    codebook.fit(combined)
     del combined
     logger.info(f"K-Means完了: {time.time() - start:.1f}秒")
 

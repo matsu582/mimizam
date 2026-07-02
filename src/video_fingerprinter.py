@@ -300,7 +300,6 @@ class VLADEncoder:
         Args:
             descriptor_list: フレーム/画像ごとの記述子配列のリスト
         """
-        from sklearn.cluster import MiniBatchKMeans
         from sklearn.decomposition import PCA
 
         all_desc = np.vstack(descriptor_list).astype(np.float32)
@@ -312,14 +311,12 @@ class VLADEncoder:
             f"{self._descriptor_dim}次元"
         )
 
-        # K-Meansコードブック構築
+        # K-Meansコードブック構築（Collapse対策付き）
         k = self.config.codebook_size
         batch = min(self.config.codebook_batch_size, n_samples)
-        self._codebook = MiniBatchKMeans(
-            n_clusters=k, batch_size=batch,
-            random_state=42, n_init=3
+        self._codebook = self._train_codebook(
+            all_desc, k, batch
         )
-        self._codebook.fit(all_desc)
 
         vlad_dim = k * self._descriptor_dim
         logger.info(f"VLAD次元: {vlad_dim}")
@@ -347,6 +344,108 @@ class VLADEncoder:
             f"({len(vlad_samples)}サンプル, "
             f"分散保持率: {variance:.1f}%)"
         )
+
+    def _train_codebook(
+        self,
+        descriptors: np.ndarray,
+        k: int,
+        batch_size: int,
+        max_retries: int = 3,
+    ):
+        """
+        Codebook Collapse対策付きK-Means学習
+
+        空クラスタや極端な偏りを検出し、自動修復を試みる。
+        - KMeans++初期化で均等な初期配置
+        - reassign_ratioで学習中の空クラスタを再配置
+        - 学習後に空クラスタがあれば最大クラスタを分割して補填
+        """
+        from sklearn.cluster import MiniBatchKMeans
+
+        for attempt in range(max_retries):
+            seed = 42 + attempt * 7
+            n_init = 3 + attempt * 2
+
+            codebook = MiniBatchKMeans(
+                n_clusters=k,
+                batch_size=batch_size,
+                init="k-means++",
+                reassign_ratio=0.01,
+                random_state=seed,
+                n_init=n_init,
+            )
+            codebook.fit(descriptors)
+
+            # クラスタ割り当て数を検査
+            labels = codebook.predict(descriptors)
+            counts = np.bincount(labels, minlength=k)
+            empty_count = int(np.sum(counts == 0))
+            max_ratio = float(counts.max()) / float(counts.sum())
+
+            if empty_count == 0 and max_ratio < 0.5:
+                logger.info(
+                    f"codebook学習完了: "
+                    f"割り当て min={counts.min()} "
+                    f"max={counts.max()} "
+                    f"(最大比率{max_ratio:.1%})"
+                )
+                return codebook
+
+            logger.warning(
+                f"codebook偏り検出 (試行{attempt + 1}): "
+                f"空クラスタ={empty_count}, "
+                f"最大比率={max_ratio:.1%}"
+            )
+
+            if empty_count > 0:
+                codebook = self._repair_empty_clusters(
+                    codebook, descriptors, counts
+                )
+                labels = codebook.predict(descriptors)
+                counts = np.bincount(labels, minlength=k)
+                empty_after = int(np.sum(counts == 0))
+                if empty_after == 0:
+                    logger.info(
+                        f"空クラスタ修復完了: "
+                        f"割り当て min={counts.min()} "
+                        f"max={counts.max()}"
+                    )
+                    return codebook
+
+        logger.warning("codebook修復の試行回数超過。最後の結果を使用")
+        return codebook
+
+    @staticmethod
+    def _repair_empty_clusters(
+        codebook, descriptors: np.ndarray, counts: np.ndarray
+    ):
+        """
+        空クラスタを最大クラスタの分割で修復
+
+        最も割り当ての多いクラスタ内の記述子にノイズを加えた
+        新しい中心点を空クラスタに配置する。
+        """
+        centers = codebook.cluster_centers_.copy()
+        labels = codebook.predict(descriptors)
+        empty_ids = np.where(counts == 0)[0]
+
+        for eid in empty_ids:
+            largest = int(np.argmax(counts))
+            mask = labels == largest
+            cluster_desc = descriptors[mask]
+
+            # 最大クラスタの分散方向に沿ってずらす
+            std_vec = np.std(cluster_desc, axis=0)
+            std_vec = np.where(std_vec < 1e-8, 1.0, std_vec)
+            offset = std_vec * 0.5
+            centers[eid] = centers[largest] + offset
+            centers[largest] = centers[largest] - offset
+
+            counts[eid] = counts[largest] // 2
+            counts[largest] = counts[largest] - counts[eid]
+
+        codebook.cluster_centers_ = centers
+        return codebook
 
     def encode_frame(self, descriptors: np.ndarray) -> Optional[np.ndarray]:
         """
