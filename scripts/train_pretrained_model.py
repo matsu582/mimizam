@@ -33,6 +33,12 @@ K-Means codebook + PCA変換器を学習して .pkl ファイルとして保存�
       --coco-dir /path/to/coco/val2017 \\
       --pca-dim 256 \\
       -o models/model_pca256.pkl
+
+  # 既存モデルに追加データで追加学習
+  python scripts/train_pretrained_model.py \\
+      --resume models/akaze_vlad_pca_pretrained.pkl \\
+      --video-dir /path/to/new_videos \\
+      -o models/akaze_vlad_pca_v2.pkl
 """
 
 import argparse
@@ -141,6 +147,12 @@ PCA次元数の目安:
         type=float,
         default=2.0,
         help="動画のフレームサンプリング間隔（秒、デフォルト: 2.0）",
+    )
+    parser.add_argument(
+        "--resume",
+        default=None,
+        help="既存モデルを読み込み、新データで追加学習する。"
+             "codebookはpartial_fitで更新、PCAは再学習",
     )
 
     args = parser.parse_args()
@@ -516,25 +528,50 @@ def main():
     )
 
     # K-Means codebook学習
-    logger.info("全記述子を結合中...")
-    combined = np.vstack(per_unit_descriptors).astype(np.float32)
-
-    if len(combined) > DEFAULT_MAX_KMEANS_SAMPLES:
-        rng = np.random.default_rng(RANDOM_SEED)
-        indices = rng.choice(
-            len(combined), size=DEFAULT_MAX_KMEANS_SAMPLES, replace=False
-        )
-        combined = combined[indices]
-        logger.info(f"K-Means用サンプリング: {len(combined):,}個")
-
     k = args.codebook_size
-    logger.info(f"K-Means学習中 (K={k}, {len(combined):,}記述子)...")
-    start = time.time()
-    codebook = train_codebook_with_collapse_check(
-        combined, k, min(10000, len(combined))
-    )
-    del combined
-    logger.info(f"K-Means完了: {time.time() - start:.1f}秒")
+
+    if args.resume:
+        # 追加学習モード: 既存codebookをpartial_fitで更新
+        logger.info(f"既存モデル読み込み: {args.resume}")
+        with open(args.resume, "rb") as f:
+            existing = pickle.load(f)
+        codebook = existing["codebook"]
+        k = codebook.n_clusters
+        logger.info(
+            f"codebook追加学習中 (K={k}, "
+            f"{total_desc:,}新規記述子)..."
+        )
+        start = time.time()
+        for desc_chunk in per_unit_descriptors:
+            if len(desc_chunk) >= 5:
+                codebook.partial_fit(desc_chunk.astype(np.float32))
+        logger.info(
+            f"codebook追加学習完了: {time.time() - start:.1f}秒"
+        )
+    else:
+        # 初回学習: 全記述子でK-Meansを学習
+        logger.info("全記述子を結合中...")
+        combined = np.vstack(per_unit_descriptors).astype(np.float32)
+
+        if len(combined) > DEFAULT_MAX_KMEANS_SAMPLES:
+            rng = np.random.default_rng(RANDOM_SEED)
+            indices = rng.choice(
+                len(combined),
+                size=DEFAULT_MAX_KMEANS_SAMPLES,
+                replace=False,
+            )
+            combined = combined[indices]
+            logger.info(f"K-Means用サンプリング: {len(combined):,}個")
+
+        logger.info(
+            f"K-Means学習中 (K={k}, {len(combined):,}記述子)..."
+        )
+        start = time.time()
+        codebook = train_codebook_with_collapse_check(
+            combined, k, min(10000, len(combined))
+        )
+        del combined
+        logger.info(f"K-Means完了: {time.time() - start:.1f}秒")
 
     # 画像/フレームごとのVLADを計算してPCA学習
     vlad_dim = k * desc_dim

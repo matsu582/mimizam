@@ -439,6 +439,10 @@ class Mimizam:
                 video_id, fp.frame_fingerprints
             )
 
+            # AKAZE記述子を保存（指紋再生成用）
+            if fp.raw_descriptors:
+                vdb.add_frame_descriptors(video_id, fp.raw_descriptors)
+
             self.logger.info(
                 f"映像追加成功: {video_id} - {title}"
             )
@@ -574,6 +578,65 @@ class Mimizam:
         """
         vfp = self._get_video_fingerprinter()
         vfp.load_model(model_path)
+
+    def rebuild_video_fingerprints(
+        self,
+        video_db_path: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        DB内の全映像指紋を保存済み記述子から再生成
+
+        モデル更新後に元映像なしで指紋を再計算する。
+        事前にload_video_model()で新モデルを読み込んでおくこと。
+
+        Args:
+            video_db_path: 映像DBファイルパス
+
+        Returns:
+            再生成統計: {"total": 件数, "success": 成功数, "skip": スキップ数}
+        """
+        vfp = self._get_video_fingerprinter()
+        vdb = self._get_video_db(video_db_path)
+
+        if not vfp.is_trained:
+            raise RuntimeError(
+                "モデルが未学習です。"
+                "先にload_video_model()を呼んでください"
+            )
+
+        all_desc = vdb.get_all_frame_descriptors()
+        stats = {"total": len(all_desc), "success": 0, "skip": 0}
+
+        for vid_id, frame_descs in all_desc.items():
+            if not frame_descs:
+                stats["skip"] += 1
+                self.logger.warning(
+                    f"記述子なし（スキップ）: {vid_id}"
+                )
+                continue
+
+            fp = vfp.rebuild_from_descriptors(frame_descs)
+            if fp is None:
+                stats["skip"] += 1
+                continue
+
+            vdb.add_video_fingerprint(
+                vid_id, fp.video_fingerprint, fp.descriptor_count
+            )
+            vdb.add_frame_fingerprints(
+                vid_id, fp.frame_fingerprints
+            )
+            stats["success"] += 1
+            self.logger.info(
+                f"指紋再生成: {vid_id} "
+                f"({fp.frame_count}フレーム)"
+            )
+
+        self.logger.info(
+            f"指紋再生成完了: "
+            f"{stats['success']}/{stats['total']}件成功"
+        )
+        return stats
 
     def get_video_database_stats(
         self, video_db_path: Optional[str] = None

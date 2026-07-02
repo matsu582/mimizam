@@ -67,6 +67,9 @@ class VideoFingerprint:
     )
     frame_count: int = 0
     descriptor_count: int = 0
+    raw_descriptors: Optional[
+        List[Tuple[int, float, np.ndarray]]
+    ] = field(default=None)
 
 
 class FrameSelector:
@@ -672,6 +675,7 @@ class VideoFingerprinter:
             return None
 
         fp = self.encoder.encode_video(per_frame)
+        fp.raw_descriptors = per_frame
         logger.info(
             f"映像指紋生成: {os.path.basename(video_path)} "
             f"({fp.frame_count}フレーム, "
@@ -715,6 +719,34 @@ class VideoFingerprinter:
             best_scores.append(frame_best)
 
         return float(np.max(best_scores))
+
+    def rebuild_from_descriptors(
+        self,
+        per_frame_desc: List[Tuple[int, float, np.ndarray]],
+    ) -> Optional[VideoFingerprint]:
+        """
+        保存済みAKAZE記述子から指紋を再生成
+
+        モデル更新後に元映像なしで指紋を再計算する。
+
+        Args:
+            per_frame_desc: [(フレームインデックス, タイムスタンプ,
+                              記述子配列), ...]
+
+        Returns:
+            VideoFingerprint。生成不可の場合None
+        """
+        if not self.is_trained:
+            raise RuntimeError(
+                "モデルが未学習です。"
+                "先にload_model()を呼んでください"
+            )
+        if not per_frame_desc:
+            return None
+
+        fp = self.encoder.encode_video(per_frame_desc)
+        fp.raw_descriptors = per_frame_desc
+        return fp
 
     def save_model(self, path: str) -> None:
         """学習済みモデルを保存"""

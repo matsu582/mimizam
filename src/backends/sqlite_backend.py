@@ -339,6 +339,24 @@ class SQLiteBackend(DatabaseBackend):
                 ON frame_fingerprints (video_id)
             """)
 
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS frame_descriptors (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    video_id TEXT NOT NULL,
+                    frame_index INTEGER NOT NULL,
+                    timestamp REAL NOT NULL,
+                    descriptors BLOB NOT NULL,
+                    descriptor_count INTEGER NOT NULL,
+                    FOREIGN KEY (video_id) REFERENCES videos (id)
+                        ON DELETE CASCADE
+                )
+            """)
+
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_frame_desc_video
+                ON frame_descriptors (video_id)
+            """)
+
             self.connection.commit()
             return True
         except Exception as e:
@@ -524,11 +542,97 @@ class SQLiteBackend(DatabaseBackend):
             self.logger.error(f"SQLite video list retrieval error: {e}")
             return []
 
+    def add_frame_descriptors(
+        self, video_id: str,
+        frames: List[Tuple[int, float, bytes, int]],
+    ) -> bool:
+        """SQLiteにフレーム単位AKAZE記述子を一括保存"""
+        try:
+            self._create_video_tables()
+            cursor = self.connection.cursor()
+            cursor.execute(
+                "DELETE FROM frame_descriptors WHERE video_id = ?",
+                (video_id,),
+            )
+            rows = [
+                (video_id, fidx, float(ts), desc_blob, desc_count)
+                for fidx, ts, desc_blob, desc_count in frames
+            ]
+            cursor.executemany(
+                """INSERT INTO frame_descriptors
+                    (video_id, frame_index, timestamp,
+                     descriptors, descriptor_count)
+                VALUES (?, ?, ?, ?, ?)""",
+                rows,
+            )
+            self.connection.commit()
+            return True
+        except Exception as exc:
+            self.logger.error(
+                f"SQLite frame descriptor save error: {exc} | "
+                f"Context: {{'video_id': '{video_id}'}}"
+            )
+            return False
+
+    def get_frame_descriptors(
+        self, video_id: str,
+    ) -> List[Tuple[int, float, bytes, int]]:
+        """SQLiteから指定映像のフレーム記述子を取得"""
+        try:
+            self._create_video_tables()
+            cursor = self.connection.cursor()
+            cursor.execute(
+                """SELECT frame_index, timestamp,
+                          descriptors, descriptor_count
+                   FROM frame_descriptors WHERE video_id = ?
+                   ORDER BY frame_index""",
+                (video_id,),
+            )
+            return [
+                (int(fidx), float(ts), bytes(desc), int(cnt))
+                for fidx, ts, desc, cnt in cursor.fetchall()
+            ]
+        except Exception as exc:
+            self.logger.error(
+                f"SQLite frame descriptor retrieval error: {exc}"
+            )
+            return []
+
+    def get_all_frame_descriptors(
+        self,
+    ) -> Dict[str, List[Tuple[int, float, bytes, int]]]:
+        """全映像のフレーム記述子を取得"""
+        result: Dict[str, List[Tuple[int, float, bytes, int]]] = {}
+        try:
+            self._create_video_tables()
+            cursor = self.connection.cursor()
+            cursor.execute(
+                """SELECT video_id, frame_index, timestamp,
+                          descriptors, descriptor_count
+                   FROM frame_descriptors
+                   ORDER BY video_id, frame_index"""
+            )
+            for vid, fidx, ts, desc, cnt in cursor.fetchall():
+                if vid not in result:
+                    result[vid] = []
+                result[vid].append(
+                    (int(fidx), float(ts), bytes(desc), int(cnt))
+                )
+        except Exception as exc:
+            self.logger.error(
+                f"SQLite all frame descriptor retrieval error: {exc}"
+            )
+        return result
+
     def delete_video(self, video_id: str) -> bool:
         """SQLiteから映像と関連指紋を削除"""
         try:
             self._create_video_tables()
             cursor = self.connection.cursor()
+            cursor.execute(
+                "DELETE FROM frame_descriptors WHERE video_id = ?",
+                (video_id,),
+            )
             cursor.execute(
                 "DELETE FROM frame_fingerprints WHERE video_id = ?",
                 (video_id,),

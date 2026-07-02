@@ -148,6 +148,72 @@ class VideoFingerprintDatabase:
         ]
         return self.backend.add_frame_fingerprints(video_id, frames_blob)
 
+    # ===== AKAZE記述子（指紋再生成用） =====
+
+    def add_frame_descriptors(
+        self,
+        video_id: str,
+        frame_descriptors: List[Tuple[int, float, np.ndarray]],
+    ) -> bool:
+        """
+        フレーム単位のAKAZE記述子を保存（指紋再生成用）
+
+        Args:
+            video_id: 映像ID
+            frame_descriptors: [(フレームインデックス, タイムスタンプ,
+                                 記述子配列(N×61)), ...]
+
+        Returns:
+            成功時True
+        """
+        frames_blob = [
+            (
+                fidx,
+                ts,
+                desc.astype(np.float32).tobytes(),
+                desc.shape[0],
+            )
+            for fidx, ts, desc in frame_descriptors
+        ]
+        return self.backend.add_frame_descriptors(video_id, frames_blob)
+
+    def get_frame_descriptors(
+        self, video_id: str,
+    ) -> List[Tuple[int, float, np.ndarray]]:
+        """
+        保存済みフレーム記述子を取得
+
+        Returns:
+            [(フレームインデックス, タイムスタンプ, 記述子配列), ...]
+        """
+        raw = self.backend.get_frame_descriptors(video_id)
+        result = []
+        for fidx, ts, desc_blob, desc_count in raw:
+            desc = np.frombuffer(desc_blob, dtype=np.float32).copy()
+            desc = desc.reshape(desc_count, -1)
+            result.append((fidx, ts, desc))
+        return result
+
+    def get_all_frame_descriptors(
+        self,
+    ) -> Dict[str, List[Tuple[int, float, np.ndarray]]]:
+        """
+        全映像のフレーム記述子を取得
+
+        Returns:
+            {video_id: [(fidx, ts, 記述子配列), ...], ...}
+        """
+        raw_all = self.backend.get_all_frame_descriptors()
+        result: Dict[str, List[Tuple[int, float, np.ndarray]]] = {}
+        for vid, frames in raw_all.items():
+            converted = []
+            for fidx, ts, desc_blob, desc_count in frames:
+                desc = np.frombuffer(desc_blob, dtype=np.float32).copy()
+                desc = desc.reshape(desc_count, -1)
+                converted.append((fidx, ts, desc))
+            result[vid] = converted
+        return result
+
     # ===== 検索 =====
 
     def search_video(

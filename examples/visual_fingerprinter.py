@@ -191,7 +191,9 @@ def main() -> int:
 
     parser.add_argument(
         "target",
-        help="動画ファイルまたはフォルダのパス",
+        nargs="?",
+        default=None,
+        help="動画ファイルまたはフォルダのパス（--rebuild時は不要）",
     )
     parser.add_argument(
         "--database", "-d",
@@ -227,6 +229,12 @@ def main() -> int:
         help="検出した動画ファイルの一覧のみ表示（登録しない）",
     )
     parser.add_argument(
+        "--rebuild",
+        action="store_true",
+        help="DB内の全映像指紋を保存済み記述子から再生成。"
+             "モデル更新後に元映像なしで指紋を再計算する",
+    )
+    parser.add_argument(
         "--verbose", "-v",
         action="store_true",
         help="詳細ログを出力",
@@ -237,7 +245,32 @@ def main() -> int:
     logger = logging.getLogger(__name__)
 
     try:
-        # 入力パスの検証
+        # Mimizamシステムを初期化
+        logger.info("Mimizamシステムを初期化中...")
+        mimizam = create_mimizam_instance(args)
+
+        # VLAD/PCAモデルの読み込み
+        load_model(mimizam, args.model)
+
+        # --rebuild: DB内の指紋を記述子から再生成
+        if args.rebuild:
+            logger.info("指紋再生成モード: DB内の全映像を再生成...")
+            rebuild_stats = mimizam.rebuild_video_fingerprints(
+                args.video_db
+            )
+            logger.info(
+                f"再生成完了: "
+                f"{rebuild_stats['success']}/"
+                f"{rebuild_stats['total']}件成功, "
+                f"{rebuild_stats['skip']}件スキップ"
+            )
+            return 0
+
+        # 登録モード: targetが必要
+        if args.target is None:
+            logger.error("登録先の動画ファイルまたはフォルダを指定してください")
+            return 1
+
         target = Path(args.target)
         if not target.exists():
             logger.error(f"パスが見つかりません: {args.target}")
@@ -263,13 +296,6 @@ def main() -> int:
             for vf in video_files:
                 print(f"  {vf}")
             return 0
-
-        # Mimizamシステムを初期化
-        logger.info("Mimizamシステムを初期化中...")
-        mimizam = create_mimizam_instance(args)
-
-        # VLAD/PCAモデルの読み込み
-        load_model(mimizam, args.model)
 
         # 映像指紋の登録
         processed = process_video_files(

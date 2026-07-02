@@ -209,6 +209,25 @@ class DatabaseBackend(ABC):
         """映像と関連指紋を削除"""
         raise NotImplementedError("このバックエンドは映像指紋に未対応です")
 
+    def add_frame_descriptors(
+        self, video_id: str,
+        frames: List[Tuple[int, float, bytes, int]],
+    ) -> bool:
+        """フレーム単位AKAZE記述子を保存（再生成用）"""
+        raise NotImplementedError("このバックエンドは映像指紋に未対応です")
+
+    def get_frame_descriptors(
+        self, video_id: str,
+    ) -> List[Tuple[int, float, bytes, int]]:
+        """指定映像のフレーム記述子を取得"""
+        raise NotImplementedError("このバックエンドは映像指紋に未対応です")
+
+    def get_all_frame_descriptors(
+        self,
+    ) -> Dict[str, List[Tuple[int, float, bytes, int]]]:
+        """全映像のフレーム記述子を取得"""
+        raise NotImplementedError("このバックエンドは映像指紋に未対応です")
+
     def get_video_stats(self) -> Dict[str, int]:
         """映像指紋の統計を取得"""
         raise NotImplementedError("このバックエンドは映像指紋に未対応です")
