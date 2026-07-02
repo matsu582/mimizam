@@ -37,8 +37,14 @@ from .src.video_fingerprinter import (
     FrameSelector,
     VLADEncoder,
     VideoFingerprint,
+    normalize_frame,
 )
 from .src.video_database import VideoFingerprintDatabase
+from .src.pip_detector import (
+    detect_pip_regions,
+    sample_frames_from_video,
+    PipRegion,
+)
 from .src.adaptive_parameters import AdaptiveParameterTuner,PerformanceMonitor
 
 __version__ = "1.0.3"
@@ -66,6 +72,12 @@ __all__ = [
     'VideoFingerprint',
     'VideoFingerprintDatabase',
     'Video',
+    'normalize_frame',
+    
+    # PiP検出
+    'detect_pip_regions',
+    'sample_frames_from_video',
+    'PipRegion',
     
     # データベース
     'FingerprintDatabase',

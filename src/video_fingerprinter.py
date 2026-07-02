@@ -17,6 +17,10 @@ import numpy as np
 logger = logging.getLogger(__name__)
 
 
+# フレーム正規化のデフォルト長辺ピクセル数
+DEFAULT_NORMALIZE_LONG_SIDE = 1280
+
+
 def _create_akaze():
     """OpenCV 4.x / 5.x 両対応のAKAZE生成"""
     if hasattr(cv2, 'AKAZE_create'):
@@ -29,6 +33,45 @@ def _create_akaze():
     )
 
 
+def normalize_frame(
+    frame: np.ndarray,
+    target_long_side: int = DEFAULT_NORMALIZE_LONG_SIDE,
+    allow_upscale: bool = False,
+) -> np.ndarray:
+    """
+    フレームを正規化解像度にリサイズ（アスペクト比維持）
+
+    比較するフレーム同士のスケールを統一するため、
+    長辺を target_long_side ピクセルに正規化する。
+    縦横比は維持されるため、異なるアスペクト比の映像にも対応。
+
+    Args:
+        frame: 入力フレーム（BGR or グレースケール）
+        target_long_side: 正規化後の長辺ピクセル数
+        allow_upscale: Trueなら小さい画像も拡大して正規化する
+                       （PiP矩形切り出し等で使用）
+
+    Returns:
+        リサイズされたフレーム
+    """
+    if frame.ndim == 3:
+        h, w = frame.shape[:2]
+    else:
+        h, w = frame.shape
+
+    long_side = max(h, w)
+    if long_side == target_long_side:
+        return frame
+    if long_side < target_long_side and not allow_upscale:
+        return frame
+
+    scale = target_long_side / long_side
+    new_w = int(w * scale)
+    new_h = int(h * scale)
+    interp = cv2.INTER_CUBIC if scale > 1.0 else cv2.INTER_AREA
+    return cv2.resize(frame, (new_w, new_h), interpolation=interp)
+
+
 @dataclass
 class VideoFingerprintConfig:
     """映像指紋の設定パラメータ"""
@@ -37,6 +80,9 @@ class VideoFingerprintConfig:
     scene_threshold: float = 27.0
     sample_interval: float = 1.0
     redundancy_threshold: float = 0.4
+
+    # フレーム正規化（長辺ピクセル数、0で無効）
+    normalize_long_side: int = DEFAULT_NORMALIZE_LONG_SIDE
 
     # VLAD
     codebook_size: int = 64
@@ -273,6 +319,10 @@ class VLADEncoder:
         """
         フレーム群からAKAZE記述子を抽出
 
+        フレームは正規化解像度（長辺1280px）にリサイズしてから
+        AKAZE記述子を抽出する。これにより、異なる解像度の映像間でも
+        codebook量子化の結果が安定する。
+
         Args:
             frames: [(フレームインデックス, タイムスタンプ, 画像), ...]
 
@@ -281,9 +331,12 @@ class VLADEncoder:
         """
         all_descriptors = []
         per_frame = []
+        target = self.config.normalize_long_side
 
         for fidx, ts, img in frames:
             gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+            if target > 0:
+                gray = normalize_frame(gray, target)
             _, desc = self._akaze.detectAndCompute(gray, None)
             if desc is not None and len(desc) > 0:
                 all_descriptors.append(desc)
@@ -747,6 +800,115 @@ class VideoFingerprinter:
         fp = self.encoder.encode_video(per_frame_desc)
         fp.raw_descriptors = per_frame_desc
         return fp
+
+    def fingerprint_pip_regions(
+        self, video_path: str
+    ) -> List[Tuple['PipRegion', VideoFingerprint]]:
+        """
+        PiP矩形を検出し、各矩形内を切り出して指紋化
+
+        PiP映像では全体指紋が背景に引きずられるため、
+        矩形内を切り出してアップスケール後に指紋化することで
+        DB側の全体指紋との類似度を向上させる。
+
+        Args:
+            video_path: 映像ファイルパス
+
+        Returns:
+            [(PipRegion, VideoFingerprint), ...]
+            PiP未検出の場合は空リスト
+        """
+        from .pip_detector import (
+            detect_pip_regions, sample_frames_from_video,
+        )
+
+        if not self.is_trained:
+            raise RuntimeError(
+                "モデルが未学習です。"
+                "先にload_model()を呼んでください"
+            )
+
+        if not os.path.exists(video_path):
+            logger.error(f"映像が見つかりません: {video_path}")
+            return []
+
+        # PiP矩形を検出
+        detect_frames = sample_frames_from_video(video_path, 30)
+        pip_regions = detect_pip_regions(detect_frames)
+
+        if not pip_regions:
+            return []
+
+        results = []
+        target = self.config.normalize_long_side
+        akaze = _create_akaze()
+
+        cap = cv2.VideoCapture(video_path)
+        if not cap.isOpened():
+            return []
+
+        total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        if fps <= 0:
+            fps = 24.0
+
+        interval = max(1, int(fps * 2))
+        sample_indices = list(range(0, total, interval))
+        if len(sample_indices) > 60:
+            step = len(sample_indices) // 60
+            sample_indices = sample_indices[::step][:60]
+
+        for region in pip_regions:
+            per_frame_desc = []
+
+            for fidx in sample_indices:
+                cap.set(cv2.CAP_PROP_POS_FRAMES, fidx)
+                ret, frame = cap.read()
+                if not ret:
+                    continue
+
+                fh, fw = frame.shape[:2]
+                cx1 = max(0, min(region.x, fw - 1))
+                cy1 = max(0, min(region.y, fh - 1))
+                cx2 = min(region.x + region.w, fw)
+                cy2 = min(region.y + region.h, fh)
+
+                if cx2 - cx1 < 30 or cy2 - cy1 < 30:
+                    continue
+
+                crop = frame[cy1:cy2, cx1:cx2]
+                gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+
+                # 正規化解像度にアップスケール
+                if target > 0:
+                    gray = normalize_frame(
+                        gray, target, allow_upscale=True
+                    )
+
+                kps, desc = akaze.detectAndCompute(gray, None)
+                if desc is not None and len(desc) >= 5:
+                    ts = fidx / fps
+                    per_frame_desc.append(
+                        (fidx, ts, desc.astype(np.float32))
+                    )
+
+            if not per_frame_desc:
+                continue
+
+            fp = self.encoder.encode_video(per_frame_desc)
+            fp.raw_descriptors = per_frame_desc
+            results.append((region, fp))
+
+            logger.info(
+                f"PiP矩形指紋生成: "
+                f"({region.x},{region.y}) {region.w}x{region.h} "
+                f"pip_score={region.pip_score:.2f} "
+                f"({fp.frame_count}フレーム, "
+                f"{fp.descriptor_count}記述子)"
+            )
+
+        cap.release()
+        return results
 
     def save_model(self, path: str) -> None:
         """学習済みモデルを保存"""

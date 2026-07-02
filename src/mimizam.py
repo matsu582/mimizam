@@ -459,19 +459,22 @@ class Mimizam:
         query_file_path: str,
         top_k: int = 5,
         use_frame_matching: bool = True,
+        detect_pip: bool = True,
         video_db_path: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         """
         映像ファイルでデータベースを検索
 
-        2段階検索:
+        3段階検索:
           1. 映像全体指紋で高速候補絞り込み
-          2. フレーム単位指紋で精密照合（PiP対策）
+          2. フレーム単位指紋で精密照合
+          3. PiP矩形検出 → 矩形内指紋でDB検索（PiP対策）
 
         Args:
             query_file_path: 検索対象の映像ファイルパス
             top_k: 返す結果の最大数
             use_frame_matching: フレーム単位マッチングを使用するか
+            detect_pip: PiP矩形検出を行うか
             video_db_path: 映像DBファイルパス
 
         Returns:
@@ -503,50 +506,118 @@ class Mimizam:
             )
 
             if not use_frame_matching or not candidates:
-                return candidates[:top_k]
+                results = candidates[:top_k]
+            else:
+                # Step 2: フレーム単位マッチングで精密照合
+                candidate_ids = [c["video_id"] for c in candidates]
+                frame_results = vdb.search_video_with_frame_matching(
+                    fp.frame_fingerprints, candidate_ids
+                )
 
-            # Step 2: フレーム単位マッチングで精密照合
-            candidate_ids = [c["video_id"] for c in candidates]
-            frame_results = vdb.search_video_with_frame_matching(
-                fp.frame_fingerprints, candidate_ids
-            )
-
-            # 結果を統合
-            frame_map = {
-                r["video_id"]: r for r in frame_results
-            }
-            results = []
-            for cand in candidates:
-                vid = cand["video_id"]
-                entry = {
-                    "video_id": vid,
-                    "video_similarity": cand["similarity"],
-                    "video": cand["video"],
+                # 結果を統合
+                frame_map = {
+                    r["video_id"]: r for r in frame_results
                 }
-                if vid in frame_map:
-                    entry["frame_similarity"] = frame_map[vid][
-                        "frame_similarity"
-                    ]
-                    # 最終スコア: フレームマッチングの結果を優先
-                    entry["similarity"] = max(
-                        cand["similarity"],
-                        frame_map[vid]["frame_similarity"],
-                    )
-                else:
-                    entry["frame_similarity"] = None
-                    entry["similarity"] = cand["similarity"]
-                results.append(entry)
+                results = []
+                for cand in candidates:
+                    vid = cand["video_id"]
+                    entry = {
+                        "video_id": vid,
+                        "video_similarity": cand["similarity"],
+                        "video": cand["video"],
+                    }
+                    if vid in frame_map:
+                        entry["frame_similarity"] = frame_map[vid][
+                            "frame_similarity"
+                        ]
+                        entry["similarity"] = max(
+                            cand["similarity"],
+                            frame_map[vid]["frame_similarity"],
+                        )
+                    else:
+                        entry["frame_similarity"] = None
+                        entry["similarity"] = cand["similarity"]
+                    results.append(entry)
 
-            results.sort(
-                key=lambda r: r["similarity"], reverse=True
-            )
-            return results[:top_k]
+                results.sort(
+                    key=lambda r: r["similarity"], reverse=True
+                )
+                results = results[:top_k]
+
+            # Step 3: PiP矩形検出 → 矩形内指紋でDB検索
+            if detect_pip:
+                pip_results = self._search_pip_regions(
+                    query_file_path, vfp, vdb, top_k
+                )
+                if pip_results:
+                    results = self._merge_pip_results(
+                        results, pip_results, top_k
+                    )
+
+            return results
 
         except FileNotFoundError:
             raise
         except Exception as exc:
             self.logger.error(f"映像検索エラー: {exc}")
             return []
+
+    def _search_pip_regions(
+        self, query_path, vfp, vdb, top_k
+    ) -> List[Dict[str, Any]]:
+        """PiP矩形内の指紋でDB検索"""
+        try:
+            pip_fps = vfp.fingerprint_pip_regions(query_path)
+            if not pip_fps:
+                return []
+
+            pip_results = []
+            for region, pip_fp in pip_fps:
+                matches = vdb.search_video(
+                    pip_fp.video_fingerprint, top_k=top_k
+                )
+                for m in matches:
+                    m["pip_region"] = {
+                        "x": region.x, "y": region.y,
+                        "w": region.w, "h": region.h,
+                        "pip_score": region.pip_score,
+                    }
+                    m["pip_similarity"] = m["similarity"]
+                pip_results.extend(matches)
+
+            return pip_results
+        except Exception as exc:
+            self.logger.warning(f"PiP検索エラー: {exc}")
+            return []
+
+    @staticmethod
+    def _merge_pip_results(
+        base_results, pip_results, top_k
+    ) -> List[Dict[str, Any]]:
+        """通常検索結果とPiP検索結果を統合"""
+        existing_ids = {r["video_id"] for r in base_results}
+        merged = list(base_results)
+
+        for pr in pip_results:
+            vid = pr["video_id"]
+            if vid in existing_ids:
+                for r in merged:
+                    if r["video_id"] == vid:
+                        pip_sim = pr.get("pip_similarity", 0)
+                        if pip_sim > r.get("similarity", 0):
+                            r["similarity"] = pip_sim
+                            r["pip_region"] = pr.get("pip_region")
+                            r["pip_similarity"] = pip_sim
+                        break
+            else:
+                pr["similarity"] = pr.get("pip_similarity", 0)
+                merged.append(pr)
+                existing_ids.add(vid)
+
+        merged.sort(
+            key=lambda r: r.get("similarity", 0), reverse=True
+        )
+        return merged[:top_k]
 
     def train_video_model(
         self,
