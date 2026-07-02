@@ -20,7 +20,6 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from mimizam import (
-    DatabaseConfig,
     Mimizam,
     create_mimizam_sqlite,
     create_mimizam_mysql,
@@ -197,8 +196,8 @@ def search_single_file(
         logger.info(f"候補: {len(results)} 件")
         print_search_results(results, query_name, show_details)
 
-    except Exception as e:
-        logger.error(f"検索エラー ({file_path}): {e}")
+    except Exception as exc:
+        logger.error(f"検索エラー ({file_path}): {exc}")
 
 
 def search_folder(
@@ -264,7 +263,7 @@ def main() -> int:
   python visual_search.py /path/to/query.mp4 --model model.pkl --db-type mysql \\
       --db-host localhost --db-name mimizam --db-user user --db-password pass
 
-modelファイルはvisual_fingerprinter.pyの--modelオプションで生成。
+modelファイルは scripts/train_pretrained_model.py で事前学習。
 AKAZE記述子→VLAD集約→PCA圧縮の変換パイプラインを保持し、
 登録時と検索時で同じ変換を適用するために必須。
 """,
@@ -289,7 +288,7 @@ AKAZE記述子→VLAD集約→PCA圧縮の変換パイプラインを保持し�
         required=True,
         help="VLAD/PCAモデルファイルのパス（.pkl、必須）。"
              "AKAZE記述子→VLAD→PCA変換に使用。"
-             "visual_fingerprinter.py --model で生成",
+             "scripts/train_pretrained_model.py で事前学習",
     )
     parser.add_argument(
         "--db-type",
@@ -401,7 +400,7 @@ AKAZE記述子→VLAD集約→PCA圧縮の変換パイプラインを保持し�
     except KeyboardInterrupt:
         logger.info("ユーザーにより中断されました")
         return 1
-    except Exception as e:
+    except Exception:
         logger.exception("予期しないエラーが発生しました")
         return 1
 

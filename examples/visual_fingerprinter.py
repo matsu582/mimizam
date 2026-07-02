@@ -13,12 +13,10 @@ import logging
 import os
 import sys
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import List, Optional
 
 from mimizam import (
-    DatabaseConfig,
     Mimizam,
-    Video,
     create_mimizam_sqlite,
     create_mimizam_mysql,
     create_mimizam_postgresql,
@@ -110,40 +108,19 @@ def create_mimizam_instance(args) -> Mimizam:
     raise ValueError(f"未対応のデータベースタイプ: {args.db_type}")
 
 
-def train_model_if_needed(
+def load_model(
     mimizam: Mimizam,
-    video_files: List[str],
-    model_path: Optional[str] = None,
+    model_path: str,
 ) -> None:
-    """必要に応じてVLAD/PCAモデルを学習する"""
+    """VLAD/PCAモデルを読み込む"""
     logger = logging.getLogger(__name__)
-    vfp = mimizam._get_video_fingerprinter()
-
-    # 保存済みモデルがあれば読み込み
-    if model_path and os.path.isfile(model_path):
-        logger.info(f"保存済みモデルを読み込み: {model_path}")
-        vfp.load_model(model_path)
-        return
-
-    if vfp.is_trained:
-        return
-
-    # 学習用の映像を選択（最大10本または全て）
-    train_files = video_files[:10]
-    logger.info(
-        f"VLAD/PCAモデルを学習中 ({len(train_files)}本の映像を使用)..."
-    )
-    stats = vfp.train_from_videos(train_files)
-    logger.info(
-        f"モデル学習完了: "
-        f"記述子数={stats.get('total_descriptors', '?')}, "
-        f"分散保持率={stats.get('pca_variance_ratio', 0):.1%}"
-    )
-
-    # モデルを保存
-    if model_path:
-        vfp.save_model(model_path)
-        logger.info(f"モデルを保存: {model_path}")
+    if not os.path.isfile(model_path):
+        raise FileNotFoundError(
+            f"モデルファイルが見つかりません: {model_path}\n"
+            "scripts/train_pretrained_model.py でモデルを生成してください"
+        )
+    logger.info(f"モデルを読み込み: {model_path}")
+    mimizam.load_video_model(model_path)
 
 
 def process_video_files(
@@ -184,8 +161,8 @@ def process_video_files(
             else:
                 logger.error(f"  登録失敗: {title}")
 
-        except Exception as e:
-            logger.error(f"  エラー ({video_path}): {e}")
+        except Exception as exc:
+            logger.error(f"  エラー ({video_path}): {exc}")
             continue
 
     return processed_count
@@ -197,17 +174,17 @@ def main() -> int:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""\
 使用例:
-  # フォルダ内の動画を登録
-  python visual_fingerprinter.py /path/to/videos
+  # 事前学習済みモデルを使って動画を登録
+  python visual_fingerprinter.py /path/to/videos --model models/akaze_vlad_pca_pretrained.pkl
 
   # 単一ファイルを登録
-  python visual_fingerprinter.py /path/to/video.mp4
+  python visual_fingerprinter.py /path/to/video.mp4 --model models/akaze_vlad_pca_pretrained.pkl
 
-  # モデルを保存して再利用
-  python visual_fingerprinter.py /path/to/videos --model model.pkl
+  # モデルの事前学習は scripts/train_pretrained_model.py で実行:
+  #   python scripts/train_pretrained_model.py --coco-dir /path/to/coco/val2017
 
   # MySQLバックエンドを使用
-  python visual_fingerprinter.py /path/to/videos --db-type mysql \\
+  python visual_fingerprinter.py /path/to/videos --model model.pkl --db-type mysql \\
       --db-host localhost --db-name mimizam --db-user user --db-password pass
 """,
     )
@@ -228,9 +205,9 @@ def main() -> int:
     )
     parser.add_argument(
         "--model", "-m",
-        default=None,
-        help="VLAD/PCAモデルの保存先/読み込み元パス（.pkl）。"
-             "K-Means辞書(VLAD量子化用)とPCA変換器を保持。"
+        required=True,
+        help="VLAD/PCAモデルファイルのパス（.pkl、必須）。"
+             "scripts/train_pretrained_model.py で事前学習したモデルを指定。"
              "検索時にvisual_search.pyで同じモデルを指定する必要あり",
     )
     parser.add_argument(
@@ -291,8 +268,8 @@ def main() -> int:
         logger.info("Mimizamシステムを初期化中...")
         mimizam = create_mimizam_instance(args)
 
-        # VLAD/PCAモデルの学習/読み込み
-        train_model_if_needed(mimizam, video_files, args.model)
+        # VLAD/PCAモデルの読み込み
+        load_model(mimizam, args.model)
 
         # 映像指紋の登録
         processed = process_video_files(
@@ -314,7 +291,7 @@ def main() -> int:
     except KeyboardInterrupt:
         logger.info("ユーザーにより中断されました")
         return 1
-    except Exception as e:
+    except Exception:
         logger.exception("予期しないエラーが発生しました")
         return 1
 

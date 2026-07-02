@@ -9,6 +9,7 @@ mimizam の開発・運用補助スクリプト集。
 | `create_demo_audio.py` | デモ用合成音声ファイルの生成 |
 | `migrate_database.py` | データベーススキーマの移行（全バックエンド対応） |
 | `generate_transformed_videos.py` | 映像指紋検証用の改変動画生成 |
+| `train_pretrained_model.py` | AKAZE + VLAD + PCA 事前学習済みモデルの構築 |
 
 ---
 
@@ -165,3 +166,88 @@ PiP画像背景（`pip_center_*_image`）では、別の映像の最初のフレ
 - 複数映像を指定した場合、自動的に別の映像を背景に選択
 - `--bg-video` で明示的に背景映像を指定可能
 - 背景映像が指定されていない場合はグレー背景にフォールバック
+
+---
+
+## train_pretrained_model.py
+
+AKAZE + VLAD + PCA の事前学習済みモデルを構築する。大規模画像/動画データセットから AKAZE 記述子を抽出し、K-Means codebook + PCA 変換器を学習して `.pkl` ファイルとして保存する。
+
+出力モデルは `examples/visual_fingerprinter.py` と `examples/visual_search.py` の `--model` オプションで使用する。
+
+### 依存パッケージ
+
+```bash
+pip install opencv-python numpy scikit-learn
+```
+
+### 推奨データセット
+
+| データセット | 規模 | 取得方法 |
+|---|---|---|
+| COCO val2017 | 5,000枚 (778MB) | `wget http://images.cocodataset.org/zips/val2017.zip` |
+| COCO train2017 | 118,000枚 (18GB) | `wget http://images.cocodataset.org/zips/train2017.zip` |
+| UCF-101 | 13,000動画 (6.5GB) | `wget https://www.crcv.ucf.edu/data/UCF101/UCF101.rar` |
+
+### 基本的な使い方
+
+```bash
+# COCO val2017 のみで学習（小規模・高速）
+python scripts/train_pretrained_model.py \
+    --coco-dir /path/to/coco/val2017 \
+    -o models/akaze_vlad_pca_pretrained.pkl
+
+# COCO + UCF-101 で学習（推奨・最も汎用的）
+python scripts/train_pretrained_model.py \
+    --coco-dir /path/to/coco/train2017 \
+    --ucf-dir /path/to/UCF-101 \
+    -o models/akaze_vlad_pca_pretrained.pkl
+
+# PCA次元数を変更
+python scripts/train_pretrained_model.py \
+    --coco-dir /path/to/coco/val2017 \
+    --pca-dim 256 \
+    -o models/model_pca256.pkl
+
+# 任意の画像/動画ディレクトリを使用
+python scripts/train_pretrained_model.py \
+    --image-dir /path/to/images \
+    --video-dir /path/to/videos \
+    -o models/custom_model.pkl
+```
+
+### オプション
+
+| オプション | 説明 | デフォルト |
+|---|---|---|
+| `--coco-dir` | COCO画像ディレクトリ | - |
+| `--ucf-dir` | UCF-101動画ディレクトリ | - |
+| `--image-dir` | 追加画像ディレクトリ（複数指定可） | - |
+| `--video-dir` | 追加動画ディレクトリ（複数指定可） | - |
+| `-o`, `--output` | 出力モデルファイルパス | `models/akaze_vlad_pca_pretrained.pkl` |
+| `-K`, `--codebook-size` | K-Meansクラスタ数 | 64 |
+| `--pca-dim` | PCA出力次元数 | 512 |
+| `--max-images` | 処理する画像の最大数 | 50000 |
+| `--max-videos` | 処理する動画の最大数 | 2000 |
+| `--max-desc-per-image` | 画像あたりの最大記述子数 | 500 |
+| `--video-interval` | 動画のフレームサンプリング間隔（秒） | 2.0 |
+
+### PCA次元数の目安
+
+| 次元数 | 指紋サイズ | 用途 |
+|---|---|---|
+| 128 | 512B | 小規模・同ジャンル映像向け |
+| 256 | 1KB | 中規模向け |
+| 512 | 2KB | 大規模・異ジャンル混在向け（推奨） |
+
+### 学習後の使い方
+
+```bash
+# 映像の登録
+python examples/visual_fingerprinter.py /path/to/videos \
+    --model models/akaze_vlad_pca_pretrained.pkl
+
+# 映像の検索
+python examples/visual_search.py /path/to/query.mp4 \
+    --model models/akaze_vlad_pca_pretrained.pkl --details
+```

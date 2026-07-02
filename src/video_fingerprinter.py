@@ -282,8 +282,11 @@ class VLADEncoder:
         """
         コードブックとPCAモデルを学習
 
+        descriptor_list の各要素は1フレーム/1画像分の記述子配列。
+        K-Meansは全記述子で学習し、PCAはフレーム単位のVLADで学習する。
+
         Args:
-            descriptor_list: 全映像から収集した記述子のリスト
+            descriptor_list: フレーム/画像ごとの記述子配列のリスト
         """
         from sklearn.cluster import MiniBatchKMeans
         from sklearn.decomposition import PCA
@@ -306,25 +309,15 @@ class VLADEncoder:
         )
         self._codebook.fit(all_desc)
 
-        # VLAD次元数
         vlad_dim = k * self._descriptor_dim
         logger.info(f"VLAD次元: {vlad_dim}")
 
-        # VLADベクトルのサンプルを作成してPCA学習
-        # 学習データからサンプルVLADを生成
-        sample_size = min(5000, n_samples)
-        rng = np.random.default_rng(42)
-        indices = rng.choice(n_samples, size=sample_size, replace=False)
-        sample_desc = all_desc[indices]
-
-        # フレームサイズ程度の記述子群に分割してVLAD生成
-        chunk_size = max(20, sample_size // 200)
+        # フレーム/画像ごとのVLADベクトルを生成してPCA学習
         vlad_samples = []
-        for start in range(0, sample_size, chunk_size):
-            end = min(start + chunk_size, sample_size)
-            chunk = sample_desc[start:end]
-            vlad_vec = self._compute_vlad_vector(chunk)
-            vlad_samples.append(vlad_vec)
+        for desc in descriptor_list:
+            if len(desc) >= 5:
+                vlad_vec = self._compute_vlad_vector(desc)
+                vlad_samples.append(vlad_vec)
 
         vlad_matrix = np.array(vlad_samples)
         target_dim = min(
@@ -339,7 +332,8 @@ class VLADEncoder:
         variance = np.sum(self._pca.explained_variance_ratio_) * 100
         logger.info(
             f"PCA: {vlad_dim}→{target_dim}次元 "
-            f"(分散保持率: {variance:.1f}%)"
+            f"({len(vlad_samples)}サンプル, "
+            f"分散保持率: {variance:.1f}%)"
         )
 
     def encode_frame(self, descriptors: np.ndarray) -> Optional[np.ndarray]:
