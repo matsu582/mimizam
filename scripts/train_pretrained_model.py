@@ -361,7 +361,16 @@ def compute_vlad_vector(
 def main():
     args = parse_args()
 
-    akaze = cv2.AKAZE_create()
+    if hasattr(cv2, 'AKAZE_create'):
+        akaze = cv2.AKAZE_create()
+    elif hasattr(cv2, 'xfeatures2d_AKAZE'):
+        akaze = cv2.xfeatures2d_AKAZE.create()
+    else:
+        logger.error(
+            "AKAZEが利用できません。"
+            "opencv-contrib-python をインストールしてください"
+        )
+        sys.exit(1)
     per_unit_descriptors = []
 
     # COCO画像の処理

@@ -17,6 +17,18 @@ import numpy as np
 logger = logging.getLogger(__name__)
 
 
+def _create_akaze():
+    """OpenCV 4.x / 5.x 両対応のAKAZE生成"""
+    if hasattr(cv2, 'AKAZE_create'):
+        return cv2.AKAZE_create()
+    if hasattr(cv2, 'xfeatures2d_AKAZE'):
+        return cv2.xfeatures2d_AKAZE.create()
+    raise RuntimeError(
+        "AKAZEが利用できません。"
+        "opencv-contrib-python をインストールしてください"
+    )
+
+
 @dataclass
 class VideoFingerprintConfig:
     """映像指紋の設定パラメータ"""
@@ -68,7 +80,7 @@ class FrameSelector:
             config: 映像指紋設定。Noneの場合はデフォルト値を使用
         """
         self.config = config or VideoFingerprintConfig()
-        self._akaze = cv2.AKAZE_create()
+        self._akaze = _create_akaze()
         self._matcher = cv2.BFMatcher(cv2.NORM_HAMMING)
 
     def select_keyframes(
@@ -242,7 +254,7 @@ class VLADEncoder:
             config: 映像指紋設定
         """
         self.config = config or VideoFingerprintConfig()
-        self._akaze = cv2.AKAZE_create()
+        self._akaze = _create_akaze()
         self._codebook = None
         self._pca = None
         self._descriptor_dim = None
