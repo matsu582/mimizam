@@ -115,6 +115,20 @@ def create_mimizam_instance(args) -> Mimizam:
     raise ValueError(f"未対応のデータベースタイプ: {args.db_type}")
 
 
+def _get_video_duration(file_path: str) -> float:
+    """ffprobeで動画の長さ（秒）を取得する"""
+    try:
+        result = subprocess.run(
+            ["ffprobe", "-v", "quiet",
+             "-show_entries", "format=duration",
+             "-of", "csv=p=0", file_path],
+            capture_output=True, text=True, timeout=10,
+        )
+        return float(result.stdout.strip())
+    except (ValueError, subprocess.TimeoutExpired, OSError):
+        return 0.0
+
+
 def extract_audio(video_path: str, temp_dir: str) -> str:
     """ffmpegで動画から音声を抽出する"""
     video_name = Path(video_path).stem
@@ -380,7 +394,23 @@ def _print_detail_section(result: Dict[str, Any]) -> None:
         # 音声の詳細マッチ位置
         details = audio.get("detailed_info")
         if details:
-            _print_audio_match_detail(details)
+            q_dur = result.get("query_duration", 0)
+            # DB曲の長さを推定
+            db_dur = 0.0
+            v_match = result.get("visual_match")
+            if v_match:
+                video = v_match.get("video")
+                if video and hasattr(video, "duration"):
+                    db_dur = video.duration
+            if db_dur <= 0:
+                st = details.get("statistics", {})
+                db_range = st.get(
+                    "db_time_range", (0, 0)
+                )
+                db_dur = db_range[1] if db_range[1] > 0 else 0
+            _print_audio_match_detail(
+                details, q_dur, db_dur,
+            )
 
     # 映像情報
     if v_sim is not None:
@@ -403,7 +433,11 @@ def _print_detail_section(result: Dict[str, Any]) -> None:
             _print_visual_match_detail(match_details)
 
 
-def _print_audio_match_detail(details: Dict) -> None:
+def _print_audio_match_detail(
+    details: Dict,
+    query_duration: float = 0,
+    db_duration: float = 0,
+) -> None:
     """音声マッチの詳細位置情報を表示する"""
     stats = details.get("statistics", {})
     positions = details.get("match_positions", [])
@@ -426,10 +460,10 @@ def _print_audio_match_detail(details: Dict) -> None:
     )
     median_offset = time_diffs[len(time_diffs) // 2]
 
-    # 中央値±0.5秒以内の一致ポジションを集計
+    # 中央値±2秒以内の一致ポジションを集計
     consistent = [
         p for p in positions
-        if abs(p["time_diff"] - median_offset) < 0.5
+        if abs(p["time_diff"] - median_offset) < 2.0
     ]
 
     if consistent:
@@ -437,16 +471,52 @@ def _print_audio_match_detail(details: Dict) -> None:
         q_times = [p["query_time"] for p in consistent]
         db_start, db_end = min(db_times), max(db_times)
         q_start, q_end = min(q_times), max(q_times)
-        db_dur = db_end - db_start
-        q_dur = q_end - q_start
+        span_db = db_end - db_start
+        span_q = q_end - q_start
 
         print(
             f"     一致区間: クエリ "
             f"{_format_duration(q_start)} - "
-            f"{_format_duration(q_end)} ({q_dur:.1f}s) → "
+            f"{_format_duration(q_end)} ({span_q:.1f}s) → "
             f"DB {_format_duration(db_start)} - "
-            f"{_format_duration(db_end)} ({db_dur:.1f}s)"
+            f"{_format_duration(db_end)} ({span_db:.1f}s)"
         )
+
+        # バー可視化
+        regions = [{
+            "query_start": q_start,
+            "query_end": max(q_end, q_start + 0.5),
+            "db_start": db_start,
+            "db_end": max(db_end, db_start + 0.5),
+        }]
+
+        if query_duration > 0:
+            print(
+                f"     クエリ音声 "
+                f"({_format_duration(query_duration)}):"
+            )
+            bar = _render_bar(
+                query_duration, regions, key="query",
+            )
+            print(f"      {bar}")
+            print(
+                f"       0:00{' ' * 48}"
+                f"{_format_duration(query_duration)}"
+            )
+
+        if db_duration > 0:
+            print(
+                f"     DB音声 "
+                f"({_format_duration(db_duration)}):"
+            )
+            bar = _render_bar(
+                db_duration, regions, key="db",
+            )
+            print(f"      {bar}")
+            print(
+                f"       0:00{' ' * 48}"
+                f"{_format_duration(db_duration)}"
+            )
 
 
 def _print_visual_match_detail(match_details: Dict) -> None:
@@ -586,6 +656,12 @@ def search_single_file(
     # 結果の統合
     merged = merge_results(audio_results, visual_results)
     logger.info(f"統合候補: {len(merged)} 件")
+
+    # クエリ動画の長さを取得してマージ結果に付与
+    q_dur = _get_video_duration(file_path)
+    if q_dur > 0:
+        for entry in merged:
+            entry["query_duration"] = q_dur
 
     # 結果の表示
     print_merged_results(
