@@ -181,19 +181,39 @@ class ElasticsearchBackend(DatabaseBackend):
                 }
             }
             
-            # インデックスを作成（存在しない場合のみ）
-            if not self.client.indices.exists(index=self.songs_index):
-                self.client.indices.create(index=self.songs_index, body=songs_mapping)
-                self.logger.info(f"Created songs index (shards: {self.config.es_songs_shards}, replicas: {self.config.es_songs_replicas}): {self.songs_index}")
-            
-            if not self.client.indices.exists(index=self.fingerprints_index):
-                self.client.indices.create(index=self.fingerprints_index, body=fingerprints_mapping)
-                self.logger.info(f"Created fingerprints index (shards: {self.config.es_fingerprints_shards}, replicas: {self.config.es_fingerprints_replicas}): {self.fingerprints_index}")
+            # インデックスを作成（既存の場合は無視）
+            self._create_index_if_missing(
+                self.songs_index, songs_mapping,
+            )
+            self._create_index_if_missing(
+                self.fingerprints_index, fingerprints_mapping,
+            )
             
             return True
         except ElasticsearchException as e:
             self.logger.error(f"Elasticsearch index creation error: {e}")
             return False
+
+    def _create_index_if_missing(
+        self, index_name: str, body: dict,
+    ) -> None:
+        """インデックスが存在しなければ作成する（既存なら無視）"""
+        try:
+            if not self.client.indices.exists(index=index_name):
+                self.client.indices.create(
+                    index=index_name, body=body,
+                )
+                self.logger.info(
+                    f"Created index: {index_name}"
+                )
+        except ElasticsearchException as e:
+            err_str = str(e)
+            if "resource_already_exists_exception" in err_str:
+                self.logger.debug(
+                    f"Index already exists: {index_name}"
+                )
+            else:
+                raise
     
     def add_song(self, song: Song) -> bool:
         """Elasticsearchに楽曲を追加"""
@@ -553,72 +573,72 @@ class ElasticsearchBackend(DatabaseBackend):
         self._video_fp_index = vfp_idx
         self._frame_fp_index = ffp_idx
 
-        try:
-            if not self.client.indices.exists(index=videos_idx):
-                self.client.indices.create(index=videos_idx, body={
-                    "settings": {
-                        "number_of_shards": 1,
-                        "number_of_replicas": 0,
-                    },
-                    "mappings": {"properties": {
-                        "id": {"type": "keyword"},
-                        "title": {"type": "text", "fields": {
-                            "keyword": {"type": "keyword"}
-                        }},
-                        "file_path": {"type": "keyword"},
-                        "duration": {"type": "double"},
-                        "frame_count": {"type": "integer"},
-                        "created_at": {"type": "date"},
-                    }},
-                })
+        videos_body = {
+            "settings": {
+                "number_of_shards": 1,
+                "number_of_replicas": 0,
+            },
+            "mappings": {"properties": {
+                "id": {"type": "keyword"},
+                "title": {"type": "text", "fields": {
+                    "keyword": {"type": "keyword"}
+                }},
+                "file_path": {"type": "keyword"},
+                "duration": {"type": "double"},
+                "frame_count": {"type": "integer"},
+                "created_at": {"type": "date"},
+            }},
+        }
+        vfp_body = {
+            "settings": {
+                "number_of_shards": 1,
+                "number_of_replicas": 0,
+            },
+            "mappings": {"properties": {
+                "video_id": {"type": "keyword"},
+                "fingerprint": {"type": "binary"},
+                "embedding": {
+                    "type": "dense_vector",
+                    "index": True,
+                    "similarity": "cosine",
+                },
+                "dimensions": {"type": "integer"},
+                "descriptor_count": {"type": "integer"},
+            }},
+        }
+        ffp_body = {
+            "settings": {
+                "number_of_shards": 1,
+                "number_of_replicas": 0,
+            },
+            "mappings": {"properties": {
+                "video_id": {"type": "keyword"},
+                "frame_index": {"type": "integer"},
+                "timestamp": {"type": "double"},
+                "fingerprint": {"type": "binary"},
+            }},
+        }
 
-            if not self.client.indices.exists(index=vfp_idx):
-                self.client.indices.create(index=vfp_idx, body={
-                    "settings": {
-                        "number_of_shards": 1,
-                        "number_of_replicas": 0,
-                    },
-                    "mappings": {"properties": {
-                        "video_id": {"type": "keyword"},
-                        "fingerprint": {"type": "binary"},
+        try:
+            self._create_index_if_missing(videos_idx, videos_body)
+            self._create_index_if_missing(vfp_idx, vfp_body)
+
+            # 既存インデックスにembeddingフィールドを追加
+            try:
+                self.client.indices.put_mapping(
+                    index=vfp_idx,
+                    body={"properties": {
                         "embedding": {
                             "type": "dense_vector",
                             "index": True,
                             "similarity": "cosine",
                         },
-                        "dimensions": {"type": "integer"},
-                        "descriptor_count": {"type": "integer"},
                     }},
-                })
-            else:
-                # 既存インデックスにembeddingフィールドを追加
-                try:
-                    self.client.indices.put_mapping(
-                        index=vfp_idx,
-                        body={"properties": {
-                            "embedding": {
-                                "type": "dense_vector",
-                                "index": True,
-                                "similarity": "cosine",
-                            },
-                        }},
-                    )
-                except ElasticsearchException:
-                    pass
+                )
+            except ElasticsearchException:
+                pass
 
-            if not self.client.indices.exists(index=ffp_idx):
-                self.client.indices.create(index=ffp_idx, body={
-                    "settings": {
-                        "number_of_shards": 1,
-                        "number_of_replicas": 0,
-                    },
-                    "mappings": {"properties": {
-                        "video_id": {"type": "keyword"},
-                        "frame_index": {"type": "integer"},
-                        "timestamp": {"type": "double"},
-                        "fingerprint": {"type": "binary"},
-                    }},
-                })
+            self._create_index_if_missing(ffp_idx, ffp_body)
         except ElasticsearchException as e:
             self.logger.error(
                 f"Elasticsearch video index creation error: {e}"

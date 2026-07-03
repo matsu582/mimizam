@@ -38,6 +38,7 @@ dependencies = [
     "matplotlib>=3.5.0",
     "scipy>=1.7.0",
     "soundfile>=0.10.3",
+    "cffi>=1.15.0",
     "pydub>=0.25.1",
     "ffmpeg-python>=0.2.0",
     # SQLite support (included in Python standard library, but ensuring compatibility)
