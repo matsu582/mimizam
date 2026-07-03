@@ -557,7 +557,12 @@ class VLADEncoder:
         X_transformed = (X - mean) @ components.T
         """
         x = vec.reshape(1, -1).astype(np.float64)
-        result = (x - self._pca_mean) @ self._pca_components.T
+        mean = self._pca_mean.astype(np.float64)
+        comp = self._pca_components.astype(np.float64)
+        centered = x - mean
+        np.nan_to_num(centered, copy=False)
+        result = centered @ comp.T
+        np.nan_to_num(result, copy=False)
         return result.flatten()
 
     def _codebook_predict(self, descriptors: np.ndarray) -> np.ndarray:
@@ -566,11 +571,14 @@ class VLADEncoder:
 
         ||x - c||^2 = ||x||^2 - 2*x*c^T + ||c||^2
         """
-        x = descriptors.astype(np.float32)
-        centers = self._codebook_centers
+        x = descriptors.astype(np.float64)
+        centers = self._codebook_centers.astype(np.float64)
         x_sq = np.sum(x ** 2, axis=1, keepdims=True)
         c_sq = np.sum(centers ** 2, axis=1, keepdims=True).T
-        dists = x_sq - 2.0 * (x @ centers.T) + c_sq
+        dot = x @ centers.T
+        np.nan_to_num(dot, copy=False)
+        dists = x_sq - 2.0 * dot + c_sq
+        np.nan_to_num(dists, copy=False, nan=np.inf)
         return np.argmin(dists, axis=1)
 
     def encode_frame(self, descriptors: np.ndarray) -> Optional[np.ndarray]:
