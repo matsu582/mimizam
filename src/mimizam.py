@@ -527,13 +527,18 @@ class Mimizam:
                         "video": cand["video"],
                     }
                     if vid in frame_map:
-                        entry["frame_similarity"] = frame_map[vid][
+                        fm = frame_map[vid]
+                        entry["frame_similarity"] = fm[
                             "frame_similarity"
                         ]
                         entry["similarity"] = max(
                             cand["similarity"],
-                            frame_map[vid]["frame_similarity"],
+                            fm["frame_similarity"],
                         )
+                        if "match_details" in fm:
+                            entry["match_details"] = fm[
+                                "match_details"
+                            ]
                     else:
                         entry["frame_similarity"] = None
                         entry["similarity"] = cand["similarity"]

@@ -250,6 +250,7 @@ class VideoFingerprintDatabase:
 
         各クエリフレームについて、DB側の全フレームとの最高スコアを計算し、
         全クエリフレーム中の最高スコアを映像の最終スコアとする。
+        また、一致区間の時間帯情報も返す。
 
         Args:
             query_frame_fps: クエリ映像のフレーム指紋リスト
@@ -257,7 +258,8 @@ class VideoFingerprintDatabase:
             threshold: 最低類似度閾値
 
         Returns:
-            [{"video_id": ..., "frame_similarity": ..., ...}, ...]
+            [{"video_id": ..., "frame_similarity": ...,
+              "match_details": {...}, ...}, ...]
         """
         results = []
 
@@ -272,24 +274,111 @@ class VideoFingerprintDatabase:
             ]
 
             best_per_query = []
-            for _, _, q_fp in query_frame_fps:
+            frame_matches = []
+            for q_idx, q_ts, q_fp in query_frame_fps:
                 q_f32 = q_fp.astype(np.float32)
-                frame_best = max(
-                    float(np.dot(q_f32, d_fp))
-                    for _, _, d_fp in db_frame_vecs
-                )
-                best_per_query.append(frame_best)
+                best_sim = -1.0
+                best_db_ts = 0.0
+                for d_idx, d_ts, d_fp in db_frame_vecs:
+                    sim = float(np.dot(q_f32, d_fp))
+                    if sim > best_sim:
+                        best_sim = sim
+                        best_db_ts = d_ts
+                best_per_query.append(best_sim)
+                frame_matches.append({
+                    "query_ts": q_ts,
+                    "db_ts": best_db_ts,
+                    "similarity": best_sim,
+                })
 
             max_sim = float(np.max(best_per_query))
             if max_sim >= threshold:
+                match_details = self._compute_match_regions(
+                    frame_matches, threshold=0.4
+                )
+                db_timestamps = [d_ts for _, d_ts, _ in db_frame_vecs]
+                match_details["db_duration"] = (
+                    max(db_timestamps) if db_timestamps else 0.0
+                )
+                q_timestamps = [q_ts for _, q_ts, _ in query_frame_fps]
+                match_details["query_duration"] = (
+                    max(q_timestamps) if q_timestamps else 0.0
+                )
+
                 results.append({
                     "video_id": vid_id,
                     "frame_similarity": max_sim,
                     "median_similarity": float(np.median(best_per_query)),
+                    "match_details": match_details,
                 })
 
         results.sort(key=lambda r: r["frame_similarity"], reverse=True)
         return results
+
+    @staticmethod
+    def _compute_match_regions(
+        frame_matches: List[Dict],
+        threshold: float = 0.4,
+        gap_tolerance: float = 3.0,
+    ) -> Dict:
+        """
+        フレームマッチ情報から一致区間を計算
+
+        Args:
+            frame_matches: フレーム単位のマッチ情報リスト
+            threshold: 一致とみなす最低類似度
+            gap_tolerance: 連続とみなす最大ギャップ（秒）
+
+        Returns:
+            一致区間と統計情報
+        """
+        good = [
+            m for m in frame_matches if m["similarity"] >= threshold
+        ]
+        if not good:
+            return {
+                "matched_frames": 0,
+                "total_frames": len(frame_matches),
+                "regions": [],
+            }
+
+        good.sort(key=lambda m: m["query_ts"])
+
+        regions = []
+        cur_q_start = good[0]["query_ts"]
+        cur_q_end = good[0]["query_ts"]
+        cur_db_start = good[0]["db_ts"]
+        cur_db_end = good[0]["db_ts"]
+
+        for m in good[1:]:
+            if m["query_ts"] - cur_q_end <= gap_tolerance:
+                cur_q_end = m["query_ts"]
+                cur_db_end = m["db_ts"]
+            else:
+                regions.append({
+                    "query_start": cur_q_start,
+                    "query_end": cur_q_end,
+                    "db_start": min(cur_db_start, cur_db_end),
+                    "db_end": max(cur_db_start, cur_db_end),
+                })
+                cur_q_start = m["query_ts"]
+                cur_q_end = m["query_ts"]
+                cur_db_start = m["db_ts"]
+                cur_db_end = m["db_ts"]
+
+        regions.append({
+            "query_start": cur_q_start,
+            "query_end": cur_q_end,
+            "db_start": min(cur_db_start, cur_db_end),
+            "db_end": max(cur_db_start, cur_db_end),
+        })
+
+        return {
+            "matched_frames": len(good),
+            "total_frames": len(frame_matches),
+            "match_ratio": len(good) / len(frame_matches),
+            "regions": regions,
+        }
 
     # ===== 統計 =====
 

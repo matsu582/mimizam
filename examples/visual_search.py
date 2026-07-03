@@ -107,6 +107,94 @@ def _format_duration(seconds: float) -> str:
     return f"{minutes}:{secs:02d}"
 
 
+def _render_bar(
+    total_duration: float,
+    regions: list,
+    bar_width: int = 60,
+    key: str = "query",
+) -> str:
+    """一致区間をバーで可視化"""
+    if total_duration <= 0:
+        return "|" + "-" * bar_width + "|"
+
+    bar = ["-"] * bar_width
+    start_key = f"{key}_start"
+    end_key = f"{key}_end"
+
+    for region in regions:
+        s = region.get(start_key, 0)
+        e = region.get(end_key, 0)
+        i_start = int(s / total_duration * bar_width)
+        i_end = int(e / total_duration * bar_width) + 1
+        i_start = max(0, min(i_start, bar_width - 1))
+        i_end = max(i_start + 1, min(i_end, bar_width))
+        for i in range(i_start, i_end):
+            bar[i] = "\u2588"
+
+    return "|" + "".join(bar) + "|"
+
+
+def _print_match_location(match_details: dict) -> None:
+    """映像マッチ位置の詳細を表示"""
+    matched = match_details.get("matched_frames", 0)
+    total = match_details.get("total_frames", 0)
+    ratio = match_details.get("match_ratio", 0)
+    regions = match_details.get("regions", [])
+    q_dur = match_details.get("query_duration", 0)
+    db_dur = match_details.get("db_duration", 0)
+
+    print(f"     \U0001f3af \u6620\u50cf\u30de\u30c3\u30c1\u5206\u6790:")
+    print(
+        f"        \u4e00\u81f4\u30d5\u30ec\u30fc\u30e0: {matched}/{total} "
+        f"({ratio * 100:.1f}%)"
+    )
+
+    if not regions:
+        print("        \u4e00\u81f4\u533a\u9593\u306a\u3057")
+        return
+
+    for j, reg in enumerate(regions, 1):
+        qs = _format_duration(reg["query_start"])
+        qe = _format_duration(reg["query_end"])
+        ds = _format_duration(reg["db_start"])
+        de = _format_duration(reg["db_end"])
+        q_len = reg["query_end"] - reg["query_start"]
+        d_len = reg["db_end"] - reg["db_start"]
+        print(
+            f"        \u533a\u9593{j}: \u30af\u30a8\u30ea {qs} - {qe} "
+            f"({q_len:.1f}s) \u2192 DB {ds} - {de} ({d_len:.1f}s)"
+        )
+
+    # クエリ映像のバー可視化
+    if q_dur > 0:
+        print(
+            f"     \u30af\u30a8\u30ea\u6620\u50cf ({_format_duration(q_dur)}):"
+        )
+        bar = _render_bar(q_dur, regions, key="query")
+        print(f"      {bar}")
+        print(
+            f"       0:00{' ' * 48}"
+            f"{_format_duration(q_dur)}"
+        )
+
+    # DB映像のバー可視化
+    if db_dur > 0:
+        print(
+            f"     DB\u6620\u50cf ({_format_duration(db_dur)}):"
+        )
+        bar = _render_bar(db_dur, regions, key="db")
+        print(f"      {bar}")
+        print(
+            f"       0:00{' ' * 48}"
+            f"{_format_duration(db_dur)}"
+        )
+
+    print(
+        "     \U0001f4cd \u51e1\u4f8b: "
+        "\u2588 = \u4e00\u81f4\u533a\u9593, - = \u975e\u4e00\u81f4"
+    )
+
+
 def print_search_results(
     results: List[Dict[str, Any]],
     query_name: str,
@@ -154,6 +242,11 @@ def print_search_results(
                 print(f"     映像長: {_format_duration(duration)}")
             if video and video.frame_count:
                 print(f"     フレーム数: {video.frame_count}")
+
+            # 映像マッチ位置の可視化
+            match_details = result.get("match_details")
+            if match_details:
+                _print_match_location(match_details)
 
         print(f"     ファイル: {file_path}")
 
