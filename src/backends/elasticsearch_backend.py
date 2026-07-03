@@ -26,12 +26,16 @@ from ..exceptions import ConnectionError, QueryError
 
 try:
     from elasticsearch import Elasticsearch
-    from elasticsearch.exceptions import TransportError as ElasticsearchException
+    from elasticsearch.exceptions import TransportError, ApiError
     from elasticsearch.helpers import bulk
+    # elasticsearch 8.xではApiErrorとTransportErrorが別階層
+    ElasticsearchException = (TransportError, ApiError)
     ELASTICSEARCH_AVAILABLE = True
 except ImportError as e:
     Elasticsearch = None
-    ElasticsearchException = Exception
+    TransportError = Exception
+    ApiError = Exception
+    ElasticsearchException = (Exception,)
     ELASTICSEARCH_AVAILABLE = False
 
 
