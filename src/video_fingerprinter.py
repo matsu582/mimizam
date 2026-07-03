@@ -159,7 +159,19 @@ class VideoFingerprint:
 
 
 class FrameSelector:
-    """映像からキーフレームを選定するクラス"""
+    """映像からキーフレームを選定するクラス
+
+    1回の映像走査でシーン検出とフレーム選定を同時に行う。
+    シーン検出はフレーム間の輝度差分、冗長除去はHSVヒストグラム相関で判定。
+    """
+
+    # シーン検出用の縮小解像度
+    _SCENE_W = 160
+    _SCENE_H = 90
+
+    # ヒストグラム設定
+    _HIST_H_BINS = 50
+    _HIST_S_BINS = 60
 
     def __init__(self, config: Optional[VideoFingerprintConfig] = None):
         """
@@ -169,16 +181,16 @@ class FrameSelector:
             config: 映像指紋設定。Noneの場合はデフォルト値を使用
         """
         self.config = config or VideoFingerprintConfig()
-        self._akaze = _create_akaze()
-        self._matcher = cv2.BFMatcher(cv2.NORM_HAMMING)
 
     def select_keyframes(
         self, video_path: str
     ) -> List[Tuple[int, float, np.ndarray]]:
         """
-        映像からキーフレームを選定
+        映像からキーフレームを選定（1回走査）
 
-        ハイブリッド方式: シーン境界 + 1fpsサンプリング + AKAZE冗長除去
+        1回の映像読み込みでシーン検出とフレーム選定を同時に実行。
+        シーン境界はフレーム間の輝度差分で検出し、
+        冗長除去はHSVヒストグラム相関で高速に判定する。
 
         Args:
             video_path: 映像ファイルパス
@@ -186,150 +198,107 @@ class FrameSelector:
         Returns:
             [(フレームインデックス, タイムスタンプ, フレーム画像), ...]
         """
-        scenes = self._detect_scenes(video_path)
-        return self._hybrid_selection(video_path, scenes)
-
-    def _detect_scenes(self, video_path: str) -> list:
-        """
-        シーンチェンジを検出
-
-        ContentDetector → AdaptiveDetector → 全体1シーン のフォールバック
-        """
-        try:
-            from scenedetect import detect, ContentDetector
-            scene_list = detect(
-                video_path,
-                ContentDetector(threshold=self.config.scene_threshold),
-            )
-            if scene_list:
-                logger.info(
-                    f"ContentDetector: {len(scene_list)}シーン検出"
-                )
-                return scene_list
-        except Exception as exc:
-            logger.warning(f"ContentDetector失敗: {exc}")
-
-        try:
-            from scenedetect import detect, AdaptiveDetector
-            scene_list = detect(video_path, AdaptiveDetector())
-            if scene_list:
-                logger.info(
-                    f"AdaptiveDetector: {len(scene_list)}シーン検出"
-                )
-                return scene_list
-        except Exception as exc:
-            logger.warning(f"AdaptiveDetector失敗: {exc}")
-
-        # 全体を1シーンとして扱う
-        return self._fallback_single_scene(video_path)
-
-    def _fallback_single_scene(self, video_path: str) -> list:
-        """全体を1シーンとするフォールバック"""
-        from scenedetect import FrameTimecode
         cap = cv2.VideoCapture(video_path)
-        total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        fps = cap.get(cv2.CAP_PROP_FPS)
-        cap.release()
-        logger.info("フォールバック: 全体を1シーンとして処理")
-        return [
-            (FrameTimecode(0, fps=fps), FrameTimecode(total, fps=fps))
-        ]
-
-    def _hybrid_selection(
-        self, video_path: str, scene_list: list
-    ) -> List[Tuple[int, float, np.ndarray]]:
-        """
-        シーン境界 + シーン内1fpsサンプリング + AKAZE冗長除去
-        """
-        cap = cv2.VideoCapture(video_path)
-        fps = cap.get(cv2.CAP_PROP_FPS)
-        interval = self.config.sample_interval
-        thresh = self.config.redundancy_threshold
-
-        # 候補フレームを列挙
-        candidates = []
-        for idx, scene in enumerate(scene_list):
-            s_start = scene[0].get_seconds()
-            s_end = scene[1].get_seconds()
-            scene_num = idx + 1
-
-            candidates.append(
-                (int(s_start * fps), s_start, "boundary", scene_num)
-            )
-
-            if s_end - s_start > interval:
-                t = s_start + interval
-                while t < s_end - 0.1:
-                    candidates.append(
-                        (int(t * fps), t, "sample", scene_num)
-                    )
-                    t += interval
-
-        if not candidates:
-            cap.release()
+        if not cap.isOpened():
+            logger.error(f"映像を開けません: {video_path}")
             return []
 
-        # 近接フレーム除去
-        deduped = [candidates[0]]
-        for c in candidates[1:]:
-            if c[1] - deduped[-1][1] >= 0.3:
-                deduped.append(c)
+        fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        interval_frames = max(1, int(self.config.sample_interval * fps))
 
-        # AKAZE冗長除去
-        accepted = []
-        prev_frame = None
+        # 評価間隔: ~8fpsでフレームを評価（シーン検出精度と速度のバランス）
+        eval_stride = max(1, int(fps / 8))
 
-        for fidx, ts, label, snum in deduped:
-            cap.set(cv2.CAP_PROP_POS_FRAMES, fidx)
-            ret, frame = cap.read()
+        accepted: List[Tuple[int, float, np.ndarray]] = []
+        prev_eval_gray: Optional[np.ndarray] = None
+        prev_accepted_hist: Optional[np.ndarray] = None
+        last_accepted_idx = -interval_frames
+        scene_count = 0
+        evaluated = 0
+
+        frame_idx = 0
+        while True:
+            grabbed = cap.grab()
+            if not grabbed:
+                break
+
+            # 評価間隔でのみフレームを処理
+            if frame_idx % eval_stride != 0:
+                frame_idx += 1
+                continue
+
+            ret, frame = cap.retrieve()
             if not ret:
+                frame_idx += 1
                 continue
 
-            if label == "boundary":
-                accepted.append((fidx, ts, frame))
-                prev_frame = frame.copy()
-                continue
+            evaluated += 1
+            ts = frame_idx / fps
 
-            if prev_frame is not None:
-                ratio = self._compute_match_ratio(prev_frame, frame)
-                if ratio >= thresh:
-                    continue
+            # シーン変化検出（縮小グレースケールの平均差分）
+            small = cv2.resize(
+                frame, (self._SCENE_W, self._SCENE_H),
+                interpolation=cv2.INTER_AREA,
+            )
+            gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
 
-            accepted.append((fidx, ts, frame))
-            prev_frame = frame.copy()
+            is_scene_change = False
+            if prev_eval_gray is not None:
+                diff = float(np.mean(np.abs(
+                    gray.astype(np.float32)
+                    - prev_eval_gray.astype(np.float32)
+                )))
+                if diff > self.config.scene_threshold:
+                    is_scene_change = True
+                    scene_count += 1
+            else:
+                is_scene_change = True
+                scene_count += 1
+
+            prev_eval_gray = gray
+
+            # フレーム採用判定
+            should_accept = False
+            if is_scene_change:
+                should_accept = True
+            elif frame_idx - last_accepted_idx >= interval_frames:
+                # サンプリング間隔到達 → ヒストグラム冗長チェック
+                if prev_accepted_hist is not None:
+                    hist = self._compute_histogram(frame)
+                    corr = cv2.compareHist(
+                        prev_accepted_hist, hist,
+                        cv2.HISTCMP_CORREL,
+                    )
+                    should_accept = corr < 0.95
+                else:
+                    should_accept = True
+
+            if should_accept:
+                accepted.append((frame_idx, ts, frame.copy()))
+                prev_accepted_hist = self._compute_histogram(frame)
+                last_accepted_idx = frame_idx
+
+            frame_idx += 1
 
         cap.release()
         logger.info(
-            f"フレーム選定: {len(deduped)}候補 → {len(accepted)}フレーム採用"
+            f"フレーム選定: {scene_count}シーン, "
+            f"{len(accepted)}フレーム採用 "
+            f"({evaluated}フレーム評価)"
         )
         return accepted
 
-    def _compute_match_ratio(
-        self, frame_a: np.ndarray, frame_b: np.ndarray
-    ) -> float:
-        """2フレーム間のAKAZEマッチ率を計算"""
-        gray_a = cv2.cvtColor(frame_a, cv2.COLOR_BGR2GRAY)
-        gray_b = cv2.cvtColor(frame_b, cv2.COLOR_BGR2GRAY)
-
-        kp_a, desc_a = self._akaze.detectAndCompute(gray_a, None)
-        kp_b, desc_b = self._akaze.detectAndCompute(gray_b, None)
-
-        if (
-            desc_a is None
-            or desc_b is None
-            or len(kp_a) < 2
-            or len(kp_b) < 2
-        ):
-            return 0.0
-
-        matches = self._matcher.knnMatch(desc_a, desc_b, k=2)
-        good_count = 0
-        for pair in matches:
-            if len(pair) == 2:
-                if pair[0].distance < 0.75 * pair[1].distance:
-                    good_count += 1
-
-        return good_count / max(len(kp_a), len(kp_b))
+    def _compute_histogram(self, frame: np.ndarray) -> np.ndarray:
+        """HSVヒストグラムを計算（冗長判定用）"""
+        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+        hist = cv2.calcHist(
+            [hsv], [0, 1], None,
+            [self._HIST_H_BINS, self._HIST_S_BINS],
+            [0, 180, 0, 256],
+        )
+        cv2.normalize(hist, hist)
+        return hist
 
 
 class VLADEncoder:
