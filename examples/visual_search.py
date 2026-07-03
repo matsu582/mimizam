@@ -264,6 +264,7 @@ def search_single_file(
     use_frame_matching: bool = True,
     show_details: bool = False,
     video_db_path: Optional[str] = None,
+    detect_pip: bool = False,
 ) -> None:
     """
     単一の動画ファイルで映像指紋検索を実行する
@@ -275,6 +276,7 @@ def search_single_file(
         use_frame_matching: フレーム単位マッチングを使用するか
         show_details: 詳細情報を表示するか
         video_db_path: 映像指紋DBのパス
+        detect_pip: PiP検出を有効化するか
     """
     logger = logging.getLogger(__name__)
 
@@ -286,6 +288,7 @@ def search_single_file(
             query_file_path=file_path,
             top_k=top_k,
             use_frame_matching=use_frame_matching,
+            detect_pip=detect_pip,
             video_db_path=video_db_path,
         )
 
@@ -303,6 +306,7 @@ def search_folder(
     use_frame_matching: bool = True,
     show_details: bool = False,
     video_db_path: Optional[str] = None,
+    detect_pip: bool = False,
 ) -> None:
     """
     フォルダ内の全動画ファイルで映像指紋検索を実行する
@@ -314,6 +318,7 @@ def search_folder(
         use_frame_matching: フレーム単位マッチングを使用するか
         show_details: 詳細情報を表示するか
         video_db_path: 映像指紋DBのパス
+        detect_pip: PiP検出を有効化するか
     """
     logger = logging.getLogger(__name__)
 
@@ -334,6 +339,7 @@ def search_folder(
         search_single_file(
             file_path, mimizam, top_k,
             use_frame_matching, show_details, video_db_path,
+            detect_pip,
         )
 
 
@@ -409,6 +415,11 @@ AKAZE記述子→VLAD集約→PCA圧縮の変換パイプラインを保持し�
         help="フレーム単位マッチングを無効化（高速モード）",
     )
     parser.add_argument(
+        "--detect-pip",
+        action="store_true",
+        help="PiP（ピクチャー・イン・ピクチャー）検出を有効化",
+    )
+    parser.add_argument(
         "--details", "-D",
         action="store_true",
         help="映像全体/フレーム類似度などの詳細情報を表示",
@@ -475,6 +486,7 @@ AKAZE記述子→VLAD集約→PCA圧縮の変換パイプラインを保持し�
                 use_frame_matching=use_frame,
                 show_details=args.details,
                 video_db_path=args.video_db,
+                detect_pip=args.detect_pip,
             )
 
         elif target_path.is_dir():
@@ -484,6 +496,7 @@ AKAZE記述子→VLAD集約→PCA圧縮の変換パイプラインを保持し�
                 use_frame_matching=use_frame,
                 show_details=args.details,
                 video_db_path=args.video_db,
+                detect_pip=args.detect_pip,
             )
 
         else:
