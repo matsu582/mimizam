@@ -658,12 +658,7 @@ def main() -> int:
     parser.add_argument(
         "--database", "-d",
         default="movie_fingerprints.db",
-        help="音声指紋DBのパス（デフォルト: movie_fingerprints.db）",
-    )
-    parser.add_argument(
-        "--video-db",
-        default=None,
-        help="映像指紋DBのパス（省略時は自動設定）",
+        help="DBのパス（音声・映像指紋を同一ファイルに格納、デフォルト: movie_fingerprints.db）",
     )
     parser.add_argument(
         "--model", "-m",
@@ -757,7 +752,7 @@ def main() -> int:
 
         if not args.skip_visual:
             video_stats = mimizam.get_video_database_stats(
-                args.video_db
+                args.database
             )
             logger.info(
                 f"映像指紋DB - "
@@ -784,7 +779,7 @@ def main() -> int:
                 use_frame_matching=use_frame,
                 detect_pip=args.detect_pip,
                 show_details=args.details,
-                video_db_path=args.video_db,
+                video_db_path=args.database,
                 skip_audio=args.skip_audio,
                 skip_visual=args.skip_visual,
             )
@@ -796,7 +791,7 @@ def main() -> int:
                 use_frame_matching=use_frame,
                 detect_pip=args.detect_pip,
                 show_details=args.details,
-                video_db_path=args.video_db,
+                video_db_path=args.database,
                 skip_audio=args.skip_audio,
                 skip_visual=args.skip_visual,
             )

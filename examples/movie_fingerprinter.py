@@ -246,12 +246,7 @@ def main() -> int:
     parser.add_argument(
         "--database", "-d",
         default="movie_fingerprints.db",
-        help="音声指紋DBのパス（デフォルト: movie_fingerprints.db）",
-    )
-    parser.add_argument(
-        "--video-db",
-        default=None,
-        help="映像指紋DBのパス（省略時は自動設定）",
+        help="DBのパス（音声・映像指紋を同一ファイルに格納、デフォルト: movie_fingerprints.db）",
     )
     parser.add_argument(
         "--model", "-m",
@@ -341,10 +336,10 @@ def main() -> int:
             logger.info(f"映像モデル読み込み: {args.model}")
             mimizam.load_video_model(args.model)
 
-        # 登録処理
+        # 登録処理（音声・映像とも同一DBに格納）
         processed = process_video_files(
             video_files, mimizam,
-            video_db_path=args.video_db,
+            video_db_path=args.database,
             skip_audio=args.skip_audio,
             skip_visual=args.skip_visual,
         )
@@ -357,7 +352,7 @@ def main() -> int:
             f"指紋数: {audio_stats.get('fingerprints', 0)}"
         )
 
-        video_stats = mimizam.get_video_database_stats(args.video_db)
+        video_stats = mimizam.get_video_database_stats(args.database)
         logger.info(
             f"映像指紋DB - "
             f"映像数: {video_stats.get('videos', 0)}, "
