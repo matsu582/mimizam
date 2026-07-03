@@ -58,9 +58,11 @@ class ElasticsearchBackend(DatabaseBackend):
             # 接続設定を構築（パフォーマンス最適化）
             hosts = [f"http://{self.config.host}:{self.config.port or 9200}"]
             
+            # ES操作はインデックス作成等で時間がかかるため最低120秒を確保
+            es_timeout = max(self.config.pool_timeout or 30, 120)
             es_config = {
                 'hosts': hosts,
-                'request_timeout': self.config.pool_timeout or 300,  # タイムアウトを大幅延長
+                'request_timeout': es_timeout,
                 'verify_certs': getattr(self.config, 'verify_certs', True),
                 # 接続プール最適化（Elasticsearch 8.x対応）
                 'connections_per_node': self.config.pool_size or 25,  # maxsizeの代替
