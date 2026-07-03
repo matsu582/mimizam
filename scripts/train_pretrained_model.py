@@ -608,14 +608,16 @@ def main():
     )
 
     # VLADEncoder.load_model() 互換形式で保存
-    # configはdictとして保存（pickleのモジュールパス依存を回避）
+    # sklearn非依存: numpy配列のみを保存（バージョン互換性を確保）
     config_dict = {
         "codebook_size": k,
         "pca_dimensions": pca_dim,
     }
     model_data = {
-        "codebook": codebook,
-        "pca": pca,
+        "format_version": 2,
+        "codebook_centers": codebook.cluster_centers_.copy(),
+        "pca_components": pca.components_.copy(),
+        "pca_mean": pca.mean_.copy(),
         "descriptor_dim": desc_dim,
         "config_dict": config_dict,
     }

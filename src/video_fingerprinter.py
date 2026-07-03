@@ -344,14 +344,18 @@ class VLADEncoder:
         """
         self.config = config or VideoFingerprintConfig()
         self._akaze = _create_akaze()
-        self._codebook = None
-        self._pca = None
+        self._codebook_centers = None
+        self._pca_components = None
+        self._pca_mean = None
         self._descriptor_dim = None
 
     @property
     def is_trained(self) -> bool:
         """モデルが学習済みかどうか"""
-        return self._codebook is not None and self._pca is not None
+        return (
+            self._codebook_centers is not None
+            and self._pca_components is not None
+        )
 
     def extract_descriptors(
         self, frames: List[Tuple[int, float, np.ndarray]]
@@ -410,9 +414,10 @@ class VLADEncoder:
         # K-Meansコードブック構築（Collapse対策付き）
         k = self.config.codebook_size
         batch = min(self.config.codebook_batch_size, n_samples)
-        self._codebook = self._train_codebook(
+        codebook = self._train_codebook(
             all_desc, k, batch
         )
+        self._codebook_centers = codebook.cluster_centers_.copy()
 
         vlad_dim = k * self._descriptor_dim
         logger.info(f"VLAD次元: {vlad_dim}")
@@ -431,10 +436,12 @@ class VLADEncoder:
             vlad_matrix.shape[1],
         )
 
-        self._pca = PCA(n_components=target_dim, random_state=42)
-        self._pca.fit(vlad_matrix)
+        pca = PCA(n_components=target_dim, random_state=42)
+        pca.fit(vlad_matrix)
+        self._pca_components = pca.components_.copy()
+        self._pca_mean = pca.mean_.copy()
 
-        variance = np.sum(self._pca.explained_variance_ratio_) * 100
+        variance = np.sum(pca.explained_variance_ratio_) * 100
         logger.info(
             f"PCA: {vlad_dim}→{target_dim}次元 "
             f"({len(vlad_samples)}サンプル, "
@@ -543,6 +550,29 @@ class VLADEncoder:
         codebook.cluster_centers_ = centers
         return codebook
 
+    def _pca_transform(self, vec: np.ndarray) -> np.ndarray:
+        """
+        PCA変換（numpyのみ、sklearn非依存）
+
+        X_transformed = (X - mean) @ components.T
+        """
+        x = vec.reshape(1, -1).astype(np.float64)
+        result = (x - self._pca_mean) @ self._pca_components.T
+        return result.flatten()
+
+    def _codebook_predict(self, descriptors: np.ndarray) -> np.ndarray:
+        """
+        K-Means最近働クラスタ割り当て（numpyのみ、sklearn非依存）
+
+        ||x - c||^2 = ||x||^2 - 2*x*c^T + ||c||^2
+        """
+        x = descriptors.astype(np.float32)
+        centers = self._codebook_centers
+        x_sq = np.sum(x ** 2, axis=1, keepdims=True)
+        c_sq = np.sum(centers ** 2, axis=1, keepdims=True).T
+        dists = x_sq - 2.0 * (x @ centers.T) + c_sq
+        return np.argmin(dists, axis=1)
+
     def encode_frame(self, descriptors: np.ndarray) -> Optional[np.ndarray]:
         """
         単一フレームの記述子群からL2正規化済み指紋ベクトルを生成
@@ -557,7 +587,7 @@ class VLADEncoder:
             raise RuntimeError("モデルが未学習です。先にtrain()を呼んでください")
 
         vlad_vec = self._compute_vlad_vector(descriptors)
-        compressed = self._pca.transform(vlad_vec.reshape(1, -1)).flatten()
+        compressed = self._pca_transform(vlad_vec)
         return self._l2_normalize(compressed)
 
     def encode_video(
@@ -589,15 +619,13 @@ class VLADEncoder:
             total_desc += desc.shape[0]
 
             # フレーム単位指紋
-            compressed = self._pca.transform(
-                vlad_vec.reshape(1, -1)
-            ).flatten()
+            compressed = self._pca_transform(vlad_vec)
             frame_fp = self._l2_normalize(compressed)
             frame_fingerprints.append((fidx, ts, frame_fp))
 
         # 映像全体指紋 = 全フレームVLADの平均 → PCA → L2正規化
         agg_vlad = np.mean(frame_vlads, axis=0)
-        compressed = self._pca.transform(agg_vlad.reshape(1, -1)).flatten()
+        compressed = self._pca_transform(agg_vlad)
         video_fp = self._l2_normalize(compressed)
 
         return VideoFingerprint(
@@ -619,12 +647,12 @@ class VLADEncoder:
         Returns:
             VLADベクトル（k * d 次元）
         """
-        k = self._codebook.n_clusters
-        d = self._codebook.cluster_centers_.shape[1]
-        centers = self._codebook.cluster_centers_
+        k = self._codebook_centers.shape[0]
+        d = self._codebook_centers.shape[1]
+        centers = self._codebook_centers
 
         desc_f = descriptors.astype(np.float32)
-        labels = self._codebook.predict(desc_f)
+        labels = self._codebook_predict(desc_f)
 
         vlad = np.zeros((k, d), dtype=np.float32)
         for i, lbl in enumerate(labels):
@@ -639,10 +667,12 @@ class VLADEncoder:
         return vlad.flatten()
 
     def save_model(self, path: str) -> None:
-        """学習済みモデルをファイルに保存"""
+        """学習済みモデルをファイルに保存（sklearn非依存形式）"""
         model_data = {
-            "codebook": self._codebook,
-            "pca": self._pca,
+            "format_version": 2,
+            "codebook_centers": self._codebook_centers,
+            "pca_components": self._pca_components,
+            "pca_mean": self._pca_mean,
             "descriptor_dim": self._descriptor_dim,
             "config_dict": asdict(self.config),
         }
@@ -654,8 +684,20 @@ class VLADEncoder:
         """保存済みモデルをファイルから読み込み"""
         with open(path, "rb") as f:
             model_data = _safe_pickle_load(f)
-        self._codebook = model_data["codebook"]
-        self._pca = model_data["pca"]
+
+        if model_data.get("format_version") == 2:
+            # 新形式: numpy配列のみ（sklearn非依存）
+            self._codebook_centers = model_data["codebook_centers"]
+            self._pca_components = model_data["pca_components"]
+            self._pca_mean = model_data["pca_mean"]
+        else:
+            # 旧形式: sklearnオブジェクトからnumpy配列を抽出
+            codebook = model_data["codebook"]
+            pca = model_data["pca"]
+            self._codebook_centers = codebook.cluster_centers_.copy()
+            self._pca_components = pca.components_.copy()
+            self._pca_mean = pca.mean_.copy()
+
         self._descriptor_dim = model_data["descriptor_dim"]
         if "config_dict" in model_data:
             self.config = VideoFingerprintConfig(
