@@ -518,30 +518,27 @@ class Mimizam:
                 frame_map = {
                     r["video_id"]: r for r in frame_results
                 }
+                # フレームマッチで時間的一貫性が確認された結果のみ採用
                 results = []
                 for cand in candidates:
                     vid = cand["video_id"]
+                    if vid not in frame_map:
+                        continue
+                    fm = frame_map[vid]
                     entry = {
                         "video_id": vid,
                         "video_similarity": cand["similarity"],
                         "video": cand["video"],
-                    }
-                    if vid in frame_map:
-                        fm = frame_map[vid]
-                        entry["frame_similarity"] = fm[
-                            "frame_similarity"
-                        ]
-                        entry["similarity"] = max(
+                        "frame_similarity": fm["frame_similarity"],
+                        "similarity": max(
                             cand["similarity"],
                             fm["frame_similarity"],
-                        )
-                        if "match_details" in fm:
-                            entry["match_details"] = fm[
-                                "match_details"
-                            ]
-                    else:
-                        entry["frame_similarity"] = None
-                        entry["similarity"] = cand["similarity"]
+                        ),
+                    }
+                    if "match_details" in fm:
+                        entry["match_details"] = fm[
+                            "match_details"
+                        ]
                     results.append(entry)
 
                 results.sort(
