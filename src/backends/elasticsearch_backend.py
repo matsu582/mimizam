@@ -581,10 +581,30 @@ class ElasticsearchBackend(DatabaseBackend):
                     "mappings": {"properties": {
                         "video_id": {"type": "keyword"},
                         "fingerprint": {"type": "binary"},
+                        "embedding": {
+                            "type": "dense_vector",
+                            "index": True,
+                            "similarity": "cosine",
+                        },
                         "dimensions": {"type": "integer"},
                         "descriptor_count": {"type": "integer"},
                     }},
                 })
+            else:
+                # 既存インデックスにembeddingフィールドを追加
+                try:
+                    self.client.indices.put_mapping(
+                        index=vfp_idx,
+                        body={"properties": {
+                            "embedding": {
+                                "type": "dense_vector",
+                                "index": True,
+                                "similarity": "cosine",
+                            },
+                        }},
+                    )
+                except ElasticsearchException:
+                    pass
 
             if not self.client.indices.exists(index=ffp_idx):
                 self.client.indices.create(index=ffp_idx, body={
@@ -631,11 +651,14 @@ class ElasticsearchBackend(DatabaseBackend):
     ) -> bool:
         """Elasticsearchに映像全体指紋を保存"""
         import base64
+        import numpy as np
         try:
             self._ensure_video_indices()
+            vec = np.frombuffer(fingerprint, dtype=np.float32)
             doc = {
                 "video_id": video_id,
                 "fingerprint": base64.b64encode(fingerprint).decode(),
+                "embedding": vec.tolist(),
                 "dimensions": dimensions,
                 "descriptor_count": descriptor_count,
             }
@@ -689,11 +712,69 @@ class ElasticsearchBackend(DatabaseBackend):
             )
             return False
 
+    def _search_video_fps_knn(
+        self, query_fp: bytes, dimensions: int, top_k: int,
+        threshold: float,
+    ) -> Optional[List[Dict[str, Any]]]:
+        """Elasticsearch KNNによるベクトル検索"""
+        import numpy as np
+        try:
+            self._ensure_video_indices()
+            try:
+                self.client.indices.refresh(index=self._video_fp_index)
+            except ElasticsearchException:
+                pass
+
+            query_vec = np.frombuffer(query_fp, dtype=np.float32).tolist()
+            fetch_k = max(top_k * 3, 30)
+
+            resp = self.client.search(
+                index=self._video_fp_index,
+                body={
+                    "knn": {
+                        "field": "embedding",
+                        "query_vector": query_vec,
+                        "k": fetch_k,
+                        "num_candidates": max(fetch_k * 5, 100),
+                    },
+                    "_source": ["video_id"],
+                    "size": fetch_k,
+                },
+            )
+
+            candidates: list = []
+            for hit in resp["hits"]["hits"]:
+                vid_id = hit["_source"]["video_id"]
+                # ES cosine: _score = (1 + cosine_similarity) / 2
+                sim = 2.0 * float(hit["_score"]) - 1.0
+                if sim >= threshold:
+                    video_info = self.get_video(vid_id)
+                    candidates.append({
+                        "video_id": vid_id,
+                        "similarity": sim,
+                        "video": video_info,
+                    })
+            candidates.sort(key=lambda c: c["similarity"], reverse=True)
+            return candidates[:top_k]
+        except Exception as e:
+            self.logger.debug(
+                f"ES KNN検索フォールバック: {e}"
+            )
+            return None
+
     def search_video_fingerprints(
         self, query_fp: bytes, dimensions: int, top_k: int = 10,
         threshold: float = 0.3,
     ) -> List[Dict[str, Any]]:
-        """Elasticsearchで映像全体指紋を検索"""
+        """Elasticsearchで映像全体指紋を検索（KNN優先、フォールバックあり）"""
+        # KNN検索を試行
+        result = self._search_video_fps_knn(
+            query_fp, dimensions, top_k, threshold
+        )
+        if result is not None:
+            return result
+
+        # フォールバック: 全件スキャン
         import numpy as np
         import base64
 

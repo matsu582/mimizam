@@ -18,6 +18,8 @@ class SQLiteBackend(DatabaseBackend):
         super().__init__(config)
         self.connection = None
         self.db_path = config.file_path or "fingerprints.db"
+        self._vec_available = False
+        self._vec_dim = None
     
     def connect(self) -> bool:
         """SQLiteデータベースに接続（最適化設定付き）"""
@@ -40,6 +42,19 @@ class SQLiteBackend(DatabaseBackend):
             cursor.execute("PRAGMA temp_store = MEMORY")       # 一時テーブルをメモリに
             cursor.execute("PRAGMA mmap_size = 268435456")     # 256MBメモリマップ
             cursor.execute("PRAGMA optimize")                  # 統計情報最適化
+            
+            # sqlite-vec拡張の読み込み
+            self._vec_available = False
+            self._vec_dim = None
+            try:
+                import sqlite_vec
+                self.connection.enable_load_extension(True)
+                sqlite_vec.load(self.connection)
+                self.connection.enable_load_extension(False)
+                self._vec_available = True
+                self.logger.info("sqlite-vec拡張を読み込みました")
+            except (ImportError, Exception) as e:
+                self.logger.debug(f"sqlite-vec未使用（フォールバック）: {e}")
             
             self.logger.info(f"Connected to SQLite database with optimization settings: {self.db_path}")
             return True
@@ -295,6 +310,87 @@ class SQLiteBackend(DatabaseBackend):
 
     # ===== 映像指紋メソッド =====
 
+    def _ensure_vec_video_table(self, dimensions: int) -> bool:
+        """映像指紋用vec0テーブルを確認・作成（sqlite-vec）"""
+        if not self._vec_available:
+            return False
+        if self._vec_dim == dimensions:
+            return True
+        try:
+            cursor = self.connection.cursor()
+            cursor.execute(
+                "SELECT name FROM sqlite_master "
+                "WHERE type='table' AND name='vec_video_fingerprints'"
+            )
+            if cursor.fetchone() is None:
+                cursor.execute(
+                    f"CREATE VIRTUAL TABLE vec_video_fingerprints USING vec0("
+                    f"video_id TEXT PRIMARY KEY, "
+                    f"fingerprint float[{dimensions}] distance_metric=cosine"
+                    f")"
+                )
+                # 既存データの移行
+                try:
+                    cursor.execute(
+                        "SELECT video_id, fingerprint, dimensions "
+                        "FROM video_fingerprints"
+                    )
+                    for vid, fp_blob, dim in cursor.fetchall():
+                        if dim == dimensions:
+                            try:
+                                cursor.execute(
+                                    "INSERT INTO vec_video_fingerprints"
+                                    "(video_id, fingerprint) VALUES (?, ?)",
+                                    (vid, fp_blob),
+                                )
+                            except Exception:
+                                pass
+                except Exception:
+                    pass
+                self.connection.commit()
+            self._vec_dim = dimensions
+            return True
+        except Exception as e:
+            self.logger.warning(f"vec0テーブル作成エラー: {e}")
+            return False
+
+    def _search_video_fps_vec(
+        self, query_fp: bytes, dimensions: int, top_k: int,
+        threshold: float,
+    ) -> Optional[List[Dict[str, Any]]]:
+        """sqlite-vecによるベクトルKNN検索"""
+        if not self._ensure_vec_video_table(dimensions):
+            return None
+        try:
+            cursor = self.connection.cursor()
+            fetch_k = max(top_k * 3, 30)
+            cursor.execute(
+                """SELECT vv.video_id, vv.distance,
+                          v.title, v.file_path, v.duration, v.frame_count
+                   FROM vec_video_fingerprints vv
+                   JOIN videos v ON v.id = vv.video_id
+                   WHERE vv.fingerprint MATCH ? AND k = ?
+                   ORDER BY vv.distance""",
+                (query_fp, fetch_k),
+            )
+            candidates: list = []
+            for vid_id, dist, title, fpath, dur, fcount in cursor.fetchall():
+                sim = 1.0 - dist
+                if sim >= threshold:
+                    candidates.append({
+                        "video_id": vid_id,
+                        "similarity": sim,
+                        "video": Video(
+                            id=vid_id, title=title, file_path=fpath,
+                            duration=dur, frame_count=fcount,
+                        ),
+                    })
+            candidates.sort(key=lambda c: c["similarity"], reverse=True)
+            return candidates[:top_k]
+        except Exception as e:
+            self.logger.debug(f"vec0検索フォールバック: {e}")
+            return None
+
     def _create_video_tables(self) -> bool:
         """映像指紋テーブルを作成"""
         try:
@@ -399,6 +495,18 @@ class SQLiteBackend(DatabaseBackend):
                 (video_id, fingerprint, dimensions, descriptor_count),
             )
             self.connection.commit()
+            # vec0テーブルにも挿入
+            if self._vec_available:
+                try:
+                    self._ensure_vec_video_table(dimensions)
+                    cursor.execute(
+                        "INSERT OR REPLACE INTO vec_video_fingerprints"
+                        "(video_id, fingerprint) VALUES (?, ?)",
+                        (video_id, fingerprint),
+                    )
+                    self.connection.commit()
+                except Exception:
+                    pass
             return True
         except Exception as e:
             self.logger.error(
@@ -442,9 +550,17 @@ class SQLiteBackend(DatabaseBackend):
         self, query_fp: bytes, dimensions: int, top_k: int = 10,
         threshold: float = 0.3,
     ) -> List[Dict[str, Any]]:
-        """SQLiteで映像全体指紋を検索"""
-        import numpy as np
+        """SQLiteで映像全体指紋を検索（vec0利用時はKNN検索）"""
+        # sqlite-vecによるKNN検索を試行
+        if self._vec_available:
+            result = self._search_video_fps_vec(
+                query_fp, dimensions, top_k, threshold
+            )
+            if result is not None:
+                return result
 
+        # フォールバック: 全件スキャン
+        import numpy as np
         try:
             self._create_video_tables()
             cursor = self.connection.cursor()
@@ -629,6 +745,16 @@ class SQLiteBackend(DatabaseBackend):
         try:
             self._create_video_tables()
             cursor = self.connection.cursor()
+            # vec0テーブルからも削除
+            if self._vec_available:
+                try:
+                    cursor.execute(
+                        "DELETE FROM vec_video_fingerprints "
+                        "WHERE video_id = ?",
+                        (video_id,),
+                    )
+                except Exception:
+                    pass
             cursor.execute(
                 "DELETE FROM frame_descriptors WHERE video_id = ?",
                 (video_id,),

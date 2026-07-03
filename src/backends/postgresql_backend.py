@@ -19,6 +19,7 @@ class PostgreSQLBackend(DatabaseBackend):
     def __init__(self, config: DatabaseConfig):
         super().__init__(config)
         self.connection = None
+        self._pgvector_available = False
     
     def connect(self) -> bool:
         """PostgreSQLデータベースに接続"""
@@ -64,6 +65,15 @@ class PostgreSQLBackend(DatabaseBackend):
             except PostgresError as optimize_error:
                 # 最適化設定でエラーが発生した場合は警告のみ出力
                 self.logger.warning(f"PostgreSQL optimization setting error: {optimize_error}")
+            
+            # pgvector拡張の有効化
+            self._pgvector_available = False
+            try:
+                cursor.execute("CREATE EXTENSION IF NOT EXISTS vector")
+                self._pgvector_available = True
+                self.logger.info("pgvector拡張を有効化しました")
+            except PostgresError as e:
+                self.logger.info(f"pgvector未使用（フォールバック）: {e}")
             
             cursor.close()
             
@@ -333,6 +343,96 @@ class PostgreSQLBackend(DatabaseBackend):
 
     # ===== 映像指紋メソッド =====
 
+    def _ensure_pgvector_column(self, dimensions: int) -> bool:
+        """video_fingerprintsテーブルにpgvector列を追加"""
+        if not self._pgvector_available:
+            return False
+        try:
+            cursor = self.connection.cursor()
+            cursor.execute(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_name = 'video_fingerprints' "
+                "AND column_name = 'embedding'"
+            )
+            if cursor.fetchone() is None:
+                cursor.execute(
+                    f"ALTER TABLE video_fingerprints "
+                    f"ADD COLUMN embedding vector({dimensions})"
+                )
+                # 既存データの移行
+                import numpy as np
+                cursor.execute(
+                    "SELECT video_id, fingerprint, dimensions "
+                    "FROM video_fingerprints"
+                )
+                for vid, fp_blob, dim in cursor.fetchall():
+                    if dim == dimensions:
+                        try:
+                            vec = np.frombuffer(
+                                bytes(fp_blob), dtype=np.float32
+                            )
+                            vec_str = (
+                                '[' +
+                                ','.join(str(float(x)) for x in vec) +
+                                ']'
+                            )
+                            cursor.execute(
+                                "UPDATE video_fingerprints "
+                                "SET embedding = %s::vector "
+                                "WHERE video_id = %s",
+                                (vec_str, vid),
+                            )
+                        except Exception:
+                            pass
+            cursor.close()
+            return True
+        except Exception as e:
+            self.logger.warning(f"pgvector列追加エラー: {e}")
+            return False
+
+    def _search_video_fps_pgvector(
+        self, query_fp: bytes, dimensions: int, top_k: int,
+        threshold: float,
+    ) -> Optional[List[Dict[str, Any]]]:
+        """pgvectorによるベクトル検索"""
+        if not self._ensure_pgvector_column(dimensions):
+            return None
+        try:
+            import numpy as np
+            vec = np.frombuffer(query_fp, dtype=np.float32)
+            vec_str = '[' + ','.join(str(float(x)) for x in vec) + ']'
+            fetch_k = max(top_k * 3, 30)
+
+            cursor = self.connection.cursor()
+            cursor.execute(
+                """SELECT vf.video_id,
+                          1.0 - (vf.embedding <=> %s::vector) AS similarity,
+                          v.title, v.file_path, v.duration, v.frame_count
+                   FROM video_fingerprints vf
+                   JOIN videos v ON vf.video_id = v.id
+                   WHERE vf.embedding IS NOT NULL
+                   ORDER BY vf.embedding <=> %s::vector
+                   LIMIT %s""",
+                (vec_str, vec_str, fetch_k),
+            )
+            candidates: list = []
+            for vid_id, sim, title, fpath, dur, fcount in cursor.fetchall():
+                if float(sim) >= threshold:
+                    candidates.append({
+                        "video_id": vid_id,
+                        "similarity": float(sim),
+                        "video": Video(
+                            id=vid_id, title=title, file_path=fpath,
+                            duration=dur, frame_count=fcount,
+                        ),
+                    })
+            cursor.close()
+            candidates.sort(key=lambda c: c["similarity"], reverse=True)
+            return candidates[:top_k]
+        except Exception as e:
+            self.logger.debug(f"pgvector検索フォールバック: {e}")
+            return None
+
     def _create_video_tables(self) -> bool:
         """映像指紋テーブルを作成"""
         try:
@@ -422,6 +522,25 @@ class PostgreSQLBackend(DatabaseBackend):
                     descriptor_count = EXCLUDED.descriptor_count""",
                 (video_id, fingerprint, dimensions, descriptor_count),
             )
+            # pgvector embedding列の更新
+            if self._pgvector_available:
+                try:
+                    self._ensure_pgvector_column(dimensions)
+                    import numpy as np
+                    vec = np.frombuffer(fingerprint, dtype=np.float32)
+                    vec_str = (
+                        '[' +
+                        ','.join(str(float(x)) for x in vec) +
+                        ']'
+                    )
+                    cursor.execute(
+                        "UPDATE video_fingerprints "
+                        "SET embedding = %s::vector "
+                        "WHERE video_id = %s",
+                        (vec_str, video_id),
+                    )
+                except Exception:
+                    pass
             return True
         except PostgresError as e:
             self.logger.error(f"PostgreSQL video fingerprint save error: {e}")
@@ -458,9 +577,17 @@ class PostgreSQLBackend(DatabaseBackend):
         self, query_fp: bytes, dimensions: int, top_k: int = 10,
         threshold: float = 0.3,
     ) -> List[Dict[str, Any]]:
-        """PostgreSQLで映像全体指紋を検索"""
-        import numpy as np
+        """PostgreSQLで映像全体指紋を検索（pgvector利用時はベクトル検索）"""
+        # pgvectorによるベクトル検索を試行
+        if self._pgvector_available:
+            result = self._search_video_fps_pgvector(
+                query_fp, dimensions, top_k, threshold
+            )
+            if result is not None:
+                return result
 
+        # フォールバック: 全件スキャン
+        import numpy as np
         try:
             self._create_video_tables()
             cursor = self.connection.cursor()

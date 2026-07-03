@@ -19,6 +19,7 @@ class MySQLBackend(DatabaseBackend):
     def __init__(self, config: DatabaseConfig):
         super().__init__(config)
         self.connection = None
+        self._vector_available = False
     
     def connect(self) -> bool:
         """MySQLデータベースに接続"""
@@ -62,6 +63,19 @@ class MySQLBackend(DatabaseBackend):
             except MySQLError as optimize_error:
                 # 最適化設定でエラーが発生した場合は警告のみ出力
                 self.logger.warning(f"MySQL optimization setting error: {optimize_error}")
+            
+            # MySQL VECTOR型の対応確認（MySQL 9.0+）
+            self._vector_available = False
+            try:
+                cursor.execute(
+                    "SELECT VECTOR_DIM(STRING_TO_VECTOR('[1,2,3]'))"
+                )
+                self._vector_available = True
+                self.logger.info("MySQL VECTOR型を検出しました")
+            except MySQLError:
+                self.logger.info(
+                    "MySQL VECTOR型未対応（フォールバック）"
+                )
             
             cursor.close()
             
@@ -322,6 +336,98 @@ class MySQLBackend(DatabaseBackend):
 
     # ===== 映像指紋メソッド =====
 
+    def _ensure_vector_column(self, dimensions: int) -> bool:
+        """video_fingerprintsテーブルにVECTOR列を追加（MySQL 9.0+）"""
+        if not self._vector_available:
+            return False
+        try:
+            cursor = self.connection.cursor()
+            cursor.execute(
+                "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS "
+                "WHERE TABLE_SCHEMA = DATABASE() "
+                "AND TABLE_NAME = 'video_fingerprints' "
+                "AND COLUMN_NAME = 'embedding'"
+            )
+            if cursor.fetchone() is None:
+                cursor.execute(
+                    f"ALTER TABLE video_fingerprints "
+                    f"ADD COLUMN embedding VECTOR({dimensions})"
+                )
+                # 既存データの移行
+                import numpy as np
+                cursor.execute(
+                    "SELECT video_id, fingerprint, dimensions "
+                    "FROM video_fingerprints"
+                )
+                for vid, fp_blob, dim in cursor.fetchall():
+                    if dim == dimensions:
+                        try:
+                            vec = np.frombuffer(
+                                bytes(fp_blob), dtype=np.float32
+                            )
+                            vec_str = (
+                                '[' +
+                                ','.join(str(float(x)) for x in vec) +
+                                ']'
+                            )
+                            cursor.execute(
+                                "UPDATE video_fingerprints "
+                                "SET embedding = STRING_TO_VECTOR(%s) "
+                                "WHERE video_id = %s",
+                                (vec_str, vid),
+                            )
+                        except Exception:
+                            pass
+            cursor.close()
+            return True
+        except Exception as e:
+            self.logger.warning(f"VECTOR列追加エラー: {e}")
+            return False
+
+    def _search_video_fps_vector(
+        self, query_fp: bytes, dimensions: int, top_k: int,
+        threshold: float,
+    ) -> Optional[List[Dict[str, Any]]]:
+        """MySQL VECTOR型によるベクトル検索"""
+        if not self._ensure_vector_column(dimensions):
+            return None
+        try:
+            import numpy as np
+            vec = np.frombuffer(query_fp, dtype=np.float32)
+            vec_str = '[' + ','.join(str(float(x)) for x in vec) + ']'
+            fetch_k = max(top_k * 3, 30)
+
+            cursor = self.connection.cursor()
+            cursor.execute(
+                "SELECT vf.video_id, "
+                "  DISTANCE(vf.embedding, "
+                "    STRING_TO_VECTOR(%s), 'COSINE') AS dist, "
+                "  v.title, v.file_path, v.duration, v.frame_count "
+                "FROM video_fingerprints vf "
+                "JOIN videos v ON vf.video_id = v.id "
+                "WHERE vf.embedding IS NOT NULL "
+                "ORDER BY dist LIMIT %s",
+                (vec_str, fetch_k),
+            )
+            candidates: list = []
+            for vid_id, dist, title, fpath, dur, fcount in cursor.fetchall():
+                sim = 1.0 - float(dist)
+                if sim >= threshold:
+                    candidates.append({
+                        "video_id": vid_id,
+                        "similarity": sim,
+                        "video": Video(
+                            id=vid_id, title=title, file_path=fpath,
+                            duration=dur, frame_count=fcount,
+                        ),
+                    })
+            cursor.close()
+            candidates.sort(key=lambda c: c["similarity"], reverse=True)
+            return candidates[:top_k]
+        except Exception as e:
+            self.logger.debug(f"VECTOR検索フォールバック: {e}")
+            return None
+
     def _create_video_tables(self) -> bool:
         """映像指紋テーブルを作成"""
         try:
@@ -408,6 +514,25 @@ class MySQLBackend(DatabaseBackend):
                     descriptor_count = VALUES(descriptor_count)""",
                 (video_id, fingerprint, dimensions, descriptor_count),
             )
+            # VECTOR列の更新
+            if self._vector_available:
+                try:
+                    self._ensure_vector_column(dimensions)
+                    import numpy as np
+                    vec = np.frombuffer(fingerprint, dtype=np.float32)
+                    vec_str = (
+                        '[' +
+                        ','.join(str(float(x)) for x in vec) +
+                        ']'
+                    )
+                    cursor.execute(
+                        "UPDATE video_fingerprints "
+                        "SET embedding = STRING_TO_VECTOR(%s) "
+                        "WHERE video_id = %s",
+                        (vec_str, video_id),
+                    )
+                except Exception:
+                    pass
             return True
         except MySQLError as e:
             self.logger.error(f"MySQL video fingerprint save error: {e}")
@@ -444,9 +569,17 @@ class MySQLBackend(DatabaseBackend):
         self, query_fp: bytes, dimensions: int, top_k: int = 10,
         threshold: float = 0.3,
     ) -> List[Dict[str, Any]]:
-        """MySQLで映像全体指紋を検索"""
-        import numpy as np
+        """MySQLで映像全体指紋を検索（VECTOR型利用時はベクトル検索）"""
+        # MySQL VECTORによるベクトル検索を試行
+        if self._vector_available:
+            result = self._search_video_fps_vector(
+                query_fp, dimensions, top_k, threshold
+            )
+            if result is not None:
+                return result
 
+        # フォールバック: 全件スキャン
+        import numpy as np
         try:
             self._create_video_tables()
             cursor = self.connection.cursor()

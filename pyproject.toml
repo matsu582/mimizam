@@ -53,7 +53,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-sqlite = []  # SQLite is included in Python standard library
+sqlite = ["sqlite-vec>=0.1.6"]
 mysql = ["mysql-connector-python>=8.0.33"]
 postgresql = ["psycopg2-binary>=2.9.5"]
 elasticsearch = ["elasticsearch==8.11.0"]
@@ -67,7 +67,7 @@ video = [
     "yt-dlp>=2025.6.30",
 ]
 all = [
-    # SQLite is in standard library, no additional deps needed
+    "sqlite-vec>=0.1.6",
     "mysql-connector-python>=8.0.33",
     "psycopg2-binary>=2.9.5",
     "elasticsearch==8.11.0",
