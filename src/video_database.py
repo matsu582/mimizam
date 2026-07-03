@@ -319,15 +319,20 @@ class VideoFingerprintDatabase:
     def _compute_match_regions(
         frame_matches: List[Dict],
         threshold: float = 0.4,
-        gap_tolerance: float = 3.0,
+        offset_tolerance: float = 5.0,
+        min_region_frames: int = 3,
     ) -> Dict:
         """
         フレームマッチ情報から一致区間を計算
 
+        時間オフセット（db_ts - query_ts）の一貫性で一致区間を判定する。
+        同じオフセットを持つフレーム群＝同じ部分を見ている。
+
         Args:
             frame_matches: フレーム単位のマッチ情報リスト
             threshold: 一致とみなす最低類似度
-            gap_tolerance: 連続とみなす最大ギャップ（秒）
+            offset_tolerance: 同一区間とみなすオフセット差の許容範囲（秒）
+            min_region_frames: 区間として認定する最小フレーム数
 
         Returns:
             一致区間と統計情報
@@ -342,36 +347,43 @@ class VideoFingerprintDatabase:
                 "regions": [],
             }
 
-        good.sort(key=lambda m: m["query_ts"])
+        # 時間オフセットでクラスタリング
+        for m in good:
+            m["offset"] = m["db_ts"] - m["query_ts"]
 
-        regions = []
-        cur_q_start = good[0]["query_ts"]
-        cur_q_end = good[0]["query_ts"]
-        cur_db_start = good[0]["db_ts"]
-        cur_db_end = good[0]["db_ts"]
+        good.sort(key=lambda m: m["offset"])
+
+        clusters: List[List[Dict]] = []
+        cur_cluster = [good[0]]
 
         for m in good[1:]:
-            if m["query_ts"] - cur_q_end <= gap_tolerance:
-                cur_q_end = m["query_ts"]
-                cur_db_end = m["db_ts"]
+            if m["offset"] - cur_cluster[-1]["offset"] <= offset_tolerance:
+                cur_cluster.append(m)
             else:
-                regions.append({
-                    "query_start": cur_q_start,
-                    "query_end": cur_q_end,
-                    "db_start": min(cur_db_start, cur_db_end),
-                    "db_end": max(cur_db_start, cur_db_end),
-                })
-                cur_q_start = m["query_ts"]
-                cur_q_end = m["query_ts"]
-                cur_db_start = m["db_ts"]
-                cur_db_end = m["db_ts"]
+                clusters.append(cur_cluster)
+                cur_cluster = [m]
+        clusters.append(cur_cluster)
 
-        regions.append({
-            "query_start": cur_q_start,
-            "query_end": cur_q_end,
-            "db_start": min(cur_db_start, cur_db_end),
-            "db_end": max(cur_db_start, cur_db_end),
-        })
+        # 各クラスタから区間情報を生成
+        regions = []
+        for cluster in clusters:
+            if len(cluster) < min_region_frames:
+                continue
+
+            q_times = [m["query_ts"] for m in cluster]
+            d_times = [m["db_ts"] for m in cluster]
+            avg_sim = sum(m["similarity"] for m in cluster) / len(cluster)
+
+            regions.append({
+                "query_start": min(q_times),
+                "query_end": max(q_times),
+                "db_start": min(d_times),
+                "db_end": max(d_times),
+                "frame_count": len(cluster),
+                "avg_similarity": round(avg_sim, 3),
+            })
+
+        regions.sort(key=lambda r: r["query_start"])
 
         return {
             "matched_frames": len(good),

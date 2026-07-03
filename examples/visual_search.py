@@ -160,9 +160,12 @@ def _print_match_location(match_details: dict) -> None:
         de = _format_duration(reg["db_end"])
         q_len = reg["query_end"] - reg["query_start"]
         d_len = reg["db_end"] - reg["db_start"]
+        fc = reg.get("frame_count", 0)
+        avg = reg.get("avg_similarity", 0)
         print(
             f"        \u533a\u9593{j}: \u30af\u30a8\u30ea {qs} - {qe} "
-            f"({q_len:.1f}s) \u2192 DB {ds} - {de} ({d_len:.1f}s)"
+            f"({q_len:.1f}s) \u2192 DB {ds} - {de} ({d_len:.1f}s) "
+            f"[{fc}\u30d5\u30ec\u30fc\u30e0, \u985e\u4f3c\u5ea6{avg:.3f}]"
         )
 
     # クエリ映像のバー可視化
