@@ -206,9 +206,8 @@ class ElasticsearchBackend(DatabaseBackend):
                 self.logger.info(
                     f"Created index: {index_name}"
                 )
-        except ElasticsearchException as e:
-            err_str = str(e)
-            if "resource_already_exists_exception" in err_str:
+        except Exception as e:
+            if "resource_already_exists_exception" in str(e):
                 self.logger.debug(
                     f"Index already exists: {index_name}"
                 )
