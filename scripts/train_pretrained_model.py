@@ -608,16 +608,16 @@ def main():
     )
 
     # VLADEncoder.load_model() 互換形式で保存
-    from src.video_fingerprinter import VideoFingerprintConfig
-    config = VideoFingerprintConfig(
-        codebook_size=k,
-        pca_dimensions=pca_dim,
-    )
+    # configはdictとして保存（pickleのモジュールパス依存を回避）
+    config_dict = {
+        "codebook_size": k,
+        "pca_dimensions": pca_dim,
+    }
     model_data = {
         "codebook": codebook,
         "pca": pca,
         "descriptor_dim": desc_dim,
-        "config": config,
+        "config_dict": config_dict,
     }
 
     os.makedirs(os.path.dirname(args.output) or ".", exist_ok=True)

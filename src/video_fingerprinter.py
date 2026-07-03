@@ -7,14 +7,54 @@ PySceneDetect + AKAZE + VLAD + PCA を組み合わせた映像指紋パイプラ
 
 import os
 import logging
+import io
 import pickle
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from typing import List, Optional, Dict, Any, Tuple
 
 import cv2
 import numpy as np
 
 logger = logging.getLogger(__name__)
+
+
+# モジュールパスの再マッピング（pickle互換性のため）
+_MODULE_REMAP = {
+    "src.video_fingerprinter": "mimizam.src.video_fingerprinter",
+    "src.pip_detector": "mimizam.src.pip_detector",
+}
+
+
+class _ModuleRemapUnpickler(pickle.Unpickler):
+    """pickleのモジュールパスを再マッピングするUnpickler
+
+    学習スクリプトが `from src.video_fingerprinter import ...` で
+    保存したモデルを、パッケージインストール環境（mimizam.src.）
+    でも読み込めるようにする。逆方向の変換も対応。
+    """
+
+    def find_class(self, module: str, name: str):
+        remapped = _MODULE_REMAP.get(module)
+        if remapped is None:
+            for old, new in _MODULE_REMAP.items():
+                if module == new:
+                    remapped = old
+                    break
+        if remapped:
+            try:
+                return super().find_class(remapped, name)
+            except (ModuleNotFoundError, ImportError):
+                pass
+        return super().find_class(module, name)
+
+
+def _safe_pickle_load(f: io.IOBase):
+    """モジュールパス互換性を考慮したpickle読み込み"""
+    try:
+        return _ModuleRemapUnpickler(f).load()
+    except (ModuleNotFoundError, ImportError):
+        f.seek(0)
+        return pickle.load(f)
 
 
 # フレーム正規化のデフォルト長辺ピクセル数
@@ -604,7 +644,7 @@ class VLADEncoder:
             "codebook": self._codebook,
             "pca": self._pca,
             "descriptor_dim": self._descriptor_dim,
-            "config": self.config,
+            "config_dict": asdict(self.config),
         }
         with open(path, "wb") as f:
             pickle.dump(model_data, f)
@@ -613,11 +653,15 @@ class VLADEncoder:
     def load_model(self, path: str) -> None:
         """保存済みモデルをファイルから読み込み"""
         with open(path, "rb") as f:
-            model_data = pickle.load(f)
+            model_data = _safe_pickle_load(f)
         self._codebook = model_data["codebook"]
         self._pca = model_data["pca"]
         self._descriptor_dim = model_data["descriptor_dim"]
-        if "config" in model_data:
+        if "config_dict" in model_data:
+            self.config = VideoFingerprintConfig(
+                **model_data["config_dict"]
+            )
+        elif "config" in model_data:
             self.config = model_data["config"]
         logger.info(f"モデル読み込み: {path}")
 
