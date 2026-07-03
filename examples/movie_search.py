@@ -13,6 +13,7 @@ video_search.py（音声検索）とvisual_search.py（映像検索）を
 
 import argparse
 import logging
+import math
 import os
 import shutil
 import subprocess
@@ -245,10 +246,12 @@ def merge_results(
             entry["visual_similarity"] = v_score
             entry["visual_match"] = visual
 
-        # 統合スコア: 高い方を主スコア、低い方を補助として加算
-        primary = max(a_score, v_score)
-        secondary = min(a_score, v_score)
-        entry["combined_score"] = primary + 0.2 * secondary
+        # 統合スコア: 幾何平均ベース
+        # 両方一致→高い、片方のみ→中程度の高め、両方低い→低いまま
+        if a_score > 0 and v_score > 0:
+            entry["combined_score"] = math.sqrt(a_score * v_score)
+        else:
+            entry["combined_score"] = max(a_score, v_score) * 0.8
 
         # タイトルの取得
         title = _extract_title(audio, visual)
