@@ -305,6 +305,10 @@ class VideoFingerprintDatabase:
                     max(q_timestamps) if q_timestamps else 0.0
                 )
 
+                # 時間的一貫性のある区間がなければ偶然の類似として除外
+                if not match_details.get("regions"):
+                    continue
+
                 results.append({
                     "video_id": vid_id,
                     "frame_similarity": max_sim,
