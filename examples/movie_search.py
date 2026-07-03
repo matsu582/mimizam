@@ -215,7 +215,7 @@ def merge_results(
     for match in audio_results:
         song = match.get("song")
         if song:
-            sid = song.song_id if hasattr(song, "song_id") else str(song)
+            sid = song.id if hasattr(song, "id") else str(song)
             audio_map[sid] = match
 
     # 映像結果をIDでインデックス化
