@@ -249,7 +249,8 @@ class FrameSelector:
                     gray.astype(np.float32)
                     - prev_eval_gray.astype(np.float32)
                 )))
-                if diff > self.config.scene_threshold:
+                # 輝度差分の閾値はPySceneDetectのContentDetectorより高く設定
+                if diff > self.config.scene_threshold * 2:
                     is_scene_change = True
                     scene_count += 1
             else:
@@ -530,13 +531,14 @@ class VLADEncoder:
         comp = self._pca_components.astype(np.float64)
         centered = x - mean
         np.nan_to_num(centered, copy=False)
-        result = centered @ comp.T
+        with np.errstate(all="ignore"):
+            result = centered @ comp.T
         np.nan_to_num(result, copy=False)
         return result.flatten()
 
     def _codebook_predict(self, descriptors: np.ndarray) -> np.ndarray:
         """
-        K-Means最近働クラスタ割り当て（numpyのみ、sklearn非依存）
+        K-Means最近傍クラスタ割り当て（numpyのみ、sklearn非依存）
 
         ||x - c||^2 = ||x||^2 - 2*x*c^T + ||c||^2
         """
@@ -544,7 +546,8 @@ class VLADEncoder:
         centers = self._codebook_centers.astype(np.float64)
         x_sq = np.sum(x ** 2, axis=1, keepdims=True)
         c_sq = np.sum(centers ** 2, axis=1, keepdims=True).T
-        dot = x @ centers.T
+        with np.errstate(all="ignore"):
+            dot = x @ centers.T
         np.nan_to_num(dot, copy=False)
         dists = x_sq - 2.0 * dot + c_sq
         np.nan_to_num(dists, copy=False, nan=np.inf)
