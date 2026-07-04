@@ -243,10 +243,6 @@ def main() -> int:
   # シーン検出の評価fpsを4に下げて登録（retrieve回数を削減し高速化）
   python movie_fingerprinter.py /path/to/videos --model model.pki \\
       --scene-eval-fps 4 --profile
-
-  # ハードウェアデコード（VideoToolbox等）を試して登録（grab短縮の実験）
-  python movie_fingerprinter.py /path/to/videos --model model.pki \\
-      --hw-decode --profile
 """,
     )
 
@@ -303,12 +299,6 @@ def main() -> int:
              "高速化するが、極端に速いカットを取りこぼす可能性がある",
     )
     parser.add_argument(
-        "--hw-decode",
-        action="store_true",
-        help="ハードウェアデコード（macOSのVideoToolbox等）を試みる。"
-             "未対応環境では通常デコードへ自動フォールバックする",
-    )
-    parser.add_argument(
         "--profile",
         action="store_true",
         help="フレーム選定の処理内訳（grab/retrieve/resize/シーン検出/"
@@ -322,9 +312,6 @@ def main() -> int:
     # シーン検出の評価fpsを上書き（video_fingerprinter側が参照する環境変数）
     if args.scene_eval_fps:
         os.environ["MIMIZAM_SCENE_EVAL_FPS"] = str(args.scene_eval_fps)
-    # ハードウェアデコードを有効化（video_fingerprinter側が参照する環境変数）
-    if args.hw_decode:
-        os.environ["MIMIZAM_HW_DECODE"] = "1"
     setup_logging(args.verbose)
     logger = logging.getLogger(__name__)
 

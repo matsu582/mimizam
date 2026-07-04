@@ -127,9 +127,6 @@ class VideoFingerprintConfig:
     # 4fpsでも検出シーン数・採用フレームは8fpsとほぼ一致し、retrieve(色変換)
     # 回数が減って高速化するため既定を4.0とする。
     scene_eval_fps: float = 4.0
-    # ハードウェアデコード（VideoToolbox等）を試みる。未対応環境では
-    # 通常デコードへ自動フォールバックする。
-    hw_decode: bool = False
 
     # フレーム正規化（長辺ピクセル数、0で無効）
     normalize_long_side: int = DEFAULT_NORMALIZE_LONG_SIDE
@@ -196,50 +193,6 @@ class FrameSelector:
         """
         self.config = config or VideoFingerprintConfig()
 
-    def _open_capture(self, video_path: str) -> "cv2.VideoCapture":
-        """VideoCaptureを生成（HWデコード有効時はアクセラレーションを試行）
-
-        config.hw_decode もしくは環境変数 MIMIZAM_HW_DECODE が有効な場合、
-        まずmacOSネイティブのAVFoundation（VideoToolboxデコードを使用）を試し、
-        次にFFMPEGのHWアクセラレーション要求を試す。いずれも開けない/未対応の
-        場合は通常デコードへ自動的にフォールバックする。
-        """
-        hw = self.config.hw_decode or bool(
-            os.environ.get("MIMIZAM_HW_DECODE")
-        )
-        if hw:
-            # macOSはAVFoundationバックエンドがネイティブでVideoToolbox
-            # デコードを使うため優先的に試す。次にFFMPEG+HWアクセラレーション。
-            # いずれも失敗/未対応なら通常デコードへフォールバックする。
-            candidates = []
-            av_backend = getattr(cv2, "CAP_AVFOUNDATION", None)
-            if av_backend is not None:
-                candidates.append(
-                    ("AVFoundation",
-                     lambda b=av_backend: cv2.VideoCapture(video_path, b))
-                )
-            candidates.append((
-                "FFMPEG+HWアクセラレーション",
-                lambda: cv2.VideoCapture(
-                    video_path, cv2.CAP_FFMPEG,
-                    [int(cv2.CAP_PROP_HW_ACCELERATION),
-                     int(cv2.VIDEO_ACCELERATION_ANY)],
-                ),
-            ))
-            for name, opener in candidates:
-                try:
-                    cap = opener()
-                    if cap.isOpened():
-                        logger.info(f"HWデコード({name})で映像を開きました")
-                        return cap
-                    cap.release()
-                except Exception as exc:
-                    logger.warning(f"HWデコード({name})初期化失敗: {exc}")
-            logger.warning(
-                "HWデコード各方式で開けず通常デコードにフォールバック"
-            )
-        return cv2.VideoCapture(video_path)
-
     def select_keyframes(
         self, video_path: str
     ) -> List[Tuple[int, float, np.ndarray]]:
@@ -258,7 +211,7 @@ class FrameSelector:
         Returns:
             [(フレームインデックス, タイムスタンプ, フレーム画像), ...]
         """
-        cap = self._open_capture(video_path)
+        cap = cv2.VideoCapture(video_path)
         if not cap.isOpened():
             logger.error(f"映像を開けません: {video_path}")
             return []
