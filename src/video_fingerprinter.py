@@ -724,20 +724,37 @@ class VLADEncoder:
         frame_fingerprints = []
         total_desc = 0
 
+        # 環境変数 MIMIZAM_PROFILE_FRAMES 設定時のみ内訳を集計
+        prof_on = bool(os.environ.get("MIMIZAM_PROFILE_FRAMES"))
+        t_vlad = 0.0
+        t_pca = 0.0
+
         for fidx, ts, desc in per_frame_desc:
+            _t = time.perf_counter() if prof_on else 0.0
             vlad_vec = self._compute_vlad_vector(desc)
+            if prof_on:
+                t_vlad += time.perf_counter() - _t
             frame_vlads.append(vlad_vec)
             total_desc += desc.shape[0]
 
             # フレーム単位指紋
+            _t = time.perf_counter() if prof_on else 0.0
             compressed = self._pca_transform(vlad_vec)
             frame_fp = self._l2_normalize(compressed)
+            if prof_on:
+                t_pca += time.perf_counter() - _t
             frame_fingerprints.append((fidx, ts, frame_fp))
 
         # 映像全体指紋 = 全フレームVLADの平均 → PCA → L2正規化
         agg_vlad = np.mean(frame_vlads, axis=0)
         compressed = self._pca_transform(agg_vlad)
         video_fp = self._l2_normalize(compressed)
+
+        if prof_on:
+            logger.info(
+                f"指紋集約 内訳[秒]: vlad(量子化+残差×{len(per_frame_desc)})"
+                f"={t_vlad:.1f} pca(圧縮×{len(per_frame_desc)})={t_pca:.1f}"
+            )
 
         return VideoFingerprint(
             video_fingerprint=video_fp,
@@ -919,7 +936,14 @@ class VideoFingerprinter:
             logger.warning(f"フレームを選定できませんでした: {video_path}")
             return None
 
+        prof_on = bool(os.environ.get("MIMIZAM_PROFILE_FRAMES"))
+        _t = time.perf_counter() if prof_on else 0.0
         _, per_frame = self.encoder.extract_descriptors(frames)
+        if prof_on:
+            logger.info(
+                f"指紋集約 内訳[秒]: akaze(記述子抽出×{len(frames)}"
+                f"フレーム)={time.perf_counter() - _t:.1f}"
+            )
         if not per_frame:
             logger.warning(f"記述子を抽出できませんでした: {video_path}")
             return None
