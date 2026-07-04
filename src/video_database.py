@@ -263,8 +263,16 @@ class VideoFingerprintDatabase:
         """
         results = []
 
+        if not query_frame_fps:
+            return results
+
+        # 候補映像のフレーム指紋を1クエリで一括取得（リモートDBのI/O往復を削減）
+        frames_by_video = self.backend.get_frame_fingerprints_batch(
+            candidate_video_ids
+        )
+
         for vid_id in candidate_video_ids:
-            raw_frames = self.backend.get_frame_fingerprints(vid_id)
+            raw_frames = frames_by_video.get(vid_id, [])
             if not raw_frames:
                 continue
 
@@ -272,9 +280,6 @@ class VideoFingerprintDatabase:
                 (fidx, ts, np.frombuffer(fp_blob, dtype=np.float32).copy())
                 for fidx, ts, fp_blob in raw_frames
             ]
-
-            if not query_frame_fps:
-                continue
 
             # クエリ×DBの全フレーム類似度を行列積で一括計算
             # （Python二重ループを回避し、BLASによる高速化を図る）

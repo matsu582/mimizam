@@ -197,6 +197,19 @@ class DatabaseBackend(ABC):
         """指定映像のフレーム指紋を取得"""
         raise NotImplementedError("このバックエンドは映像指紋に未対応です")
 
+    def get_frame_fingerprints_batch(
+        self, video_ids: List[str]
+    ) -> Dict[str, List[Tuple[int, float, bytes]]]:
+        """複数映像のフレーム指紋をまとめて取得
+
+        デフォルトは個別取得へのフォールバック。
+        リモートDBのバックエンドは1クエリ実装でオーバーライドする。
+        """
+        return {
+            vid: self.get_frame_fingerprints(vid)
+            for vid in video_ids
+        }
+
     def get_video(self, video_id: str) -> Optional['Video']:
         """映像情報を取得"""
         raise NotImplementedError("このバックエンドは映像指紋に未対応です")

@@ -635,6 +635,35 @@ class MySQLBackend(DatabaseBackend):
             self.logger.error(f"MySQL frame fingerprint retrieval error: {e}")
             return []
 
+    def get_frame_fingerprints_batch(
+        self, video_ids: List[str],
+    ) -> Dict[str, List[Tuple[int, float, bytes]]]:
+        """MySQLから複数映像のフレーム指紋を1クエリで一括取得"""
+        result: Dict[str, List[Tuple[int, float, bytes]]] = {
+            vid: [] for vid in video_ids
+        }
+        if not video_ids:
+            return result
+        try:
+            self._create_video_tables()
+            cursor = self.connection.cursor()
+            placeholders = ",".join("%s" for _ in video_ids)
+            cursor.execute(
+                f"""SELECT video_id, frame_index, timestamp, fingerprint
+                    FROM frame_fingerprints
+                    WHERE video_id IN ({placeholders})""",
+                tuple(video_ids),
+            )
+            for vid, fidx, ts, fp_blob in cursor.fetchall():
+                result[vid].append(
+                    (int(fidx), float(ts), bytes(fp_blob))
+                )
+        except MySQLError as e:
+            self.logger.error(
+                f"MySQL frame fingerprint batch retrieval error: {e}"
+            )
+        return result
+
     def get_video(self, video_id: str) -> Optional[Video]:
         """MySQLから映像情報を取得"""
         try:

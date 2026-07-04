@@ -893,6 +893,48 @@ class ElasticsearchBackend(DatabaseBackend):
             )
         return results
 
+    def get_frame_fingerprints_batch(
+        self, video_ids: List[str],
+    ) -> Dict[str, List[Tuple[int, float, bytes]]]:
+        """Elasticsearchから複数映像のフレーム指紋をterms1クエリで一括取得"""
+        import base64
+
+        result: Dict[str, List[Tuple[int, float, bytes]]] = {
+            vid: [] for vid in video_ids
+        }
+        if not video_ids:
+            return result
+        try:
+            self._ensure_video_indices()
+            try:
+                self.client.indices.refresh(index=self._frame_fp_index)
+            except ElasticsearchException:
+                pass
+
+            resp = self.client.search(
+                index=self._frame_fp_index,
+                body={
+                    "query": {"terms": {"video_id": list(video_ids)}},
+                    "size": 50000,
+                    "sort": [{"frame_index": {"order": "asc"}}],
+                },
+            )
+            for hit in resp["hits"]["hits"]:
+                src = hit["_source"]
+                vid = src["video_id"]
+                if vid not in result:
+                    continue
+                result[vid].append((
+                    int(src["frame_index"]),
+                    float(src["timestamp"]),
+                    base64.b64decode(src["fingerprint"]),
+                ))
+        except ElasticsearchException as e:
+            self.logger.error(
+                f"Elasticsearch frame fingerprint batch retrieval error: {e}"
+            )
+        return result
+
     def get_video(self, video_id: str) -> Optional[Video]:
         """Elasticsearchから映像情報を取得"""
         try:

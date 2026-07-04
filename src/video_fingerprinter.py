@@ -9,6 +9,8 @@ import os
 import logging
 import io
 import pickle
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field
 from typing import List, Optional, Dict, Any, Tuple
 
@@ -127,6 +129,9 @@ class VideoFingerprintConfig:
     # VLAD
     codebook_size: int = 64
     codebook_batch_size: int = 10000
+
+    # AKAZE記述子抽出の並列ワーカー数（0で自動: min(CPU数, 8)）
+    num_workers: int = 0
 
     # PCA
     pca_dimensions: int = 128
@@ -314,6 +319,7 @@ class VLADEncoder:
         """
         self.config = config or VideoFingerprintConfig()
         self._akaze = _create_akaze()
+        self._thread_local = threading.local()
         self._codebook_centers = None
         self._pca_components = None
         self._pca_mean = None
@@ -343,20 +349,53 @@ class VLADEncoder:
         Returns:
             (全記述子リスト, [(インデックス, タイムスタンプ, 記述子), ...])
         """
+        workers = self._resolve_workers(len(frames))
+        if workers <= 1:
+            results = [self._extract_frame_descriptor(f) for f in frames]
+        else:
+            # OpenCVはdetectAndCompute実行中にGILを解放するため、
+            # スレッド並列でマルチコアを活用できる（順序は保持）
+            with ThreadPoolExecutor(max_workers=workers) as executor:
+                results = list(
+                    executor.map(self._extract_frame_descriptor, frames)
+                )
+
         all_descriptors = []
         per_frame = []
-        target = self.config.normalize_long_side
-
-        for fidx, ts, img in frames:
-            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-            if target > 0:
-                gray = normalize_frame(gray, target)
-            _, desc = self._akaze.detectAndCompute(gray, None)
-            if desc is not None and len(desc) > 0:
-                all_descriptors.append(desc)
-                per_frame.append((fidx, ts, desc))
+        for res in results:
+            if res is not None:
+                all_descriptors.append(res[2])
+                per_frame.append(res)
 
         return all_descriptors, per_frame
+
+    def _resolve_workers(self, num_frames: int) -> int:
+        """並列ワーカー数を決定（0指定時はCPU数から自動算出）"""
+        n = self.config.num_workers
+        if n <= 0:
+            n = min(os.cpu_count() or 1, 8)
+        return max(1, min(n, num_frames))
+
+    def _get_thread_akaze(self):
+        """スレッドローカルなAKAZEインスタンスを取得（スレッド安全化）"""
+        akaze = getattr(self._thread_local, "akaze", None)
+        if akaze is None:
+            akaze = _create_akaze()
+            self._thread_local.akaze = akaze
+        return akaze
+
+    def _extract_frame_descriptor(
+        self, frame: Tuple[int, float, np.ndarray]
+    ) -> Optional[Tuple[int, float, np.ndarray]]:
+        """1フレームからAKAZE記述子を抽出"""
+        fidx, ts, img = frame
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        if self.config.normalize_long_side > 0:
+            gray = normalize_frame(gray, self.config.normalize_long_side)
+        _, desc = self._get_thread_akaze().detectAndCompute(gray, None)
+        if desc is not None and len(desc) > 0:
+            return (fidx, ts, desc)
+        return None
 
     def train(
         self, descriptor_list: List[np.ndarray]
@@ -634,15 +673,15 @@ class VLADEncoder:
         desc_f = descriptors.astype(np.float32)
         labels = self._codebook_predict(desc_f)
 
+        # 各記述子の残差（desc - 割当クラスタ中心）をクラスタ単位で集約
+        # np.add.at で同一ラベルの重複加算を正しく処理（Pythonループを排除）
         vlad = np.zeros((k, d), dtype=np.float32)
-        for i, lbl in enumerate(labels):
-            vlad[lbl] += desc_f[i] - centers[lbl]
+        residuals = desc_f - centers[labels]
+        np.add.at(vlad, labels, residuals)
 
-        # Intra-normalization
-        for j in range(k):
-            norm_val = np.linalg.norm(vlad[j])
-            if norm_val > 1e-6:
-                vlad[j] /= norm_val
+        # Intra-normalization（クラスタごとにL2正規化）
+        norms = np.linalg.norm(vlad, axis=1, keepdims=True)
+        np.divide(vlad, norms, out=vlad, where=norms > 1e-6)
 
         return vlad.flatten()
 
