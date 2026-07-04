@@ -9,6 +9,7 @@ import os
 import logging
 import io
 import pickle
+import time
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field
@@ -226,9 +227,20 @@ class FrameSelector:
         evaluated = 0
         first_eval = True
 
+        # 環境変数 MIMIZAM_PROFILE_FRAMES 設定時のみ各処理の所要時間を集計
+        prof_on = bool(os.environ.get("MIMIZAM_PROFILE_FRAMES"))
+        prof = {
+            "grab": 0.0, "retrieve": 0.0, "resize": 0.0,
+            "scene": 0.0, "dedup": 0.0, "accept": 0.0,
+        }
+        n_dedup = 0
+
         frame_idx = 0
         while True:
+            _t = time.perf_counter() if prof_on else 0.0
             grabbed = cap.grab()
+            if prof_on:
+                prof["grab"] += time.perf_counter() - _t
             if not grabbed:
                 break
 
@@ -237,7 +249,10 @@ class FrameSelector:
                 frame_idx += 1
                 continue
 
+            _t = time.perf_counter() if prof_on else 0.0
             ret, frame = cap.retrieve()
+            if prof_on:
+                prof["retrieve"] += time.perf_counter() - _t
             if not ret:
                 frame_idx += 1
                 continue
@@ -248,11 +263,15 @@ class FrameSelector:
             # シーン変化検出
             # カラー縮小フレームをContentDetectorに逐次投入し、単一デコード
             # パスのままカット検出する（未導入時は輝度差分にフォールバック）
+            _t = time.perf_counter() if prof_on else 0.0
             small = cv2.resize(
                 frame, (self._SCENE_W, self._SCENE_H),
                 interpolation=cv2.INTER_AREA,
             )
+            if prof_on:
+                prof["resize"] += time.perf_counter() - _t
 
+            _t = time.perf_counter() if prof_on else 0.0
             is_scene_change = False
             if first_eval:
                 # 最初の評価フレームは常にシーン開始として採用
@@ -274,6 +293,8 @@ class FrameSelector:
                 if diff > self.config.scene_threshold * 2:
                     is_scene_change = True
                 prev_eval_gray = gray
+            if prof_on:
+                prof["scene"] += time.perf_counter() - _t
 
             if is_scene_change:
                 scene_count += 1
@@ -284,6 +305,7 @@ class FrameSelector:
                 should_accept = True
             elif frame_idx - last_accepted_idx >= interval_frames:
                 # サンプリング間隔到達 → ヒストグラム冗長チェック
+                _t = time.perf_counter() if prof_on else 0.0
                 if prev_accepted_hist is not None:
                     hist = self._compute_histogram(frame)
                     corr = cv2.compareHist(
@@ -293,11 +315,17 @@ class FrameSelector:
                     should_accept = corr < 0.95
                 else:
                     should_accept = True
+                if prof_on:
+                    prof["dedup"] += time.perf_counter() - _t
+                    n_dedup += 1
 
             if should_accept:
+                _t = time.perf_counter() if prof_on else 0.0
                 accepted.append((frame_idx, ts, frame.copy()))
                 prev_accepted_hist = self._compute_histogram(frame)
                 last_accepted_idx = frame_idx
+                if prof_on:
+                    prof["accept"] += time.perf_counter() - _t
 
             frame_idx += 1
 
@@ -307,6 +335,16 @@ class FrameSelector:
             f"{len(accepted)}フレーム採用 "
             f"({evaluated}フレーム評価)"
         )
+        if prof_on:
+            logger.info(
+                "フレーム選定 内訳[秒]: "
+                f"grab(全復号)={prof['grab']:.1f} "
+                f"retrieve(色変換)={prof['retrieve']:.1f} "
+                f"resize(縮小)={prof['resize']:.1f} "
+                f"scene(ContentDetector)={prof['scene']:.1f} "
+                f"dedup(ヒスト判定×{n_dedup})={prof['dedup']:.1f} "
+                f"accept(採用時ヒスト×{len(accepted)})={prof['accept']:.1f}"
+            )
         return accepted
 
     def _create_scene_detector(self):
