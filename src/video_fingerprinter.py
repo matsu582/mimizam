@@ -178,6 +178,7 @@ class FrameSelector:
     # ヒストグラム設定
     _HIST_H_BINS = 50
     _HIST_S_BINS = 60
+    _HIST_DOWNSCALE_W = 320
 
     def __init__(self, config: Optional[VideoFingerprintConfig] = None):
         """
@@ -266,7 +267,7 @@ class FrameSelector:
             _t = time.perf_counter() if prof_on else 0.0
             small = cv2.resize(
                 frame, (self._SCENE_W, self._SCENE_H),
-                interpolation=cv2.INTER_AREA,
+                interpolation=cv2.INTER_LINEAR,
             )
             if prof_on:
                 prof["resize"] += time.perf_counter() - _t
@@ -363,7 +364,19 @@ class FrameSelector:
             return None
 
     def _compute_histogram(self, frame: np.ndarray) -> np.ndarray:
-        """HSVヒストグラムを計算（冗長判定用）"""
+        """HSVヒストグラムを計算（冗長判定用）
+
+        ヒストグラムは色の分布なので解像度にほぼ非依存。
+        フル解像度で計算するとcvtColor/calcHistが重いため、
+        中間サイズに縮小してから計算する（判定結果は同等）。
+        """
+        h, w = frame.shape[:2]
+        if w > self._HIST_DOWNSCALE_W:
+            nh = max(1, int(h * self._HIST_DOWNSCALE_W / w))
+            frame = cv2.resize(
+                frame, (self._HIST_DOWNSCALE_W, nh),
+                interpolation=cv2.INTER_LINEAR,
+            )
         hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
         hist = cv2.calcHist(
             [hsv], [0, 1], None,
