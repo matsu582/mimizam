@@ -124,7 +124,12 @@ class VideoFingerprintConfig:
     sample_interval: float = 1.0
     redundancy_threshold: float = 0.4
     # シーン検出の評価fps（この間隔でフレームを取り出して評価する）
-    scene_eval_fps: float = 8.0
+    # 4fpsでも検出シーン数・採用フレームは8fpsとほぼ一致し、retrieve(色変換)
+    # 回数が減って高速化するため既定を4.0とする。
+    scene_eval_fps: float = 4.0
+    # ハードウェアデコード（VideoToolbox等）を試みる。未対応環境では
+    # 通常デコードへ自動フォールバックする。
+    hw_decode: bool = False
 
     # フレーム正規化（長辺ピクセル数、0で無効）
     normalize_long_side: int = DEFAULT_NORMALIZE_LONG_SIDE
@@ -191,6 +196,38 @@ class FrameSelector:
         """
         self.config = config or VideoFingerprintConfig()
 
+    def _open_capture(self, video_path: str) -> "cv2.VideoCapture":
+        """VideoCaptureを生成（HWデコード有効時はアクセラレーションを試行）
+
+        config.hw_decode もしくは環境変数 MIMIZAM_HW_DECODE が有効な場合、
+        FFMPEGバックエンドでハードウェアアクセラレーション（macOSでは
+        VideoToolbox等）を要求する。開けない/未対応の場合は通常デコードへ
+        自動的にフォールバックする。
+        """
+        hw = self.config.hw_decode or bool(
+            os.environ.get("MIMIZAM_HW_DECODE")
+        )
+        if hw:
+            try:
+                params = [
+                    int(cv2.CAP_PROP_HW_ACCELERATION),
+                    int(cv2.VIDEO_ACCELERATION_ANY),
+                ]
+                cap = cv2.VideoCapture(video_path, cv2.CAP_FFMPEG, params)
+                if cap.isOpened():
+                    logger.info("HWデコードを有効化して映像を開きました")
+                    return cap
+                cap.release()
+                logger.warning(
+                    "HWデコードで開けず通常デコードにフォールバック"
+                )
+            except Exception as exc:
+                logger.warning(
+                    f"HWデコード初期化失敗（通常デコードにフォールバック）: "
+                    f"{exc}"
+                )
+        return cv2.VideoCapture(video_path)
+
     def select_keyframes(
         self, video_path: str
     ) -> List[Tuple[int, float, np.ndarray]]:
@@ -209,7 +246,7 @@ class FrameSelector:
         Returns:
             [(フレームインデックス, タイムスタンプ, フレーム画像), ...]
         """
-        cap = cv2.VideoCapture(video_path)
+        cap = self._open_capture(video_path)
         if not cap.isOpened():
             logger.error(f"映像を開けません: {video_path}")
             return []
