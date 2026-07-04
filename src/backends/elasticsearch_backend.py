@@ -219,6 +219,19 @@ class ElasticsearchBackend(DatabaseBackend):
                 )
             else:
                 raise
+
+        # プライマリシャードがアクティブになるまで待機
+        # （リソース制約環境でのunavailable_shards_exceptionを回避）
+        try:
+            self.client.cluster.health(
+                index=index_name,
+                wait_for_status="yellow",
+                timeout="60s",
+            )
+        except Exception as e:
+            self.logger.warning(
+                f"Index shard health wait failed: {index_name}: {e}"
+            )
     
     def add_song(self, song: Song) -> bool:
         """Elasticsearchに楽曲を追加"""
