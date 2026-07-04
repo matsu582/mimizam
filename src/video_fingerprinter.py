@@ -200,32 +200,44 @@ class FrameSelector:
         """VideoCaptureを生成（HWデコード有効時はアクセラレーションを試行）
 
         config.hw_decode もしくは環境変数 MIMIZAM_HW_DECODE が有効な場合、
-        FFMPEGバックエンドでハードウェアアクセラレーション（macOSでは
-        VideoToolbox等）を要求する。開けない/未対応の場合は通常デコードへ
-        自動的にフォールバックする。
+        まずmacOSネイティブのAVFoundation（VideoToolboxデコードを使用）を試し、
+        次にFFMPEGのHWアクセラレーション要求を試す。いずれも開けない/未対応の
+        場合は通常デコードへ自動的にフォールバックする。
         """
         hw = self.config.hw_decode or bool(
             os.environ.get("MIMIZAM_HW_DECODE")
         )
         if hw:
-            try:
-                params = [
-                    int(cv2.CAP_PROP_HW_ACCELERATION),
-                    int(cv2.VIDEO_ACCELERATION_ANY),
-                ]
-                cap = cv2.VideoCapture(video_path, cv2.CAP_FFMPEG, params)
-                if cap.isOpened():
-                    logger.info("HWデコードを有効化して映像を開きました")
-                    return cap
-                cap.release()
-                logger.warning(
-                    "HWデコードで開けず通常デコードにフォールバック"
+            # macOSはAVFoundationバックエンドがネイティブでVideoToolbox
+            # デコードを使うため優先的に試す。次にFFMPEG+HWアクセラレーション。
+            # いずれも失敗/未対応なら通常デコードへフォールバックする。
+            candidates = []
+            av_backend = getattr(cv2, "CAP_AVFOUNDATION", None)
+            if av_backend is not None:
+                candidates.append(
+                    ("AVFoundation",
+                     lambda b=av_backend: cv2.VideoCapture(video_path, b))
                 )
-            except Exception as exc:
-                logger.warning(
-                    f"HWデコード初期化失敗（通常デコードにフォールバック）: "
-                    f"{exc}"
-                )
+            candidates.append((
+                "FFMPEG+HWアクセラレーション",
+                lambda: cv2.VideoCapture(
+                    video_path, cv2.CAP_FFMPEG,
+                    [int(cv2.CAP_PROP_HW_ACCELERATION),
+                     int(cv2.VIDEO_ACCELERATION_ANY)],
+                ),
+            ))
+            for name, opener in candidates:
+                try:
+                    cap = opener()
+                    if cap.isOpened():
+                        logger.info(f"HWデコード({name})で映像を開きました")
+                        return cap
+                    cap.release()
+                except Exception as exc:
+                    logger.warning(f"HWデコード({name})初期化失敗: {exc}")
+            logger.warning(
+                "HWデコード各方式で開けず通常デコードにフォールバック"
+            )
         return cv2.VideoCapture(video_path)
 
     def select_keyframes(
