@@ -273,23 +273,32 @@ class VideoFingerprintDatabase:
                 for fidx, ts, fp_blob in raw_frames
             ]
 
-            best_per_query = []
-            frame_matches = []
-            for q_idx, q_ts, q_fp in query_frame_fps:
-                q_f32 = q_fp.astype(np.float32)
-                best_sim = -1.0
-                best_db_ts = 0.0
-                for d_idx, d_ts, d_fp in db_frame_vecs:
-                    sim = float(np.dot(q_f32, d_fp))
-                    if sim > best_sim:
-                        best_sim = sim
-                        best_db_ts = d_ts
-                best_per_query.append(best_sim)
-                frame_matches.append({
+            if not query_frame_fps:
+                continue
+
+            # クエリ×DBの全フレーム類似度を行列積で一括計算
+            # （Python二重ループを回避し、BLASによる高速化を図る）
+            q_mat = np.stack(
+                [q_fp.astype(np.float32) for _, _, q_fp in query_frame_fps]
+            )
+            d_mat = np.stack([d_fp for _, _, d_fp in db_frame_vecs])
+            sims = q_mat @ d_mat.T  # (クエリフレーム数, DBフレーム数)
+
+            best_idx = np.argmax(sims, axis=1)
+            best_per_query = sims[np.arange(sims.shape[0]), best_idx]
+            db_ts_arr = np.array(
+                [d_ts for _, d_ts, _ in db_frame_vecs], dtype=np.float64
+            )
+            best_db_ts_arr = db_ts_arr[best_idx]
+
+            frame_matches = [
+                {
                     "query_ts": q_ts,
-                    "db_ts": best_db_ts,
-                    "similarity": best_sim,
-                })
+                    "db_ts": float(best_db_ts_arr[i]),
+                    "similarity": float(best_per_query[i]),
+                }
+                for i, (_, q_ts, _) in enumerate(query_frame_fps)
+            ]
 
             max_sim = float(np.max(best_per_query))
             if max_sim >= threshold:

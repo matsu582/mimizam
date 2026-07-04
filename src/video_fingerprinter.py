@@ -829,15 +829,16 @@ class VideoFingerprinter:
                 np.dot(fp_a.video_fingerprint, fp_b.video_fingerprint)
             )
 
-        best_scores = []
-        for _, _, q_fp in fp_a.frame_fingerprints:
-            frame_best = max(
-                float(np.dot(q_fp, d_fp))
-                for _, _, d_fp in fp_b.frame_fingerprints
-            )
-            best_scores.append(frame_best)
+        # 各クエリフレーム×DBフレームの類似度を行列積で一括計算
+        q_mat = np.stack(
+            [q_fp.astype(np.float32) for _, _, q_fp in fp_a.frame_fingerprints]
+        )
+        d_mat = np.stack(
+            [d_fp.astype(np.float32) for _, _, d_fp in fp_b.frame_fingerprints]
+        )
+        sims = q_mat @ d_mat.T
 
-        return float(np.max(best_scores))
+        return float(np.max(sims.max(axis=1)))
 
     def rebuild_from_descriptors(
         self,
