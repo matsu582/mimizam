@@ -236,6 +236,9 @@ def main() -> int:
 
   # 音声指紋のみ登録（映像スキップ）
   python movie_fingerprinter.py /path/to/videos --model model.pki --skip-visual
+
+  # フレーム選定の処理内訳を計測しながら登録
+  python movie_fingerprinter.py /path/to/videos --model model.pki --profile
 """,
     )
 
@@ -284,8 +287,17 @@ def main() -> int:
         action="store_true",
         help="詳細ログを出力",
     )
+    parser.add_argument(
+        "--profile",
+        action="store_true",
+        help="フレーム選定の処理内訳（grab/retrieve/resize/シーン検出/"
+             "ヒストグラム等の所要時間）をログ出力する",
+    )
 
     args = parser.parse_args()
+    # フレーム選定の内訳計測を有効化（video_fingerprinter側が参照する環境変数）
+    if args.profile:
+        os.environ["MIMIZAM_PROFILE_FRAMES"] = "1"
     setup_logging(args.verbose)
     logger = logging.getLogger(__name__)
 
