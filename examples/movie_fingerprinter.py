@@ -239,6 +239,10 @@ def main() -> int:
 
   # フレーム選定の処理内訳を計測しながら登録
   python movie_fingerprinter.py /path/to/videos --model model.pki --profile
+
+  # シーン検出の評価fpsを4に下げて登録（retrieve回数を削減し高速化）
+  python movie_fingerprinter.py /path/to/videos --model model.pki \\
+      --scene-eval-fps 4 --profile
 """,
     )
 
@@ -288,6 +292,13 @@ def main() -> int:
         help="詳細ログを出力",
     )
     parser.add_argument(
+        "--scene-eval-fps",
+        type=float,
+        default=None,
+        help="シーン検出の評価fps（既定8.0）。下げるとretrieve回数が減り"
+             "高速化するが、極端に速いカットを取りこぼす可能性がある",
+    )
+    parser.add_argument(
         "--profile",
         action="store_true",
         help="フレーム選定の処理内訳（grab/retrieve/resize/シーン検出/"
@@ -298,6 +309,9 @@ def main() -> int:
     # フレーム選定の内訳計測を有効化（video_fingerprinter側が参照する環境変数）
     if args.profile:
         os.environ["MIMIZAM_PROFILE_FRAMES"] = "1"
+    # シーン検出の評価fpsを上書き（video_fingerprinter側が参照する環境変数）
+    if args.scene_eval_fps:
+        os.environ["MIMIZAM_SCENE_EVAL_FPS"] = str(args.scene_eval_fps)
     setup_logging(args.verbose)
     logger = logging.getLogger(__name__)
 

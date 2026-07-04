@@ -123,6 +123,8 @@ class VideoFingerprintConfig:
     scene_threshold: float = 27.0
     sample_interval: float = 1.0
     redundancy_threshold: float = 0.4
+    # シーン検出の評価fps（この間隔でフレームを取り出して評価する）
+    scene_eval_fps: float = 8.0
 
     # フレーム正規化（長辺ピクセル数、0で無効）
     normalize_long_side: int = DEFAULT_NORMALIZE_LONG_SIDE
@@ -216,8 +218,16 @@ class FrameSelector:
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         interval_frames = max(1, int(self.config.sample_interval * fps))
 
-        # 評価間隔: ~8fpsでフレームを評価（シーン検出精度と速度のバランス）
-        eval_stride = max(1, int(fps / 8))
+        # 評価間隔: scene_eval_fps でフレームを評価（精度と速度のバランス）
+        # 環境変数 MIMIZAM_SCENE_EVAL_FPS があれば設定値を上書きする
+        eval_fps = self.config.scene_eval_fps or 8.0
+        env_fps = os.environ.get("MIMIZAM_SCENE_EVAL_FPS")
+        if env_fps:
+            try:
+                eval_fps = float(env_fps) or eval_fps
+            except ValueError:
+                pass
+        eval_stride = max(1, int(round(fps / eval_fps)))
 
         detector = self._create_scene_detector()
         accepted: List[Tuple[int, float, np.ndarray]] = []
