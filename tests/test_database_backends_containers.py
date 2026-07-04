@@ -154,6 +154,8 @@ class TestCrossBackendConsistency(unittest.TestCase):
                 "xpack.security.http.ssl.enabled", "false"
             ).with_env(
                 "ES_JAVA_OPTS", "-Xms512m -Xmx512m"
+            ).with_env(
+                "cluster.routing.allocation.disk.threshold_enabled", "false"
             ) as es:
                 time.sleep(15)
                 config = DatabaseConfig(
