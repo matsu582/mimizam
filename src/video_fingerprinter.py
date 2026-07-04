@@ -193,9 +193,11 @@ class FrameSelector:
         """
         映像からキーフレームを選定（1回走査）
 
-        1回の映像読み込みでシーン検出とフレーム選定を同時に実行。
-        シーン境界はフレーム間の輝度差分で検出し、
+        1回の映像読み込み（単一デコードパス）でシーン検出とフレーム選定を
+        同時に実行。シーン境界はPySceneDetectのContentDetectorで検出し
+        （フレームを自前ループから逐次投入するため二重デコードは発生しない）、
         冗長除去はHSVヒストグラム相関で高速に判定する。
+        ContentDetectorが利用できない場合は輝度差分にフォールバックする。
 
         Args:
             video_path: 映像ファイルパス
@@ -215,12 +217,14 @@ class FrameSelector:
         # 評価間隔: ~8fpsでフレームを評価（シーン検出精度と速度のバランス）
         eval_stride = max(1, int(fps / 8))
 
+        detector = self._create_scene_detector()
         accepted: List[Tuple[int, float, np.ndarray]] = []
         prev_eval_gray: Optional[np.ndarray] = None
         prev_accepted_hist: Optional[np.ndarray] = None
         last_accepted_idx = -interval_frames
         scene_count = 0
         evaluated = 0
+        first_eval = True
 
         frame_idx = 0
         while True:
@@ -241,28 +245,38 @@ class FrameSelector:
             evaluated += 1
             ts = frame_idx / fps
 
-            # シーン変化検出（縮小グレースケールの平均差分）
+            # シーン変化検出
+            # カラー縮小フレームをContentDetectorに逐次投入し、単一デコード
+            # パスのままカット検出する（未導入時は輝度差分にフォールバック）
             small = cv2.resize(
                 frame, (self._SCENE_W, self._SCENE_H),
                 interpolation=cv2.INTER_AREA,
             )
-            gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
 
             is_scene_change = False
-            if prev_eval_gray is not None:
+            if first_eval:
+                # 最初の評価フレームは常にシーン開始として採用
+                is_scene_change = True
+                first_eval = False
+                if detector is not None:
+                    detector.process_frame(frame_idx, small)
+                else:
+                    prev_eval_gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
+            elif detector is not None:
+                if detector.process_frame(frame_idx, small):
+                    is_scene_change = True
+            else:
+                gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
                 diff = float(np.mean(np.abs(
                     gray.astype(np.float32)
                     - prev_eval_gray.astype(np.float32)
                 )))
-                # 輝度差分の閾値はPySceneDetectのContentDetectorより高く設定
                 if diff > self.config.scene_threshold * 2:
                     is_scene_change = True
-                    scene_count += 1
-            else:
-                is_scene_change = True
-                scene_count += 1
+                prev_eval_gray = gray
 
-            prev_eval_gray = gray
+            if is_scene_change:
+                scene_count += 1
 
             # フレーム採用判定
             should_accept = False
@@ -294,6 +308,21 @@ class FrameSelector:
             f"({evaluated}フレーム評価)"
         )
         return accepted
+
+    def _create_scene_detector(self):
+        """PySceneDetectのContentDetectorを生成（未導入時はNone）
+
+        カットは自前のデコードループから process_frame() へフレームを
+        逐次投入して検出するため、PySceneDetect側での追加デコードは発生しない。
+        """
+        try:
+            from scenedetect.detectors import ContentDetector
+            return ContentDetector(threshold=self.config.scene_threshold)
+        except Exception as exc:
+            logger.warning(
+                f"PySceneDetect未使用（輝度差分にフォールバック）: {exc}"
+            )
+            return None
 
     def _compute_histogram(self, frame: np.ndarray) -> np.ndarray:
         """HSVヒストグラムを計算（冗長判定用）"""
