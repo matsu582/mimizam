@@ -8,6 +8,7 @@ from .mimizam import (
     Mimizam,
     create_mimizam_sqlite,
     create_mimizam_mysql,
+    create_mimizam_mariadb,
     create_mimizam_postgresql,
     create_mimizam_elasticsearch
 )
@@ -39,6 +40,7 @@ __all__ = [
     'Mimizam',
     'create_mimizam_sqlite',
     'create_mimizam_mysql', 
+    'create_mimizam_mariadb',
     'create_mimizam_postgresql',
     'create_mimizam_elasticsearch',
     'AudioFingerprinter',

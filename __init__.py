@@ -1,11 +1,13 @@
 """
-mimizam - Shazam風音声指紋システム
+mimizam - 音声・映像指紋システム
 
-音声指紋と識別のためのShazamアルゴリズムのPython実装です。
-音声指紋を生成してデータベースと照合することで、音声を識別します。
+Shazam風音声指紋 + AKAZE/VLAD/PCAベースの映像指紋を提供。
+音声・映像の指紋を生成してデータベースと照合することで、
+メディアを識別します。
 
 主要コンポーネント:
 - AudioFingerprinter: 音声指紋生成
+- VideoFingerprinter: 映像指紋生成
 - FingerprintDatabase: データベース管理
 - FingerprintMatcher: 音声マッチング
 """
@@ -15,6 +17,7 @@ from .src.mimizam import (
     Mimizam,
     create_mimizam_sqlite,
     create_mimizam_mysql,
+    create_mimizam_mariadb,
     create_mimizam_postgresql,
     create_mimizam_elasticsearch
 )
@@ -28,7 +31,21 @@ from .src.fingerprint_database import (
     create_postgresql_config, 
     create_elasticsearch_config
 )
-from .src.database_base import DatabaseConfig, Song, Fingerprint
+from .src.database_base import DatabaseConfig, Song, Fingerprint, Video
+from .src.video_fingerprinter import (
+    VideoFingerprinter,
+    VideoFingerprintConfig,
+    FrameSelector,
+    VLADEncoder,
+    VideoFingerprint,
+    normalize_frame,
+)
+from .src.video_database import VideoFingerprintDatabase
+from .src.pip_detector import (
+    detect_pip_regions,
+    sample_frames_from_video,
+    PipRegion,
+)
 from .src.adaptive_parameters import AdaptiveParameterTuner,PerformanceMonitor
 
 __version__ = "1.0.3"
@@ -38,6 +55,7 @@ __all__ = [
     'Mimizam',
     'create_mimizam_sqlite',
     'create_mimizam_mysql',
+    'create_mimizam_mariadb',
     'create_mimizam_postgresql',
     'create_mimizam_elasticsearch',
     
@@ -47,6 +65,21 @@ __all__ = [
     'Peak',
     'SpectrogramAnalyzer',
     'HashGenerator',
+    
+    # 映像フィンガープリンティング
+    'VideoFingerprinter',
+    'VideoFingerprintConfig',
+    'FrameSelector',
+    'VLADEncoder',
+    'VideoFingerprint',
+    'VideoFingerprintDatabase',
+    'Video',
+    'normalize_frame',
+    
+    # PiP検出
+    'detect_pip_regions',
+    'sample_frames_from_video',
+    'PipRegion',
     
     # データベース
     'FingerprintDatabase',

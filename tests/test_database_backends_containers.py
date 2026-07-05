@@ -45,115 +45,8 @@ from mimizam import (
 
 @unittest.skipUnless(TESTCONTAINERS_AVAILABLE, "Testcontainersが利用できません")
 class TestCrossBackendConsistency(unittest.TestCase):
-    """複数バックエンド間での一貫性テスト"""
-    
-    @classmethod
-    def setUpClass(cls):
-        """テストクラス全体の前処理"""
-        cls.containers = {}
-        cls.database_configs = {}
-        
-        # Elasticsearchコンテナの起動
-        try:
-            cls.elasticsearch_container = ElasticSearchContainer("elasticsearch:8.11.0")
-            cls.elasticsearch_container.with_env("discovery.type", "single-node")
-            cls.elasticsearch_container.with_env("xpack.security.enabled", "false")
-            cls.elasticsearch_container.with_env("ES_JAVA_OPTS", "-Xms512m -Xmx512m")
-            cls.elasticsearch_container.start()
-            
-            # 接続情報を取得
-            es_host = cls.elasticsearch_container.get_container_host_ip()
-            es_port = cls.elasticsearch_container.get_exposed_port(9200)
-            
-            cls.database_configs['elasticsearch'] = DatabaseConfig(
-                backend='elasticsearch',
-                host=es_host,
-                port=int(es_port),
-                index_name='test_fingerprints'
-            )
-            
-            print(f"Elasticsearch起動: {es_host}:{es_port}")
-            
-            # Elasticsearchが完全に起動するまで待機
-            time.sleep(10)
-            
-        except Exception as e:
-            print(f"Elasticsearchコンテナの起動に失敗: {e}")
-            cls.elasticsearch_container = None
-        
-        # MySQLコンテナの起動
-        try:
-            cls.mysql_container = MySqlContainer("mysql:8.0")
-            # testcontainersのデフォルト設定を使用（環境変数を手動設定しない）
-            cls.mysql_container.start()
-            
-            # 接続情報を取得（testcontainersのデフォルト値を使用）
-            mysql_host = cls.mysql_container.get_container_host_ip()
-            mysql_port = cls.mysql_container.get_exposed_port(3306)
-            
-            print(f"MySQL起動: {mysql_host}:{mysql_port}")
-            print(f"MySQL デフォルト設定 - DB: {cls.mysql_container.dbname}, User: {cls.mysql_container.username}")
-            
-            # MySQLが完全に起動するまで待機
-            time.sleep(15)
-            
-            cls.database_configs['mysql'] = DatabaseConfig(
-                backend='mysql',
-                host=mysql_host,
-                port=int(mysql_port),
-                database=cls.mysql_container.dbname,     # testcontainersのデフォルト
-                username=cls.mysql_container.username,   # testcontainersのデフォルト
-                password=cls.mysql_container.password    # testcontainersのデフォルト
-            )
-            
-            print("MySQL接続設定完了")
-            
-        except Exception as e:
-            print(f"MySQLコンテナの起動に失敗: {e}")
-            cls.mysql_container = None
-        
-        # PostgreSQLコンテナの起動
-        try:
-            cls.postgres_container = PostgresContainer("postgres:15")
-            # testcontainersのデフォルト設定を使用（環境変数を手動設定しない）
-            cls.postgres_container.start()
-            
-            # 接続情報を取得（testcontainersのデフォルト値を使用）
-            pg_host = cls.postgres_container.get_container_host_ip()
-            pg_port = cls.postgres_container.get_exposed_port(5432)
-            
-            print(f"PostgreSQL起動: {pg_host}:{pg_port}")
-            print(f"PostgreSQL デフォルト設定 - DB: {cls.postgres_container.dbname}, User: {cls.postgres_container.username}")
-            
-            cls.database_configs['postgresql'] = DatabaseConfig(
-                backend='postgresql',
-                host=pg_host,
-                port=int(pg_port),
-                database=cls.postgres_container.dbname,    # testcontainersのデフォルト
-                username=cls.postgres_container.username,  # testcontainersのデフォルト
-                password=cls.postgres_container.password   # testcontainersのデフォルト
-            )
-            
-            # PostgreSQLが完全に起動するまで待機
-            time.sleep(8)
-            
-            print("PostgreSQL接続設定完了")
-            
-        except Exception as e:
-            print(f"PostgreSQLコンテナの起動に失敗: {e}")
-            cls.postgres_container = None
-    
-    @classmethod
-    def tearDownClass(cls):
-        """テストクラス全体の後処理"""
-        # コンテナの停止
-        if hasattr(cls, 'elasticsearch_container') and cls.elasticsearch_container:
-            cls.elasticsearch_container.stop()
-        if hasattr(cls, 'mysql_container') and cls.mysql_container:
-            cls.mysql_container.stop()
-        if hasattr(cls, 'postgres_container') and cls.postgres_container:
-            cls.postgres_container.stop()
-    
+    """複数バックエンド間での一貫性テスト（コンテナ順次起動方式）"""
+
     def setUp(self):
         """各テストの前処理"""
         self.test_song = Song(
@@ -162,7 +55,7 @@ class TestCrossBackendConsistency(unittest.TestCase):
             artist="Test Artist",
             file_path="/path/to/test.wav"
         )
-        
+
         self.test_fingerprints = [
             Fingerprint(hash_value="container_hash1", time_offset=0.1),
             Fingerprint(hash_value="container_hash2", time_offset=0.2),
@@ -170,83 +63,138 @@ class TestCrossBackendConsistency(unittest.TestCase):
             Fingerprint(hash_value="container_hash4", time_offset=0.4),
             Fingerprint(hash_value="container_hash5", time_offset=0.5),
         ]
-    
+
+    def _run_backend_operations(self, config, backend_name):
+        """単一バックエンドに対する一貫性テスト操作を実行"""
+        db = FingerprintDatabase(config)
+
+        # 楽曲追加
+        success = db.add_song(self.test_song)
+        self.assertTrue(success, f"{backend_name}での楽曲追加に失敗")
+
+        # ES はリフレッシュ待機
+        if backend_name == 'elasticsearch':
+            time.sleep(2)
+
+        # 楽曲取得
+        retrieved_song = db.get_song(self.test_song.id)
+        self.assertIsNotNone(
+            retrieved_song, f"{backend_name}での楽曲取得に失敗")
+        self.assertEqual(retrieved_song.title, self.test_song.title)
+
+        # フィンガープリント追加
+        success = db.add_fingerprints(
+            self.test_song.id, self.test_fingerprints)
+        self.assertTrue(
+            success, f"{backend_name}でのフィンガープリント追加に失敗")
+
+        if backend_name == 'elasticsearch':
+            time.sleep(2)
+
+        # フィンガープリント検索
+        query_fps = [
+            Fingerprint(hash_value="container_hash1", time_offset=0.05),
+            Fingerprint(hash_value="container_hash2", time_offset=0.15),
+        ]
+        matches = db.search_fingerprints(query_fps)
+        self.assertIn(
+            self.test_song.id, matches, f"{backend_name}での検索に失敗")
+
+        db.disconnect()
+
     def test_cross_backend_consistency(self):
-        """複数のバックエンド間での一貫性テスト"""
-        available_backends = []
-        
-        # 利用可能なバックエンドを確認
-        if hasattr(self, 'mysql_container') and self.mysql_container:
-            available_backends.append('mysql')
-        if hasattr(self, 'postgres_container') and self.postgres_container:
-            available_backends.append('postgresql')
-        if hasattr(self, 'elasticsearch_container') and self.elasticsearch_container:
-            available_backends.append('elasticsearch')
-        
-        if len(available_backends) < 2:
+        """複数バックエンド間での一貫性テスト（順次起動）"""
+        tested_count = 0
+
+        # MySQL
+        try:
+            with MySqlContainer("mysql:8.0") as mysql:
+                time.sleep(10)
+                config = DatabaseConfig(
+                    backend='mysql',
+                    host=mysql.get_container_host_ip(),
+                    port=int(mysql.get_exposed_port(3306)),
+                    database=mysql.dbname,
+                    username=mysql.username,
+                    password=mysql.password,
+                )
+                with self.subTest(backend='mysql'):
+                    self._run_backend_operations(config, 'mysql')
+                    tested_count += 1
+        except Exception as e:
+            print(f"MySQL テストスキップ: {e}")
+
+        # PostgreSQL
+        try:
+            with PostgresContainer("postgres:15") as pg:
+                time.sleep(5)
+                config = DatabaseConfig(
+                    backend='postgresql',
+                    host=pg.get_container_host_ip(),
+                    port=int(pg.get_exposed_port(5432)),
+                    database=pg.dbname,
+                    username=pg.username,
+                    password=pg.password,
+                )
+                with self.subTest(backend='postgresql'):
+                    self._run_backend_operations(config, 'postgresql')
+                    tested_count += 1
+        except Exception as e:
+            print(f"PostgreSQL テストスキップ: {e}")
+
+        # Elasticsearch
+        try:
+            with ElasticSearchContainer(
+                "elasticsearch:8.11.0"
+            ).with_env(
+                "discovery.type", "single-node"
+            ).with_env(
+                "xpack.security.enabled", "false"
+            ).with_env(
+                "xpack.security.http.ssl.enabled", "false"
+            ).with_env(
+                "ES_JAVA_OPTS", "-Xms512m -Xmx512m"
+            ).with_env(
+                "cluster.routing.allocation.disk.threshold_enabled", "false"
+            ) as es:
+                time.sleep(15)
+                config = DatabaseConfig(
+                    backend='elasticsearch',
+                    host=es.get_container_host_ip(),
+                    port=int(es.get_exposed_port(9200)),
+                    index_name='test_cross_backend',
+                )
+                with self.subTest(backend='elasticsearch'):
+                    self._run_backend_operations(config, 'elasticsearch')
+                    tested_count += 1
+        except Exception as e:
+            print(f"Elasticsearch テストスキップ: {e}")
+
+        if tested_count < 2:
             self.skipTest("一貫性テストには最低2つのバックエンドが必要です")
-        
-        # 各バックエンドで同じ操作を実行
-        for backend_name in available_backends:
-            with self.subTest(backend=backend_name):
-                config = self.database_configs[backend_name]
-                db = FingerprintDatabase(config)
-                
-                # 楽曲追加
-                success = db.add_song(self.test_song)
-                self.assertTrue(success, f"{backend_name}での楽曲追加に失敗")
-                
-                # 待機（Elasticsearchの場合）
-                if backend_name == 'elasticsearch':
-                    time.sleep(2)
-                
-                # 楽曲取得
-                retrieved_song = db.get_song(self.test_song.id)
-                self.assertIsNotNone(retrieved_song, f"{backend_name}での楽曲取得に失敗")
-                self.assertEqual(retrieved_song.title, self.test_song.title)
-                
-                # フィンガープリント追加
-                success = db.add_fingerprints(self.test_song.id, self.test_fingerprints)
-                self.assertTrue(success, f"{backend_name}でのフィンガープリント追加に失敗")
-                
-                # 待機（Elasticsearchの場合）
-                if backend_name == 'elasticsearch':
-                    time.sleep(2)
-                
-                # フィンガープリント検索
-                query_fingerprints = [
-                    Fingerprint(hash_value="container_hash1", time_offset=0.05),
-                    Fingerprint(hash_value="container_hash2", time_offset=0.15),
-                ]
-                
-                matches = db.search_fingerprints(query_fingerprints)
-                self.assertIn(self.test_song.id, matches, f"{backend_name}での検索に失敗")
-                
-                db.disconnect()
-    
+
     def test_backend_error_handling(self):
         """バックエンドのエラーハンドリングテスト"""
-        # 無効な接続設定でのテスト
         invalid_configs = [
-            DatabaseConfig(backend='mysql', host='invalid_host', port=3306, 
+            DatabaseConfig(backend='mysql', host='invalid_host', port=3306,
                           database='test', username='test', password='test'),
-            DatabaseConfig(backend='postgresql', host='invalid_host', port=5432, 
+            DatabaseConfig(backend='postgresql', host='invalid_host', port=5432,
                           database='test', username='test', password='test'),
-            DatabaseConfig(backend='elasticsearch', host='invalid_host', port=9200),
+            DatabaseConfig(backend='elasticsearch', host='invalid_host',
+                          port=9200),
         ]
-        
+
         for config in invalid_configs:
             with self.subTest(backend=config.backend):
-                # 無効な接続設定では例外が発生するか、接続に失敗するはず
                 try:
                     db = FingerprintDatabase(config)
-                    # 実際の操作を試してエラーを確認
                     try:
                         db.get_database_stats()
-                        # 到達した場合は警告メッセージを出力
-                        print(f"警告: {config.backend}で無効な接続設定が受け入れられました")
+                        print(
+                            f"警告: {config.backend}で無効な接続設定が"
+                            "受け入れられました"
+                        )
                     except Exception as op_e:
-                        # 操作レベルでエラーが発生することを確認
                         self.assertIsNotNone(op_e)
                     finally:
                         try:
@@ -254,7 +202,6 @@ class TestCrossBackendConsistency(unittest.TestCase):
                         except Exception:
                             pass
                 except Exception as e:
-                    # 初期化レベルでエラーが発生することを確認
                     self.assertIsNotNone(e)
 
 

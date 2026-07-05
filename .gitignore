@@ -234,3 +234,5 @@ temp/
 .vscode/launch.json
 
 .github/copilot-instructions.md
+
+models/*.pkl

@@ -224,6 +224,25 @@ def _print_match_results(matches: List[Dict[str, Any]], file_name: str,
             print()
 
 
+def _dominant_time_offset(
+    time_diffs: List[float], bin_width: float = 0.5,
+) -> float:
+    """時間差の最頻ビン中心を返す
+
+    短いクリップを長い全編で照合すると、全編に散る偶発一致（ノイズ）が
+    多数を占め、時間差の中央値はノイズの重心へ引っ張られて誤位置を示す。
+    最大整列クラスタ＝最頻ビンを採ることでノイズに強い代表オフセットを得る。
+    """
+    if not time_diffs:
+        return 0.0
+    from collections import Counter
+    counts = Counter(round(d / bin_width) for d in time_diffs)
+    best_bin = max(counts.items(), key=lambda kv: kv[1])[0]
+    center = best_bin * bin_width
+    near = [d for d in time_diffs if abs(d - center) <= bin_width]
+    return sum(near) / len(near) if near else center
+
+
 def _print_detailed_match_info_from_result(match_result: Dict[str, Any]) -> None:
     """マッチ結果から詳細情報を表示"""
     if 'detailed_info' not in match_result:
@@ -242,12 +261,10 @@ def _print_detailed_match_info_from_result(match_result: Dict[str, Any]) -> None
         print("      ⚠️  No match positions available")
         return
     
-    # 時間差の統計を計算
+    # 時間差から最頻オフセット（最大整列クラスタの中心）を求める
+    # 全マッチの中央値はノイズに引かれてズレるため最頻ビンを採用
     time_diffs = [pos['time_diff'] for pos in match_positions]
-    time_diffs.sort()
-    
-    # 最頻値（中央値で近似）
-    median_offset = time_diffs[len(time_diffs)//2]
+    dominant_offset = _dominant_time_offset(time_diffs)
     
     # クエリとDBの時間範囲
     query_times = [pos['query_time'] for pos in match_positions]
@@ -256,19 +273,19 @@ def _print_detailed_match_info_from_result(match_result: Dict[str, Any]) -> None
     query_start, query_end = min(query_times), max(query_times)
     db_start, db_end = min(db_times), max(db_times)
     
-    print(f"      Best time alignment: {_format_time_offset(median_offset)}")
+    print(f"      Best time alignment: {_format_time_offset(dominant_offset)}")
     print(f"      Query audio: {query_start:.1f}s - {query_end:.1f}s ({query_end-query_start:.1f}s)")
     print(f"      Database audio: {db_start:.1f}s - {db_end:.1f}s ({db_end-db_start:.1f}s)")
     
     # どの部分が一致しているかを分析
-    est_query_start_in_db = query_start + median_offset
-    est_query_end_in_db = query_end + median_offset
+    est_query_start_in_db = query_start + dominant_offset
+    est_query_end_in_db = query_end + dominant_offset
     
     print("   🎯 Match Location Analysis:")
-    if median_offset < 0:
+    if dominant_offset < 0:
         # より厳しいフィルタリングで正確なマッチクラスターを特定
         consistent_matches = [pos for pos in match_positions 
-                            if abs(pos['time_diff'] - median_offset) < 0.5]  # 0.5秒以内の誤差に厳格化
+                            if abs(pos['time_diff'] - dominant_offset) < 0.5]  # 0.5秒以内の誤差に厳格化
         
         if consistent_matches:
             consistent_db_times = [pos['db_time'] for pos in consistent_matches]
@@ -305,10 +322,10 @@ def _print_detailed_match_info_from_result(match_result: Dict[str, Any]) -> None
         print(f"      • Query covers {coverage:.1f}% of database duration")
     
     # 視覚化の追加 - マッチデータを使用
-    if median_offset < 0:
+    if dominant_offset < 0:
         # より厳しいフィルタリングでマッチクラスターを再取得
         consistent_matches = [pos for pos in match_positions 
-                            if abs(pos['time_diff'] - median_offset) < 0.5]
+                            if abs(pos['time_diff'] - dominant_offset) < 0.5]
         
         if consistent_matches:
             consistent_db_times = [pos['db_time'] for pos in consistent_matches]
@@ -322,15 +339,15 @@ def _print_detailed_match_info_from_result(match_result: Dict[str, Any]) -> None
             _print_match_visualization(query_start, query_end, db_start, db_end,
                                      est_query_start_in_db, est_query_end_in_db,
                                      actual_match_start, actual_match_end,
-                                     query_match_start, query_match_end, median_offset)
+                                     query_match_start, query_match_end, dominant_offset)
         else:
             _print_match_visualization(query_start, query_end, db_start, db_end, 
                                      est_query_start_in_db, est_query_end_in_db,
-                                     offset=median_offset)
+                                     offset=dominant_offset)
     else:
         _print_match_visualization(query_start, query_end, db_start, db_end, 
                                  est_query_start_in_db, est_query_end_in_db,
-                                 offset=median_offset)
+                                 offset=dominant_offset)
 
 
 def _print_match_visualization(query_start: float, query_end: float,

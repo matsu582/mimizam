@@ -1,8 +1,9 @@
 """
-Mimizam - Shazam風音声指紋
+Mimizam - 音声・映像指紋システム
 
 AudioFingerprinter、FingerprintDatabase、FingerprintMatcherを統合し、
 音楽の追加、検索、管理機能を提供する高レベルAPIを提供。
+VideoFingerprinterによる映像指紋機能も統合。
 """
 
 import os
@@ -14,7 +15,7 @@ import json
 
 from .audio_fingerprinter import AudioFingerprinter
 from .fingerprint_database import FingerprintDatabase, FingerprintMatcher
-from .database_base import DatabaseConfig, Song, Fingerprint
+from .database_base import DatabaseConfig, Song, Fingerprint, Video
 
 
 class Mimizam:
@@ -305,13 +306,485 @@ class Mimizam:
         """
         return self.database.get_database_stats()
     
+    # ===== 映像指紋機能 =====
+
+    def _ensure_video_system(self) -> None:
+        """映像指紋システムを遅延初期化"""
+        if not hasattr(self, '_video_fingerprinter'):
+            self._video_fingerprinter = None
+        if not hasattr(self, '_video_db'):
+            self._video_db = None
+        if not hasattr(self, '_video_config'):
+            self._video_config = None
+
+    def configure_video(
+        self,
+        scene_eval_fps: Optional[float] = None,
+        profile_frames: Optional[bool] = None,
+    ) -> None:
+        """映像指紋の実行時設定を行う
+
+        環境変数ではなく VideoFingerprintConfig のフィールドとして
+        渡す。VideoFingerprinter 生成前・生成後のどちらでも呼べる。
+
+        Args:
+            scene_eval_fps: シーン検出の評価fps（Noneで変更なし）
+            profile_frames: 処理時間内訳のログ出力（Noneで変更なし）
+        """
+        from .video_fingerprinter import VideoFingerprintConfig
+        self._ensure_video_system()
+        if self._video_config is None:
+            self._video_config = VideoFingerprintConfig()
+        if scene_eval_fps is not None:
+            self._video_config.scene_eval_fps = scene_eval_fps
+        if profile_frames is not None:
+            self._video_config.profile_frames = profile_frames
+        # 既に生成済みなら即反映（全クラスでconfigを共有）
+        vfp = self._video_fingerprinter
+        if vfp is not None:
+            vfp.config.scene_eval_fps = self._video_config.scene_eval_fps
+            vfp.config.profile_frames = self._video_config.profile_frames
+            vfp.frame_selector.config = vfp.config
+            vfp.encoder.config.scene_eval_fps = vfp.config.scene_eval_fps
+            vfp.encoder.config.profile_frames = vfp.config.profile_frames
+
+    def _get_video_fingerprinter(self):
+        """映像指紋生成器を取得（遅延インポート）"""
+        self._ensure_video_system()
+        if self._video_fingerprinter is None:
+            from .video_fingerprinter import VideoFingerprinter
+            self._video_fingerprinter = VideoFingerprinter(
+                config=self._video_config
+            )
+        return self._video_fingerprinter
+
+    def _get_video_db(
+        self,
+        db_path: Optional[str] = None,
+        config: Optional[DatabaseConfig] = None,
+    ):
+        """映像指紋DBを取得（遅延インポート、音声と同じバックエンドを使用）"""
+        self._ensure_video_system()
+        if self._video_db is None:
+            from .video_database import VideoFingerprintDatabase
+            if config is not None:
+                self._video_db = VideoFingerprintDatabase(config=config)
+            elif hasattr(self.database, 'config') and self.database.config:
+                audio_cfg = self.database.config
+                if audio_cfg.backend == 'sqlite':
+                    if db_path is None:
+                        base_dir = os.path.dirname(
+                            audio_cfg.file_path or ""
+                        )
+                        db_path = os.path.join(
+                            base_dir, "video_fingerprints.db"
+                        ) if base_dir else "video_fingerprints.db"
+                    video_cfg = DatabaseConfig(
+                        backend='sqlite', file_path=db_path,
+                    )
+                else:
+                    video_cfg = DatabaseConfig(
+                        backend=audio_cfg.backend,
+                        host=audio_cfg.host,
+                        port=audio_cfg.port,
+                        database=audio_cfg.database,
+                        username=audio_cfg.username,
+                        password=audio_cfg.password,
+                        file_path=audio_cfg.file_path,
+                        index_name=audio_cfg.index_name,
+                        ca_certs=audio_cfg.ca_certs,
+                        verify_certs=audio_cfg.verify_certs,
+                        pool_size=audio_cfg.pool_size,
+                        pool_timeout=audio_cfg.pool_timeout,
+                    )
+                self._video_db = VideoFingerprintDatabase(config=video_cfg)
+            else:
+                path = db_path or "video_fingerprints.db"
+                self._video_db = VideoFingerprintDatabase(db_path=path)
+        return self._video_db
+
+    def add_video(
+        self,
+        file_path: str,
+        title: str,
+        video_id: Optional[str] = None,
+        video_db_path: Optional[str] = None,
+    ) -> Optional[str]:
+        """
+        映像ファイルをシステムに追加
+
+        映像から指紋を生成し、データベースに保存。
+        モデルが未学習の場合は、この映像で学習も行う。
+
+        Args:
+            file_path: 映像ファイルのパス
+            title: 映像タイトル
+            video_id: 映像ID（指定しない場合は自動生成）
+            video_db_path: 映像DBファイルパス
+
+        Returns:
+            追加に成功した場合は映像ID、失敗した場合はNone
+        """
+        try:
+            if not os.path.exists(file_path):
+                raise FileNotFoundError(
+                    f"映像ファイルが見つかりません: {file_path}"
+                )
+
+            if video_id is None:
+                video_id = str(uuid.uuid4())
+
+            vfp = self._get_video_fingerprinter()
+            vdb = self._get_video_db(video_db_path)
+
+            # モデル未学習の場合はこの映像で学習
+            if not vfp.is_trained:
+                self.logger.info(
+                    "モデル未学習: この映像で学習を実行"
+                )
+                vfp.train_from_videos([file_path])
+
+            fp = vfp.fingerprint_video(file_path)
+            if fp is None:
+                self.logger.error(
+                    f"映像指紋生成失敗: {file_path}"
+                )
+                return None
+
+            # DBに保存
+            import cv2
+            cap = cv2.VideoCapture(file_path)
+            duration = cap.get(cv2.CAP_PROP_FRAME_COUNT) / max(
+                cap.get(cv2.CAP_PROP_FPS), 1
+            )
+            cap.release()
+
+            video = Video(
+                id=video_id,
+                title=title,
+                file_path=file_path,
+                duration=duration,
+                frame_count=fp.frame_count,
+            )
+            vdb.add_video(video)
+            vdb.add_frame_fingerprints(
+                video_id, fp.frame_fingerprints
+            )
+
+            # AKAZE記述子を保存（指紋再生成用）
+            if fp.raw_descriptors:
+                vdb.add_frame_descriptors(video_id, fp.raw_descriptors)
+
+            self.logger.info(
+                f"映像追加成功: {video_id} - {title}"
+            )
+            return video_id
+
+        except FileNotFoundError:
+            raise
+        except Exception as exc:
+            self.logger.error(f"映像追加エラー: {exc}")
+            return None
+
+    @staticmethod
+    def _effective_video_score(
+        frame_similarity: float,
+        match_details: Dict[str, Any],
+        votes: int,
+        floor: float = 0.2,
+    ) -> float:
+        """被覆率・票数を反映した実効的な映像スコアを算出する
+
+        frame_similarity（最良フレームのピーク類似度）だけでは、ごく僅かな
+        フレームが偶発的に高一致した候補（例: 4/84フレーム）が高評価に
+        なってしまう。クエリのどれだけが一致したかを表す被覆率(match_ratio)と
+        ANN得票率を反映し、薄い偶発一致を減点する。
+
+        strength = 0.5 * 被覆率 + 0.5 * 得票率  (いずれも0..1に正規化)
+        実効スコア = frame_similarity * (floor + (1 - floor) * strength)
+        """
+        total = match_details.get("total_frames", 0) or 0
+        coverage = match_details.get("match_ratio", 0.0) or 0.0
+        vote_ratio = min(1.0, votes / total) if total > 0 else 0.0
+        strength = 0.5 * coverage + 0.5 * vote_ratio
+        return frame_similarity * (floor + (1.0 - floor) * strength)
+
+    def search_video(
+        self,
+        query_file_path: str,
+        top_k: int = 5,
+        use_frame_matching: bool = True,
+        detect_pip: bool = True,
+        video_db_path: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """
+        映像ファイルでデータベースを検索
+
+        2段階検索:
+          1. フレーム指紋のANN近傍投票で候補映像を絞り込み
+          2. フレーム単位指紋で精密照合（時間整合区間を確認）
+          3. PiP矩形検出 → 矩形内指紋でDB検索（PiP対策）
+
+        部分クリップでも該当フレームがANNで直接引けるため、
+        25分全編に対する数分クリップの検索でも取りこぼしにくい。
+
+        Args:
+            query_file_path: 検索対象の映像ファイルパス
+            top_k: 返す結果の最大数
+            use_frame_matching: フレーム単位マッチングで精密照合するか
+            detect_pip: PiP矩形検出を行うか
+            video_db_path: 映像DBファイルパス
+
+        Returns:
+            検索結果のリスト
+        """
+        try:
+            if not os.path.exists(query_file_path):
+                raise FileNotFoundError(
+                    f"映像ファイルが見つかりません: {query_file_path}"
+                )
+
+            vfp = self._get_video_fingerprinter()
+            vdb = self._get_video_db(video_db_path)
+
+            if not vfp.is_trained:
+                self.logger.warning(
+                    "モデルが未学習です。"
+                    "先にadd_video()で映像を登録してください"
+                )
+                return []
+
+            fp = vfp.fingerprint_video(query_file_path)
+            if fp is None:
+                return []
+
+            # Step 1: フレーム指紋のANN近傍投票で候補絞り込み
+            candidates = vdb.search_frame_candidates(
+                fp.frame_fingerprints, top_k=top_k * 2
+            )
+
+            if not use_frame_matching or not candidates:
+                results = candidates[:top_k]
+            else:
+                # Step 2: フレーム単位マッチングで精密照合
+                candidate_ids = [c["video_id"] for c in candidates]
+                frame_results = vdb.search_video_with_frame_matching(
+                    fp.frame_fingerprints, candidate_ids
+                )
+
+                # 結果を統合
+                frame_map = {
+                    r["video_id"]: r for r in frame_results
+                }
+                cand_map = {c["video_id"]: c for c in candidates}
+                # フレームマッチで時間的一貫性が確認された結果のみ採用
+                results = []
+                for vid, fm in frame_map.items():
+                    cand = cand_map.get(vid, {})
+                    votes = cand.get("votes", 0)
+                    md = fm.get("match_details", {})
+                    effective = self._effective_video_score(
+                        fm["frame_similarity"], md, votes
+                    )
+                    entry = {
+                        "video_id": vid,
+                        "video_similarity": cand.get("similarity", 0.0),
+                        "video": cand.get("video"),
+                        "vote_count": votes,
+                        "frame_similarity": fm["frame_similarity"],
+                        # ランキング/統合に使う実効スコアは被覆率・票数を反映
+                        "similarity": effective,
+                    }
+                    if "match_details" in fm:
+                        entry["match_details"] = fm[
+                            "match_details"
+                        ]
+                    results.append(entry)
+
+                results.sort(
+                    key=lambda r: r["similarity"], reverse=True
+                )
+                results = results[:top_k]
+
+            # Step 3: PiP矩形検出 → 矩形内指紋でDB検索
+            if detect_pip:
+                pip_results = self._search_pip_regions(
+                    query_file_path, vfp, vdb, top_k
+                )
+                if pip_results:
+                    results = self._merge_pip_results(
+                        results, pip_results, top_k
+                    )
+
+            return results
+
+        except FileNotFoundError:
+            raise
+        except Exception as exc:
+            self.logger.error(f"映像検索エラー: {exc}")
+            return []
+
+    def _search_pip_regions(
+        self, query_path, vfp, vdb, top_k
+    ) -> List[Dict[str, Any]]:
+        """PiP矩形内の指紋でDB検索"""
+        try:
+            pip_fps = vfp.fingerprint_pip_regions(query_path)
+            if not pip_fps:
+                return []
+
+            pip_results = []
+            for region, pip_fp in pip_fps:
+                matches = vdb.search_frame_candidates(
+                    pip_fp.frame_fingerprints, top_k=top_k
+                )
+                for m in matches:
+                    m["pip_region"] = {
+                        "x": region.x, "y": region.y,
+                        "w": region.w, "h": region.h,
+                        "pip_score": region.pip_score,
+                    }
+                    m["pip_similarity"] = m["similarity"]
+                pip_results.extend(matches)
+
+            return pip_results
+        except Exception as exc:
+            self.logger.warning(f"PiP検索エラー: {exc}")
+            return []
+
+    @staticmethod
+    def _merge_pip_results(
+        base_results, pip_results, top_k
+    ) -> List[Dict[str, Any]]:
+        """通常検索結果とPiP検索結果を統合"""
+        existing_ids = {r["video_id"] for r in base_results}
+        merged = list(base_results)
+
+        for pr in pip_results:
+            vid = pr["video_id"]
+            if vid in existing_ids:
+                for r in merged:
+                    if r["video_id"] == vid:
+                        pip_sim = pr.get("pip_similarity", 0)
+                        if pip_sim > r.get("similarity", 0):
+                            r["similarity"] = pip_sim
+                            r["pip_region"] = pr.get("pip_region")
+                            r["pip_similarity"] = pip_sim
+                        break
+            else:
+                pr["similarity"] = pr.get("pip_similarity", 0)
+                merged.append(pr)
+                existing_ids.add(vid)
+
+        merged.sort(
+            key=lambda r: r.get("similarity", 0), reverse=True
+        )
+        return merged[:top_k]
+
+    def train_video_model(
+        self,
+        video_paths: List[str],
+        model_path: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        複数映像から映像指紋モデルを学習
+
+        Args:
+            video_paths: 学習用映像ファイルパスのリスト
+            model_path: モデル保存先パス（オプション）
+
+        Returns:
+            学習統計情報
+        """
+        vfp = self._get_video_fingerprinter()
+        stats = vfp.train_from_videos(video_paths)
+        if model_path:
+            vfp.save_model(model_path)
+        return stats
+
+    def load_video_model(self, model_path: str) -> None:
+        """
+        保存済み映像指紋モデルを読み込み
+
+        Args:
+            model_path: モデルファイルパス
+        """
+        vfp = self._get_video_fingerprinter()
+        vfp.load_model(model_path)
+
+    def rebuild_video_fingerprints(
+        self,
+        video_db_path: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        DB内の全映像指紋を保存済み記述子から再生成
+
+        モデル更新後に元映像なしで指紋を再計算する。
+        事前にload_video_model()で新モデルを読み込んでおくこと。
+
+        Args:
+            video_db_path: 映像DBファイルパス
+
+        Returns:
+            再生成統計: {"total": 件数, "success": 成功数, "skip": スキップ数}
+        """
+        vfp = self._get_video_fingerprinter()
+        vdb = self._get_video_db(video_db_path)
+
+        if not vfp.is_trained:
+            raise RuntimeError(
+                "モデルが未学習です。"
+                "先にload_video_model()を呼んでください"
+            )
+
+        all_desc = vdb.get_all_frame_descriptors()
+        stats = {"total": len(all_desc), "success": 0, "skip": 0}
+
+        for vid_id, frame_descs in all_desc.items():
+            if not frame_descs:
+                stats["skip"] += 1
+                self.logger.warning(
+                    f"記述子なし（スキップ）: {vid_id}"
+                )
+                continue
+
+            fp = vfp.rebuild_from_descriptors(frame_descs)
+            if fp is None:
+                stats["skip"] += 1
+                continue
+
+            vdb.add_frame_fingerprints(
+                vid_id, fp.frame_fingerprints
+            )
+            stats["success"] += 1
+            self.logger.info(
+                f"指紋再生成: {vid_id} "
+                f"({fp.frame_count}フレーム)"
+            )
+
+        self.logger.info(
+            f"指紋再生成完了: "
+            f"{stats['success']}/{stats['total']}件成功"
+        )
+        return stats
+
+    def get_video_database_stats(
+        self, video_db_path: Optional[str] = None
+    ) -> Dict[str, int]:
+        """映像指紋DBの統計情報を取得"""
+        vdb = self._get_video_db(video_db_path)
+        return vdb.get_stats()
+
     def close(self) -> None:
         """
         Mimizamシステムを終了（データベース接続を閉じる）
         """
         if hasattr(self, 'database') and self.database:
             self.database.disconnect()
-            self.logger.info("Mimizam system terminated")
+        if hasattr(self, '_video_db') and self._video_db:
+            self._video_db.close()
+            self._video_db = None
+        self.logger.info("Mimizam system terminated")
     
     def __enter__(self):
         """コンテキストマネージャーのエントリ"""
@@ -369,6 +842,39 @@ def create_mimizam_mysql(host: str, port: int, database: str,
     """
     config = DatabaseConfig(
         backend='mysql',
+        host=host,
+        port=port,
+        database=database,
+        username=username,
+        password=password
+    )
+    return Mimizam(config, fingerprinter_config, matcher_config)
+
+
+def create_mimizam_mariadb(host: str, port: int, database: str,
+                           username: str, password: str,
+                           matcher_config: Optional[Dict[str, Any]] = None,
+                           **fingerprinter_config) -> Mimizam:
+    """
+    MariaDBバックエンドを使用するMimizamインスタンスを簡単に作成
+
+    MariaDB 11.7+ ではフレーム指紋検索にネイティブベクトルANN
+    （VECTOR型 + VECTOR INDEX + VEC_DISTANCE_COSINE）が用いられる。
+
+    Args:
+        host: MariaDBサーバーのホスト
+        port: MariaDBサーバーのポート
+        database: データベース名
+        username: ユーザー名
+        password: パスワード
+        matcher_config: FingerprintMatcherの設定パラメータ
+        **fingerprinter_config: AudioFingerprinterの設定パラメータ
+
+    Returns:
+        Mimizam: 設定済みのMimizamインスタンス
+    """
+    config = DatabaseConfig(
+        backend='mariadb',
         host=host,
         port=port,
         database=database,

@@ -27,6 +27,11 @@ except ImportError:
     PostgreSQLBackend = None
 
 try:
+    from .backends.mariadb_backend import MariaDBBackend
+except ImportError:
+    MariaDBBackend = None
+
+try:
     from .backends.elasticsearch_backend import ElasticsearchBackend
 except ImportError:
     ElasticsearchBackend = None
@@ -39,6 +44,7 @@ def create_database_backend(config: DatabaseConfig) -> DatabaseBackend:
     backend_map = {
         'sqlite': SQLiteBackend,
         'mysql': MySQLBackend,
+        'mariadb': MariaDBBackend,
         'postgres': PostgreSQLBackend,
         'postgresql': PostgreSQLBackend,
         'elasticsearch': ElasticsearchBackend,
@@ -72,6 +78,7 @@ __all__ = [
     'Song',
     'SQLiteBackend',
     'MySQLBackend',
+    'MariaDBBackend',
     'PostgreSQLBackend',
     'ElasticsearchBackend',
     'create_database_backend'

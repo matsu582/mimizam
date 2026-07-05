@@ -38,6 +38,8 @@ class TestElasticsearchContainers(TestAudioMixin, unittest.TestCase):
             "xpack.security.http.ssl.enabled", "false"
         ).with_env(
             "ES_JAVA_OPTS", "-Xms512m -Xmx512m"
+        ).with_env(
+            "cluster.routing.allocation.disk.threshold_enabled", "false"
         ) as elasticsearch:
             es_host = elasticsearch.get_container_host_ip()
             es_port = elasticsearch.get_exposed_port(9200)
@@ -149,6 +151,8 @@ class TestElasticsearchContainers(TestAudioMixin, unittest.TestCase):
             "xpack.security.http.ssl.enabled", "false"
         ).with_env(
             "ES_JAVA_OPTS", "-Xms512m -Xmx512m"
+        ).with_env(
+            "cluster.routing.allocation.disk.threshold_enabled", "false"
         ) as elasticsearch:
             config = self._create_elasticsearch_config(elasticsearch, "basic")
             
@@ -234,6 +238,8 @@ class TestElasticsearchContainers(TestAudioMixin, unittest.TestCase):
             "xpack.security.http.ssl.enabled", "false"
         ).with_env(
             "ES_JAVA_OPTS", "-Xms512m -Xmx512m"
+        ).with_env(
+            "cluster.routing.allocation.disk.threshold_enabled", "false"
         ) as elasticsearch:
             config = self._create_elasticsearch_config(elasticsearch, "search")
             
@@ -310,6 +316,8 @@ class TestElasticsearchContainers(TestAudioMixin, unittest.TestCase):
             "xpack.security.http.ssl.enabled", "false"
         ).with_env(
             "ES_JAVA_OPTS", "-Xms512m -Xmx512m"
+        ).with_env(
+            "cluster.routing.allocation.disk.threshold_enabled", "false"
         ) as elasticsearch:
             config = self._create_elasticsearch_config(elasticsearch, "performance")
             
@@ -395,6 +403,8 @@ class TestElasticsearchContainers(TestAudioMixin, unittest.TestCase):
             "xpack.security.http.ssl.enabled", "false"
         ).with_env(
             "ES_JAVA_OPTS", "-Xms512m -Xmx512m"
+        ).with_env(
+            "cluster.routing.allocation.disk.threshold_enabled", "false"
         ) as elasticsearch:
             
             config = self._create_elasticsearch_config(elasticsearch, "backend_test")
@@ -482,6 +492,8 @@ class TestElasticsearchContainers(TestAudioMixin, unittest.TestCase):
             "xpack.security.http.ssl.enabled", "false"
         ).with_env(
             "ES_JAVA_OPTS", "-Xms512m -Xmx512m"
+        ).with_env(
+            "cluster.routing.allocation.disk.threshold_enabled", "false"
         ) as elasticsearch:
             
             config = self._create_elasticsearch_config(elasticsearch, "large_data_test")
@@ -547,6 +559,8 @@ class TestElasticsearchContainers(TestAudioMixin, unittest.TestCase):
             "xpack.security.http.ssl.enabled", "false"
         ).with_env(
             "ES_JAVA_OPTS", "-Xms512m -Xmx512m"
+        ).with_env(
+            "cluster.routing.allocation.disk.threshold_enabled", "false"
         ) as elasticsearch:
             
             # Elasticsearch起動待機
@@ -658,6 +672,8 @@ class TestElasticsearchContainers(TestAudioMixin, unittest.TestCase):
             "xpack.security.http.ssl.enabled", "false"
         ).with_env(
             "ES_JAVA_OPTS", "-Xms512m -Xmx512m"
+        ).with_env(
+            "cluster.routing.allocation.disk.threshold_enabled", "false"
         ) as elasticsearch:
             
             es_host = elasticsearch.get_container_host_ip()
@@ -730,6 +746,8 @@ class TestElasticsearchContainers(TestAudioMixin, unittest.TestCase):
             "xpack.security.http.ssl.enabled", "false"
         ).with_env(
             "ES_JAVA_OPTS", "-Xms512m -Xmx512m"
+        ).with_env(
+            "cluster.routing.allocation.disk.threshold_enabled", "false"
         ) as elasticsearch:
             
             es_host = elasticsearch.get_container_host_ip()

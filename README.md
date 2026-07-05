@@ -1,6 +1,6 @@
 # mimizam
 
-**mimizam** is a Python implementation of Shazam-like algorithms for audio fingerprinting and identification. It generates unique fingerprints from audio and performs high-precision music identification by matching against a database.
+**mimizam** is a Python implementation for audio fingerprinting and video fingerprinting. Audio uses Shazam-like algorithms to generate unique fingerprints, while video generates per-frame fingerprints using AKAZE features + VLAD + PCA. Both achieve high-precision identification by matching against a database.
 
 [![Python](https://img.shields.io/badge/python-3.9+-blue.svg)](https://python.org)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
@@ -9,8 +9,10 @@
 ## Key Features
 
 - **High-Precision Audio Fingerprinting**: Robust fingerprint generation based on Shazam algorithms
+- **Video Fingerprinting**: Per-frame fingerprints via AKAZE features + VLAD + PCA, with partial-clip search using per-frame ANN voting
+- **Combined Audio + Video Search**: Evaluates audio and video matches with a unified score (with position-divergence checking)
 - **Adaptive Parameter Optimization**: Automatic parameter adjustment based on audio characteristics
-- **Multi-Database Support**: SQLite, MySQL, PostgreSQL, Elasticsearch
+- **Multi-Database Support**: SQLite, MySQL, MariaDB, PostgreSQL, Elasticsearch (video-fingerprint ANN uses sqlite-vec / pgvector / Elasticsearch dense_vector / MariaDB native VECTOR)
 - **Real-time Audio Recognition**: Instantly identify songs from short audio clips
 - **Visualization**: Spectrogram and peak detection visualization
 
@@ -29,6 +31,10 @@ pip install -r requirements.txt
 # Install package (development mode)
 pip install -e .
 ```
+
+The dependencies required for video fingerprinting (`opencv-contrib-python` / `scikit-learn` / `scenedetect`) are included as core dependencies. `sqlite-vec`, required for ANN in the default SQLite backend, is also a core dependency.
+
+> **About OpenCV**: Video fingerprinting uses AKAZE, so `opencv-contrib-python` is required (do not install `opencv-python`, which conflicts with it). AKAZE is exposed as `cv2.AKAZE_create` on OpenCV 4.x and `cv2.xfeatures2d.AKAZE_create` on OpenCV 5.x; mimizam supports both.
 
 ### Basic Usage
 
@@ -55,6 +61,35 @@ with create_mimizam_sqlite("my_music.db") as mimizam:
         print(f"Identified: {song.title} (Confidence: {confidence:.2%})")
 ```
 
+### Basic Video Usage
+
+```python
+from mimizam import create_mimizam_sqlite
+
+with create_mimizam_sqlite("my_media.db") as mimizam:
+    # Configure video fingerprinting at runtime (as a class feature, not env vars)
+    mimizam.configure_video(scene_eval_fps=4.0, profile_frames=False)
+
+    # Register a video (the first video also trains the codebook/PCA model)
+    video_id = mimizam.add_video("path/to/video.mp4", "My Video")
+
+    # Search by video (per-frame ANN voting -> precise matching, with PiP detection)
+    results = mimizam.search_video("path/to/clip.mp4", top_k=5)
+    for result in results:
+        print(result)
+```
+
+CLI tools that use the pretrained codebook model (`model/codebook_model.pki`) are also bundled.
+
+```bash
+# Register a video (registers combined audio + video fingerprints)
+python examples/movie_fingerprinter.py path/to/video.mp4 --database ./media.db
+
+# Combined search by video (audio + video)
+python examples/movie_search.py -D -k 10 -m ./model/codebook_model.pki \
+    path/to/clip.mp4 --database ./media.db
+```
+
 ### Running Demos
 
 ```bash
@@ -74,6 +109,13 @@ python examples/mimizam_demo.py
 3. **Hash-based Fingerprinting**: SHA-256 hash generation from anchor-target peak pairs
 4. **Intelligent Matching**: Time alignment and confidence scoring
 
+### Video Fingerprinting
+
+1. **Scene / Keyframe Selection**: Detect cuts with PySceneDetect (`ContentDetector`) over frames evaluated at `scene_eval_fps`, plus periodic sampling
+2. **AKAZE Feature Extraction**: Extract local AKAZE (MLDB) descriptors per keyframe (`opencv-contrib-python` required). AKAZE is chosen because it is robust to rotation/scale/brightness changes (re-encoding, PiP downscaling), its nonlinear diffusion scale space preserves edges even under compression blur, its binary MLDB descriptor is compact and fast to match at the scale of ~1M descriptors per 1,000 frames, it is license-unencumbered and available on both OpenCV 4.x/5.x, and as a classical CV algorithm it runs on CPU only (no GPU or deep-learning model weights required, unlike ALIKED/DISK/LightGlue). See [the spec](docs/video_fingerprint_spec.md) for the full rationale.
+3. **VLAD + PCA Encoding**: Aggregate descriptors into a per-frame fingerprint via VLAD over a learned codebook, then reduce dimensionality with PCA
+4. **Per-frame ANN Voting**: Each query frame retrieves nearest neighbors via the backend's vector ANN, aggregating votes/similarity per video; then precise matching confirms a time-aligned segment (with PiP rectangle detection)
+
 ## Database Backends
 
 mimizam supports multiple databases:
@@ -82,30 +124,39 @@ mimizam supports multiple databases:
 from mimizam import (
     create_mimizam_sqlite,
     create_mimizam_mysql,
+    create_mimizam_mariadb,
     create_mimizam_postgresql,
     create_mimizam_elasticsearch
 )
 
-# SQLite (Simple・Fast・Recommended)
+# SQLite (Simple・Fast・Recommended; video ANN via sqlite-vec)
 mimizam = create_mimizam_sqlite("fingerprints.db")
 
-# MySQL (Scalability)
+# MySQL (Scalability; video ANN via brute-force)
 mimizam = create_mimizam_mysql(
     host="localhost", database="music_db",
     username="user", password="pass"
 )
 
-# PostgreSQL (High Performance)
+# MariaDB (video ANN via native VECTOR index on 11.7+)
+mimizam = create_mimizam_mariadb(
+    host="localhost", database="music_db",
+    username="user", password="pass"
+)
+
+# PostgreSQL (High Performance; video ANN via pgvector)
 mimizam = create_mimizam_postgresql(
     host="localhost", database="music_db",
     username="user", password="pass"
 )
 
-# Elasticsearch (Distributed Search)
+# Elasticsearch (Distributed Search; video ANN via dense_vector kNN)
 mimizam = create_mimizam_elasticsearch(
     host="localhost", index_name="music_index"
 )
 ```
+
+For video-fingerprint frame ANN search, SQLite uses `sqlite-vec`, PostgreSQL uses `pgvector`, Elasticsearch uses `dense_vector`, and MariaDB uses a native `VECTOR` index. MySQL has no native ANN index, so it falls back to full brute-force while returning the same result format.
 
 ## Project Structure
 
@@ -118,14 +169,21 @@ mimizam/
 │   ├── database_backends.py          # Unified backend
 │   ├── adaptive_parameters.py        # Adaptive parameter adjustment
 │   └── backends/                     # Individual backend implementations
+│   ├── video_fingerprinter.py        # Video fingerprint generation (AKAZE+VLAD+PCA)
+│   ├── video_database.py             # Video fingerprint database
+│   ├── pip_detector.py               # PiP (picture-in-picture) rectangle detection
+│   └── backends/                     # Individual backend implementations (sqlite/mysql/mariadb/postgresql/elasticsearch)
 ├── examples/
-│   ├── mimizam_demo.py               # API demo
-│   ├── video_search.py               # Video audio search
-│   └── video_fingerprinter.py        # Video audio processing
+│   ├── mimizam_demo.py               # Audio API demo
+│   ├── movie_fingerprinter.py        # Combined audio + video registration CLI
+│   ├── movie_search.py               # Combined audio + video search CLI
+│   ├── video_fingerprinter.py        # Extract audio from video and create audio fingerprints
+│   └── video_search.py               # Video audio search
+├── model/                            # Pretrained codebook model
 ├── test_media/                       # Demo audio files
 ├── tests/                           # Test suite
 ├── docs/                            # Documentation
-└── scripts/                         # Utilities
+└── scripts/                         # Utilities (model training, DB migration, etc.)
 ```
 
 ## Use Cases
@@ -197,6 +255,7 @@ python run_tests.py
 
 Detailed documentation is included in the `docs/` directory:
 
+- [Video Fingerprint Specification](docs/video_fingerprint_spec.md)
 - [Database Setup](docs/DATABASE_SETUP.md)
 - [Fingerprint Generation Details](docs/fingerprint_generation_details.md)
 - [Fingerprint Scoring Details](docs/fingerprint_scoring_details.md)

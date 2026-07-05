@@ -584,17 +584,22 @@ class FingerprintMatcher:
         """
         if not match_pairs:
             return 0.0
-        
-        # 時間差を計算
-        time_diffs = [query_time - db_time for query_time, db_time in match_pairs]
-        
-        # オフセットとして中央値の時間差を返す
-        time_diffs.sort()
+
+        # 全ペアの中央値は、短いクエリを長い全編で照合した際に全編へ散る
+        # 偶発一致（ノイズ）に引かれて誤位置を示す。時間的に一貫した最大
+        # クラスタ（最大整列グループ）の中央値を代表オフセットとして採る。
+        aligned_groups = self._find_time_aligned_matches(
+            match_pairs, self.time_tolerance
+        )
+        target = max(aligned_groups, key=len) if aligned_groups else match_pairs
+
+        time_diffs = sorted(
+            query_time - db_time for query_time, db_time in target
+        )
         n = len(time_diffs)
         if n % 2 == 0:
-            return (time_diffs[n//2 - 1] + time_diffs[n//2]) / 2
-        else:
-            return time_diffs[n//2]
+            return (time_diffs[n // 2 - 1] + time_diffs[n // 2]) / 2
+        return time_diffs[n // 2]
     
     def identify_audio(self, query_fingerprints: List[Fingerprint], 
                       confidence_threshold: float = 0.1) -> Optional[Tuple[Song, float]]:

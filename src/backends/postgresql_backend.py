@@ -1,7 +1,7 @@
 """PostgreSQLデータベースバックエンド実装"""
 
 from typing import List, Optional, Dict, Tuple
-from ..database_base import DatabaseBackend, DatabaseConfig, Song, Fingerprint
+from ..database_base import DatabaseBackend, DatabaseConfig, Song, Video, Fingerprint
 from ..exceptions import ConnectionError, QueryError
 import json
 
@@ -19,6 +19,7 @@ class PostgreSQLBackend(DatabaseBackend):
     def __init__(self, config: DatabaseConfig):
         super().__init__(config)
         self.connection = None
+        self._pgvector_available = False
     
     def connect(self) -> bool:
         """PostgreSQLデータベースに接続"""
@@ -64,6 +65,17 @@ class PostgreSQLBackend(DatabaseBackend):
             except PostgresError as optimize_error:
                 # 最適化設定でエラーが発生した場合は警告のみ出力
                 self.logger.warning(f"PostgreSQL optimization setting error: {optimize_error}")
+            
+            # pgvector拡張の有効化
+            self._pgvector_available = False
+            try:
+                cursor.execute("CREATE EXTENSION IF NOT EXISTS vector")
+                self._pgvector_available = True
+                self.logger.info("pgvector拡張を有効化しました")
+            except PostgresError as e:
+                self.logger.info(
+                    f"pgvector未検出（音声のみ利用可、映像指紋には必須）: {e}"
+                )
             
             cursor.close()
             
@@ -330,3 +342,310 @@ class PostgreSQLBackend(DatabaseBackend):
             self.logger.error(f"PostgreSQL fingerprint retrieval error: {e}")
         
         return fingerprints
+
+    # ===== 映像指紋メソッド =====
+
+    def _ensure_pgvector_frame_column(self, dimensions: int) -> bool:
+        """frame_fingerprintsテーブルにpgvector列とHNSW索引を追加
+
+        L2正規化済みフレーム指紋をvector型で保持し、cosine距離のHNSW索引で
+        近傍検索できるようにする（フレームANN投票の索引）。
+        """
+        if not self._pgvector_available:
+            return False
+        try:
+            cursor = self.connection.cursor()
+            cursor.execute(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_name = 'frame_fingerprints' "
+                "AND column_name = 'embedding'"
+            )
+            if cursor.fetchone() is None:
+                cursor.execute(
+                    f"ALTER TABLE frame_fingerprints "
+                    f"ADD COLUMN embedding vector({dimensions})"
+                )
+                cursor.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_frame_fp_embedding "
+                    "ON frame_fingerprints "
+                    "USING hnsw (embedding vector_cosine_ops)"
+                )
+            cursor.close()
+            return True
+        except Exception as e:
+            self.logger.warning(f"pgvectorフレーム列追加エラー: {e}")
+            return False
+
+    @staticmethod
+    def _vec_literal(fp_blob: bytes) -> str:
+        """float32バイト列をpgvectorのベクトルリテラルへ変換"""
+        import numpy as np
+        vec = np.frombuffer(fp_blob, dtype=np.float32)
+        return '[' + ','.join(str(float(x)) for x in vec) + ']'
+
+    def search_frame_candidates(
+        self, query_fps: List[bytes], dimensions: int,
+        k_per_query: int = 10, sim_threshold: float = 0.4,
+    ) -> Dict[str, Dict[str, float]]:
+        """クエリ各フレームのANN近傍を引き、映像別に得票/類似度を集計
+
+        戻り値: {video_id: {"votes": 得票数, "score_sum": 類似度合計}}
+        """
+        agg: Dict[str, Dict[str, float]] = {}
+        if not query_fps:
+            return agg
+        if not self._pgvector_available or not \
+                self._ensure_pgvector_frame_column(dimensions):
+            raise QueryError(
+                "pgvector拡張が必要です（映像指紋にはpgvectorが必須）"
+            )
+        try:
+            cursor = self.connection.cursor()
+            # recall/速度のトレードオフ調整
+            cursor.execute(
+                "SET LOCAL hnsw.ef_search = %s",
+                (max(k_per_query * 4, 40),),
+            )
+            for q_blob in query_fps:
+                vec_str = self._vec_literal(q_blob)
+                cursor.execute(
+                    """SELECT video_id,
+                              1.0 - (embedding <=> %s::vector) AS sim
+                       FROM frame_fingerprints
+                       WHERE embedding IS NOT NULL
+                       ORDER BY embedding <=> %s::vector
+                       LIMIT %s""",
+                    (vec_str, vec_str, k_per_query),
+                )
+                for vid_id, sim in cursor.fetchall():
+                    sim = float(sim)
+                    if sim < sim_threshold:
+                        continue
+                    slot = agg.setdefault(
+                        vid_id, {"votes": 0.0, "score_sum": 0.0}
+                    )
+                    slot["votes"] += 1.0
+                    slot["score_sum"] += sim
+            cursor.close()
+            return agg
+        except QueryError:
+            raise
+        except Exception as e:
+            self.logger.error(f"pgvectorフレーム検索エラー: {e}")
+            return agg
+
+    def _create_video_tables(self) -> bool:
+        """映像指紋テーブルを作成"""
+        try:
+            cursor = self.connection.cursor()
+
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS videos (
+                    id VARCHAR(255) PRIMARY KEY,
+                    title TEXT NOT NULL,
+                    file_path TEXT NOT NULL,
+                    duration DOUBLE PRECISION,
+                    frame_count INTEGER,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS frame_fingerprints (
+                    id BIGSERIAL PRIMARY KEY,
+                    video_id VARCHAR(255) NOT NULL,
+                    frame_index INTEGER NOT NULL,
+                    timestamp DOUBLE PRECISION NOT NULL,
+                    fingerprint BYTEA NOT NULL,
+                    FOREIGN KEY (video_id) REFERENCES videos (id)
+                        ON DELETE CASCADE
+                )
+            """)
+
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_frame_fp_video
+                ON frame_fingerprints (video_id)
+            """)
+
+            return True
+        except PostgresError as e:
+            self.logger.error(f"PostgreSQL video table creation error: {e}")
+            return False
+
+    def add_video(self, video: Video) -> bool:
+        """PostgreSQLに映像メタデータを追加"""
+        try:
+            self._create_video_tables()
+            cursor = self.connection.cursor()
+            cursor.execute(
+                """INSERT INTO videos
+                    (id, title, file_path, duration, frame_count)
+                VALUES (%s, %s, %s, %s, %s)
+                ON CONFLICT (id) DO UPDATE SET
+                    title = EXCLUDED.title,
+                    file_path = EXCLUDED.file_path,
+                    duration = EXCLUDED.duration,
+                    frame_count = EXCLUDED.frame_count""",
+                (video.id, video.title, video.file_path,
+                 video.duration, video.frame_count),
+            )
+            return True
+        except PostgresError as e:
+            self.logger.error(f"PostgreSQL video addition error: {e}")
+            return False
+
+    def add_frame_fingerprints(
+        self, video_id: str,
+        frames: List[Tuple[int, float, bytes]],
+    ) -> bool:
+        """PostgreSQLにフレーム単位指紋を一括保存"""
+        try:
+            self._create_video_tables()
+            cursor = self.connection.cursor()
+            cursor.execute(
+                "DELETE FROM frame_fingerprints WHERE video_id = %s",
+                (video_id,),
+            )
+            if not frames:
+                return True
+            dims = len(frames[0][2]) // 4  # float32バイト列 → 次元数
+            if not self._pgvector_available or not \
+                    self._ensure_pgvector_frame_column(dims):
+                raise QueryError(
+                    "pgvector拡張が必要です（映像指紋にはpgvectorが必須）"
+                )
+            rows = [
+                (video_id, fidx, float(ts), fp_blob,
+                 self._vec_literal(fp_blob))
+                for fidx, ts, fp_blob in frames
+            ]
+            cursor.executemany(
+                """INSERT INTO frame_fingerprints
+                    (video_id, frame_index, timestamp,
+                     fingerprint, embedding)
+                VALUES (%s, %s, %s, %s, %s::vector)""",
+                rows,
+            )
+            return True
+        except PostgresError as e:
+            self.logger.error(f"PostgreSQL frame fingerprint save error: {e}")
+            return False
+
+    def get_frame_fingerprints(
+        self, video_id: str,
+    ) -> List[Tuple[int, float, bytes]]:
+        """PostgreSQLから指定映像のフレーム指紋を取得"""
+        try:
+            self._create_video_tables()
+            cursor = self.connection.cursor()
+            cursor.execute(
+                """SELECT frame_index, timestamp, fingerprint
+                   FROM frame_fingerprints WHERE video_id = %s""",
+                (video_id,),
+            )
+            return [
+                (int(fidx), float(ts), bytes(fp_blob))
+                for fidx, ts, fp_blob in cursor.fetchall()
+            ]
+        except PostgresError as e:
+            self.logger.error(f"PostgreSQL frame fingerprint retrieval error: {e}")
+            return []
+
+    def get_frame_fingerprints_batch(
+        self, video_ids: List[str],
+    ) -> Dict[str, List[Tuple[int, float, bytes]]]:
+        """PostgreSQLから複数映像のフレーム指紋を1クエリで一括取得"""
+        result: Dict[str, List[Tuple[int, float, bytes]]] = {
+            vid: [] for vid in video_ids
+        }
+        if not video_ids:
+            return result
+        try:
+            self._create_video_tables()
+            cursor = self.connection.cursor()
+            cursor.execute(
+                """SELECT video_id, frame_index, timestamp, fingerprint
+                   FROM frame_fingerprints
+                   WHERE video_id = ANY(%s)""",
+                (list(video_ids),),
+            )
+            for vid, fidx, ts, fp_blob in cursor.fetchall():
+                result[vid].append(
+                    (int(fidx), float(ts), bytes(fp_blob))
+                )
+        except PostgresError as e:
+            self.logger.error(
+                f"PostgreSQL frame fingerprint batch retrieval error: {e}"
+            )
+        return result
+
+    def get_video(self, video_id: str) -> Optional[Video]:
+        """PostgreSQLから映像情報を取得"""
+        try:
+            self._create_video_tables()
+            cursor = self.connection.cursor()
+            cursor.execute(
+                """SELECT id, title, file_path, duration, frame_count,
+                          created_at
+                   FROM videos WHERE id = %s""",
+                (video_id,),
+            )
+            row = cursor.fetchone()
+            if row:
+                return Video(
+                    id=row[0], title=row[1], file_path=row[2],
+                    duration=row[3], frame_count=row[4],
+                    created_at=str(row[5]) if row[5] else None,
+                )
+        except PostgresError as e:
+            self.logger.error(f"PostgreSQL video retrieval error: {e}")
+        return None
+
+    def list_videos(self) -> List[Video]:
+        """PostgreSQLから全映像をリスト取得"""
+        try:
+            self._create_video_tables()
+            cursor = self.connection.cursor()
+            cursor.execute(
+                """SELECT id, title, file_path, duration, frame_count,
+                          created_at
+                   FROM videos ORDER BY title"""
+            )
+            return [
+                Video(
+                    id=r[0], title=r[1], file_path=r[2],
+                    duration=r[3], frame_count=r[4],
+                    created_at=str(r[5]) if r[5] else None,
+                )
+                for r in cursor.fetchall()
+            ]
+        except PostgresError as e:
+            self.logger.error(f"PostgreSQL video list retrieval error: {e}")
+            return []
+
+    def delete_video(self, video_id: str) -> bool:
+        """PostgreSQLから映像と関連指紋を削除"""
+        try:
+            self._create_video_tables()
+            cursor = self.connection.cursor()
+            cursor.execute(
+                "DELETE FROM videos WHERE id = %s", (video_id,)
+            )
+            return True
+        except PostgresError as e:
+            self.logger.error(f"PostgreSQL video deletion error: {e}")
+            return False
+
+    def get_video_stats(self) -> Dict[str, int]:
+        """PostgreSQLの映像指紋統計を取得"""
+        stats = {"videos": 0, "frame_fingerprints": 0}
+        try:
+            self._create_video_tables()
+            cursor = self.connection.cursor()
+            cursor.execute("SELECT COUNT(*) FROM videos")
+            stats["videos"] = cursor.fetchone()[0]
+            cursor.execute("SELECT COUNT(*) FROM frame_fingerprints")
+            stats["frame_fingerprints"] = cursor.fetchone()[0]
+        except PostgresError as e:
+            self.logger.error(f"PostgreSQL video statistics error: {e}")
+        return stats

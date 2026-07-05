@@ -30,6 +30,17 @@ class Song:
 
 
 @dataclass
+class Video:
+    """データベース内の映像を表現"""
+    id: str
+    title: str
+    file_path: str
+    duration: Optional[float] = None
+    frame_count: Optional[int] = None
+    created_at: Optional[str] = None
+
+
+@dataclass
 class DatabaseConfig:
     """データベース接続設定"""
     backend: str  # 'sqlite', 'mysql', 'postgres', 'elasticsearch'
@@ -152,11 +163,90 @@ class DatabaseBackend(ABC):
         """指定した楽曲のフィンガープリントを取得。致命的エラー時は例外を投げる可能性がある。"""
         pass
 
+    # ===== 映像指紋メソッド =====
+    # デフォルト実装はNotImplementedError。各バックエンドで上書きして使用。
+
+    def add_video(self, video: 'Video') -> bool:
+        """映像メタデータを追加"""
+        raise NotImplementedError("このバックエンドは映像指紋に未対応です")
+
+    def add_frame_fingerprints(
+        self, video_id: str,
+        frames: List[Tuple[int, float, bytes]]
+    ) -> bool:
+        """フレーム単位指紋を一括保存（各要素は(frame_index, timestamp, fp_bytes)）"""
+        raise NotImplementedError("このバックエンドは映像指紋に未対応です")
+
+    def search_frame_candidates(
+        self, query_fps: List[bytes], dimensions: int,
+        k_per_query: int = 10, sim_threshold: float = 0.4
+    ) -> Dict[str, Dict[str, float]]:
+        """クエリ各フレームのANN近傍から映像別の得票・類似度を集計
+
+        戻り値: {video_id: {"votes": 得票数, "score_sum": 類似度合計}}
+        """
+        raise NotImplementedError("このバックエンドは映像指紋に未対応です")
+
+    def get_frame_fingerprints(
+        self, video_id: str
+    ) -> List[Tuple[int, float, bytes]]:
+        """指定映像のフレーム指紋を取得"""
+        raise NotImplementedError("このバックエンドは映像指紋に未対応です")
+
+    def get_frame_fingerprints_batch(
+        self, video_ids: List[str]
+    ) -> Dict[str, List[Tuple[int, float, bytes]]]:
+        """複数映像のフレーム指紋をまとめて取得
+
+        デフォルトは個別取得へのフォールバック。
+        リモートDBのバックエンドは1クエリ実装でオーバーライドする。
+        """
+        return {
+            vid: self.get_frame_fingerprints(vid)
+            for vid in video_ids
+        }
+
+    def get_video(self, video_id: str) -> Optional['Video']:
+        """映像情報を取得"""
+        raise NotImplementedError("このバックエンドは映像指紋に未対応です")
+
+    def list_videos(self) -> List['Video']:
+        """全映像をリスト取得"""
+        raise NotImplementedError("このバックエンドは映像指紋に未対応です")
+
+    def delete_video(self, video_id: str) -> bool:
+        """映像と関連指紋を削除"""
+        raise NotImplementedError("このバックエンドは映像指紋に未対応です")
+
+    def add_frame_descriptors(
+        self, video_id: str,
+        frames: List[Tuple[int, float, bytes, int]],
+    ) -> bool:
+        """フレーム単位AKAZE記述子を保存（再生成用）"""
+        raise NotImplementedError("このバックエンドは映像指紋に未対応です")
+
+    def get_frame_descriptors(
+        self, video_id: str,
+    ) -> List[Tuple[int, float, bytes, int]]:
+        """指定映像のフレーム記述子を取得"""
+        raise NotImplementedError("このバックエンドは映像指紋に未対応です")
+
+    def get_all_frame_descriptors(
+        self,
+    ) -> Dict[str, List[Tuple[int, float, bytes, int]]]:
+        """全映像のフレーム記述子を取得"""
+        raise NotImplementedError("このバックエンドは映像指紋に未対応です")
+
+    def get_video_stats(self) -> Dict[str, int]:
+        """映像指紋の統計を取得"""
+        raise NotImplementedError("このバックエンドは映像指紋に未対応です")
+
 
 # エクスポートするシンボルを定義
 __all__ = [
     'Fingerprint',
     'Song',
+    'Video',
     'DatabaseConfig',
     'DatabaseBackend'
 ]
