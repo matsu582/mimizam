@@ -816,6 +816,39 @@ def create_mimizam_mysql(host: str, port: int, database: str,
     return Mimizam(config, fingerprinter_config, matcher_config)
 
 
+def create_mimizam_mariadb(host: str, port: int, database: str,
+                           username: str, password: str,
+                           matcher_config: Optional[Dict[str, Any]] = None,
+                           **fingerprinter_config) -> Mimizam:
+    """
+    MariaDBバックエンドを使用するMimizamインスタンスを簡単に作成
+
+    MariaDB 11.7+ ではフレーム指紋検索にネイティブベクトルANN
+    （VECTOR型 + VECTOR INDEX + VEC_DISTANCE_COSINE）が用いられる。
+
+    Args:
+        host: MariaDBサーバーのホスト
+        port: MariaDBサーバーのポート
+        database: データベース名
+        username: ユーザー名
+        password: パスワード
+        matcher_config: FingerprintMatcherの設定パラメータ
+        **fingerprinter_config: AudioFingerprinterの設定パラメータ
+
+    Returns:
+        Mimizam: 設定済みのMimizamインスタンス
+    """
+    config = DatabaseConfig(
+        backend='mariadb',
+        host=host,
+        port=port,
+        database=database,
+        username=username,
+        password=password
+    )
+    return Mimizam(config, fingerprinter_config, matcher_config)
+
+
 def create_mimizam_postgresql(host: str, port: int, database: str, 
                              username: str, password: str, 
                              matcher_config: Optional[Dict[str, Any]] = None,
