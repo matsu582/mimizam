@@ -453,7 +453,8 @@ class MySQLBackend(DatabaseBackend):
                     descriptor_count INT DEFAULT 0,
                     FOREIGN KEY (video_id) REFERENCES videos (id)
                         ON DELETE CASCADE
-                ) ENGINE=InnoDB
+                ) ENGINE=InnoDB CHARACTER SET=utf8mb4
+                  COLLATE=utf8mb4_unicode_ci
             """)
 
             cursor.execute("""
@@ -466,7 +467,8 @@ class MySQLBackend(DatabaseBackend):
                     INDEX idx_frame_fp_video (video_id),
                     FOREIGN KEY (video_id) REFERENCES videos (id)
                         ON DELETE CASCADE
-                ) ENGINE=InnoDB
+                ) ENGINE=InnoDB CHARACTER SET=utf8mb4
+                  COLLATE=utf8mb4_unicode_ci
             """)
 
             return True
