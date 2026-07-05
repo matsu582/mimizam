@@ -634,6 +634,11 @@ class ElasticsearchBackend(DatabaseBackend):
                 "frame_index": {"type": "integer"},
                 "timestamp": {"type": "double"},
                 "fingerprint": {"type": "binary"},
+                "embedding": {
+                    "type": "dense_vector",
+                    "index": True,
+                    "similarity": "cosine",
+                },
             }},
         }
 
@@ -657,6 +662,21 @@ class ElasticsearchBackend(DatabaseBackend):
                 pass
 
             self._create_index_if_missing(ffp_idx, ffp_body)
+
+            # 既存フレームインデックスにもembeddingフィールドを追加
+            try:
+                self.client.indices.put_mapping(
+                    index=ffp_idx,
+                    body={"properties": {
+                        "embedding": {
+                            "type": "dense_vector",
+                            "index": True,
+                            "similarity": "cosine",
+                        },
+                    }},
+                )
+            except ElasticsearchException:
+                pass
         except ElasticsearchException as e:
             self.logger.error(
                 f"Elasticsearch video index creation error: {e}"
@@ -717,6 +737,7 @@ class ElasticsearchBackend(DatabaseBackend):
     ) -> bool:
         """Elasticsearchにフレーム単位指紋を一括保存"""
         import base64
+        import numpy as np
         try:
             self._ensure_video_indices()
             self.client.delete_by_query(
@@ -725,6 +746,10 @@ class ElasticsearchBackend(DatabaseBackend):
             )
             actions = []
             for fidx, ts, fp_blob in frames:
+                # L2正規化済みフレーム指紋をdense_vectorとして格納しANN検索に用いる
+                embedding = np.frombuffer(
+                    fp_blob, dtype=np.float32
+                ).tolist()
                 actions.append({
                     "_index": self._frame_fp_index,
                     "_source": {
@@ -732,6 +757,7 @@ class ElasticsearchBackend(DatabaseBackend):
                         "frame_index": fidx,
                         "timestamp": float(ts),
                         "fingerprint": base64.b64encode(fp_blob).decode(),
+                        "embedding": embedding,
                     },
                 })
             if actions:
@@ -749,6 +775,120 @@ class ElasticsearchBackend(DatabaseBackend):
                 f"Elasticsearch frame fingerprint save error: {e}"
             )
             return False
+
+    def search_frame_candidates(
+        self, query_fps: List[bytes], dimensions: int,
+        k_per_query: int = 10, sim_threshold: float = 0.4,
+    ) -> Dict[str, Dict[str, float]]:
+        """クエリ各フレームのkNN近傍を引き、映像別に得票/類似度を集計
+
+        dense_vector(cosine)へのkNN検索をmsearchでまとめて発行し、
+        音声のhash投票と同型に video_id 別の votes / score_sum を返す。
+
+        戻り値: {video_id: {"votes": 得票数, "score_sum": 類似度合計}}
+        """
+        import numpy as np
+        agg: Dict[str, Dict[str, float]] = {}
+        if not query_fps:
+            return agg
+        try:
+            self._ensure_video_indices()
+            try:
+                self.client.indices.refresh(index=self._frame_fp_index)
+            except ElasticsearchException:
+                pass
+
+            num_candidates = max(k_per_query * 5, 100)
+            body: List[Dict[str, Any]] = []
+            for q_blob in query_fps:
+                q_vec = np.frombuffer(q_blob, dtype=np.float32).tolist()
+                body.append({"index": self._frame_fp_index})
+                body.append({
+                    "knn": {
+                        "field": "embedding",
+                        "query_vector": q_vec,
+                        "k": k_per_query,
+                        "num_candidates": num_candidates,
+                    },
+                    "_source": ["video_id"],
+                    "size": k_per_query,
+                })
+
+            resp = self.client.msearch(body=body)
+            for res in resp.get("responses", []):
+                hits = res.get("hits", {}).get("hits", [])
+                for hit in hits:
+                    # ES cosine: _score = (1 + cosine) / 2
+                    sim = 2.0 * float(hit["_score"]) - 1.0
+                    if sim < sim_threshold:
+                        continue
+                    vid_id = hit["_source"]["video_id"]
+                    slot = agg.setdefault(
+                        vid_id, {"votes": 0.0, "score_sum": 0.0}
+                    )
+                    slot["votes"] += 1.0
+                    slot["score_sum"] += sim
+            return agg
+        except Exception as e:
+            self.logger.debug(f"ESフレームkNN検索フォールバック: {e}")
+            return self._search_frame_candidates_bruteforce(
+                query_fps, dimensions, k_per_query, sim_threshold
+            )
+
+    def _search_frame_candidates_bruteforce(
+        self, query_fps: List[bytes], dimensions: int,
+        k_per_query: int, sim_threshold: float,
+    ) -> Dict[str, Dict[str, float]]:
+        """kNN不可時のフォールバック（全フレーム総当り）"""
+        import numpy as np
+        import base64
+        agg: Dict[str, Dict[str, float]] = {}
+        try:
+            self._ensure_video_indices()
+            try:
+                self.client.indices.refresh(index=self._frame_fp_index)
+            except ElasticsearchException:
+                pass
+            resp = self.client.search(
+                index=self._frame_fp_index,
+                body={
+                    "query": {"match_all": {}},
+                    "_source": ["video_id", "fingerprint"],
+                    "size": 10000,
+                },
+            )
+            hits = resp["hits"]["hits"]
+            if not hits:
+                return agg
+            db_vids = [h["_source"]["video_id"] for h in hits]
+            d_mat = np.stack([
+                np.frombuffer(
+                    base64.b64decode(h["_source"]["fingerprint"]),
+                    dtype=np.float32,
+                )
+                for h in hits
+            ])
+            q_mat = np.stack([
+                np.frombuffer(q, dtype=np.float32) for q in query_fps
+            ])
+            with np.errstate(all="ignore"):
+                sims = q_mat @ d_mat.T
+            np.nan_to_num(sims, copy=False, nan=0.0, posinf=0.0, neginf=0.0)
+            k = min(k_per_query, sims.shape[1])
+            for i in range(sims.shape[0]):
+                top_idx = np.argpartition(sims[i], -k)[-k:]
+                for j in top_idx:
+                    sim = float(sims[i, j])
+                    if sim < sim_threshold:
+                        continue
+                    slot = agg.setdefault(
+                        db_vids[j], {"votes": 0.0, "score_sum": 0.0}
+                    )
+                    slot["votes"] += 1.0
+                    slot["score_sum"] += sim
+        except Exception as e:
+            self.logger.error(f"ESフレーム候補総当りエラー: {e}")
+        return agg
 
     def _search_video_fps_knn(
         self, query_fp: bytes, dimensions: int, top_k: int,

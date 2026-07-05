@@ -433,6 +433,137 @@ class PostgreSQLBackend(DatabaseBackend):
             self.logger.debug(f"pgvector検索フォールバック: {e}")
             return None
 
+    def _ensure_pgvector_frame_column(self, dimensions: int) -> bool:
+        """frame_fingerprintsテーブルにpgvector列とHNSW索引を追加
+
+        L2正規化済みフレーム指紋をvector型で保持し、cosine距離のHNSW索引で
+        近傍検索できるようにする（フレームANN投票の索引）。
+        """
+        if not self._pgvector_available:
+            return False
+        try:
+            cursor = self.connection.cursor()
+            cursor.execute(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_name = 'frame_fingerprints' "
+                "AND column_name = 'embedding'"
+            )
+            if cursor.fetchone() is None:
+                cursor.execute(
+                    f"ALTER TABLE frame_fingerprints "
+                    f"ADD COLUMN embedding vector({dimensions})"
+                )
+                cursor.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_frame_fp_embedding "
+                    "ON frame_fingerprints "
+                    "USING hnsw (embedding vector_cosine_ops)"
+                )
+            cursor.close()
+            return True
+        except Exception as e:
+            self.logger.warning(f"pgvectorフレーム列追加エラー: {e}")
+            return False
+
+    @staticmethod
+    def _vec_literal(fp_blob: bytes) -> str:
+        """float32バイト列をpgvectorのベクトルリテラルへ変換"""
+        import numpy as np
+        vec = np.frombuffer(fp_blob, dtype=np.float32)
+        return '[' + ','.join(str(float(x)) for x in vec) + ']'
+
+    def search_frame_candidates(
+        self, query_fps: List[bytes], dimensions: int,
+        k_per_query: int = 10, sim_threshold: float = 0.4,
+    ) -> Dict[str, Dict[str, float]]:
+        """クエリ各フレームのANN近傍を引き、映像別に得票/類似度を集計
+
+        戻り値: {video_id: {"votes": 得票数, "score_sum": 類似度合計}}
+        """
+        agg: Dict[str, Dict[str, float]] = {}
+        if not query_fps:
+            return agg
+        if not self._pgvector_available or not \
+                self._ensure_pgvector_frame_column(dimensions):
+            return self._search_frame_candidates_bruteforce(
+                query_fps, dimensions, k_per_query, sim_threshold
+            )
+        try:
+            cursor = self.connection.cursor()
+            # recall/速度のトレードオフ調整
+            cursor.execute(
+                "SET LOCAL hnsw.ef_search = %s",
+                (max(k_per_query * 4, 40),),
+            )
+            for q_blob in query_fps:
+                vec_str = self._vec_literal(q_blob)
+                cursor.execute(
+                    """SELECT video_id,
+                              1.0 - (embedding <=> %s::vector) AS sim
+                       FROM frame_fingerprints
+                       WHERE embedding IS NOT NULL
+                       ORDER BY embedding <=> %s::vector
+                       LIMIT %s""",
+                    (vec_str, vec_str, k_per_query),
+                )
+                for vid_id, sim in cursor.fetchall():
+                    sim = float(sim)
+                    if sim < sim_threshold:
+                        continue
+                    slot = agg.setdefault(
+                        vid_id, {"votes": 0.0, "score_sum": 0.0}
+                    )
+                    slot["votes"] += 1.0
+                    slot["score_sum"] += sim
+            cursor.close()
+            return agg
+        except Exception as e:
+            self.logger.debug(f"pgvectorフレーム検索フォールバック: {e}")
+            return self._search_frame_candidates_bruteforce(
+                query_fps, dimensions, k_per_query, sim_threshold
+            )
+
+    def _search_frame_candidates_bruteforce(
+        self, query_fps: List[bytes], dimensions: int,
+        k_per_query: int, sim_threshold: float,
+    ) -> Dict[str, Dict[str, float]]:
+        """pgvector非対応時のフォールバック（全フレーム総当り）"""
+        import numpy as np
+        agg: Dict[str, Dict[str, float]] = {}
+        try:
+            self._create_video_tables()
+            cursor = self.connection.cursor()
+            cursor.execute(
+                "SELECT video_id, fingerprint FROM frame_fingerprints"
+            )
+            rows = cursor.fetchall()
+            if not rows:
+                return agg
+            db_vids = [r[0] for r in rows]
+            d_mat = np.stack([
+                np.frombuffer(bytes(r[1]), dtype=np.float32) for r in rows
+            ])
+            q_mat = np.stack([
+                np.frombuffer(q, dtype=np.float32) for q in query_fps
+            ])
+            with np.errstate(all="ignore"):
+                sims = q_mat @ d_mat.T
+            np.nan_to_num(sims, copy=False, nan=0.0, posinf=0.0, neginf=0.0)
+            k = min(k_per_query, sims.shape[1])
+            for i in range(sims.shape[0]):
+                top_idx = np.argpartition(sims[i], -k)[-k:]
+                for j in top_idx:
+                    sim = float(sims[i, j])
+                    if sim < sim_threshold:
+                        continue
+                    slot = agg.setdefault(
+                        db_vids[j], {"votes": 0.0, "score_sum": 0.0}
+                    )
+                    slot["votes"] += 1.0
+                    slot["score_sum"] += sim
+        except Exception as e:
+            self.logger.error(f"PostgreSQLフレーム候補総当りエラー: {e}")
+        return agg
+
     def _create_video_tables(self) -> bool:
         """映像指紋テーブルを作成"""
         try:
@@ -558,16 +689,34 @@ class PostgreSQLBackend(DatabaseBackend):
                 "DELETE FROM frame_fingerprints WHERE video_id = %s",
                 (video_id,),
             )
-            rows = [
-                (video_id, fidx, float(ts), fp_blob)
-                for fidx, ts, fp_blob in frames
-            ]
-            cursor.executemany(
-                """INSERT INTO frame_fingerprints
-                    (video_id, frame_index, timestamp, fingerprint)
-                VALUES (%s, %s, %s, %s)""",
-                rows,
-            )
+            use_vec = False
+            if self._pgvector_available and frames:
+                dims = len(frames[0][2]) // 4  # float32バイト列 → 次元数
+                use_vec = self._ensure_pgvector_frame_column(dims)
+            if use_vec:
+                rows = [
+                    (video_id, fidx, float(ts), fp_blob,
+                     self._vec_literal(fp_blob))
+                    for fidx, ts, fp_blob in frames
+                ]
+                cursor.executemany(
+                    """INSERT INTO frame_fingerprints
+                        (video_id, frame_index, timestamp,
+                         fingerprint, embedding)
+                    VALUES (%s, %s, %s, %s, %s::vector)""",
+                    rows,
+                )
+            else:
+                rows = [
+                    (video_id, fidx, float(ts), fp_blob)
+                    for fidx, ts, fp_blob in frames
+                ]
+                cursor.executemany(
+                    """INSERT INTO frame_fingerprints
+                        (video_id, frame_index, timestamp, fingerprint)
+                    VALUES (%s, %s, %s, %s)""",
+                    rows,
+                )
             return True
         except PostgresError as e:
             self.logger.error(f"PostgreSQL frame fingerprint save error: {e}")

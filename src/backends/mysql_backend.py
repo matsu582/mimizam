@@ -565,6 +565,57 @@ class MySQLBackend(DatabaseBackend):
             self.logger.error(f"MySQL frame fingerprint save error: {e}")
             return False
 
+    def search_frame_candidates(
+        self, query_fps: List[bytes], dimensions: int,
+        k_per_query: int = 10, sim_threshold: float = 0.4,
+    ) -> Dict[str, Dict[str, float]]:
+        """クエリ各フレームの近傍を引き、映像別に得票/類似度を集計
+
+        MySQLコミュニティ版にはcosineのANN近似索引が無いため、全フレームを
+        読み出して総当り（brute-force）で近傍を求める。結果の形式はANN実装
+        （pgvector/ES/sqlite-vec）と同一で、大規模では低速になる点に留意。
+
+        戻り値: {video_id: {"votes": 得票数, "score_sum": 類似度合計}}
+        """
+        import numpy as np
+        agg: Dict[str, Dict[str, float]] = {}
+        if not query_fps:
+            return agg
+        try:
+            self._create_video_tables()
+            cursor = self.connection.cursor()
+            cursor.execute(
+                "SELECT video_id, fingerprint FROM frame_fingerprints"
+            )
+            rows = cursor.fetchall()
+            if not rows:
+                return agg
+            db_vids = [r[0] for r in rows]
+            d_mat = np.stack([
+                np.frombuffer(bytes(r[1]), dtype=np.float32) for r in rows
+            ])
+            q_mat = np.stack([
+                np.frombuffer(q, dtype=np.float32) for q in query_fps
+            ])
+            with np.errstate(all="ignore"):
+                sims = q_mat @ d_mat.T
+            np.nan_to_num(sims, copy=False, nan=0.0, posinf=0.0, neginf=0.0)
+            k = min(k_per_query, sims.shape[1])
+            for i in range(sims.shape[0]):
+                top_idx = np.argpartition(sims[i], -k)[-k:]
+                for j in top_idx:
+                    sim = float(sims[i, j])
+                    if sim < sim_threshold:
+                        continue
+                    slot = agg.setdefault(
+                        db_vids[j], {"votes": 0.0, "score_sum": 0.0}
+                    )
+                    slot["votes"] += 1.0
+                    slot["score_sum"] += sim
+        except MySQLError as e:
+            self.logger.error(f"MySQLフレーム候補総当りエラー: {e}")
+        return agg
+
     def search_video_fingerprints(
         self, query_fp: bytes, dimensions: int, top_k: int = 10,
         threshold: float = 0.3,
