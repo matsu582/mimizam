@@ -226,6 +226,41 @@ def _render_bar(
     return "|" + "".join(bar) + "|"
 
 
+def _audio_video_diverge(
+    audio: Optional[Dict[str, Any]],
+    visual: Optional[Dict[str, Any]],
+    tolerance: float = 30.0,
+) -> bool:
+    """同一動画内で音声位置と映像位置が乖離しているか判定する
+
+    音声のDB区間は time_offset（=query_time - db_time の代表値）と
+    クリップ長から推定し、映像の最大整列区間(db_start..db_end)と比較する。
+    両区間の隙間が tolerance を超える場合は乖離とみなす。
+    判定に必要なデータが揃わない場合は False（乖離なし扱い＝除外しない）。
+    """
+    if not audio or not visual:
+        return False
+    offset = audio.get("time_offset")
+    md = visual.get("match_details") or {}
+    regions = md.get("regions") or []
+    if offset is None or not regions:
+        return False
+
+    clip_len = md.get("query_duration", 0.0) or 0.0
+    audio_db_start = -offset
+    audio_db_end = audio_db_start + clip_len
+    a_lo, a_hi = min(audio_db_start, audio_db_end), max(audio_db_start, audio_db_end)
+
+    # 映像はフレーム数最多の整列区間を代表とする
+    region = max(regions, key=lambda r: r.get("frame_count", 0))
+    v_lo = region.get("db_start", 0.0)
+    v_hi = region.get("db_end", 0.0)
+
+    # 区間同士の隙間（重なれば0）
+    gap = max(0.0, v_lo - a_hi, a_lo - v_hi)
+    return gap > tolerance
+
+
 def merge_results(
     audio_results: List[Dict[str, Any]],
     visual_results: List[Dict[str, Any]],
@@ -279,9 +314,15 @@ def merge_results(
             entry["visual_similarity"] = v_score
             entry["visual_match"] = visual
 
+        # 音声位置と映像位置の乖離を判定
+        diverged = _audio_video_diverge(audio, visual)
+        entry["position_diverged"] = diverged
+
         # 統合スコア: 幾何平均ベース
         # 両方一致→高い、片方のみ→中程度の高め、両方低い→低いまま
-        if a_score > 0 and v_score > 0:
+        # 位置が乖離する場合は「音声+映像の二重一致」とはせず、
+        # 信頼できる単独モダリティ（高い方）のスコアで評価する。
+        if a_score > 0 and v_score > 0 and not diverged:
             entry["combined_score"] = math.sqrt(a_score * v_score)
         else:
             entry["combined_score"] = max(a_score, v_score) * 0.8
@@ -367,6 +408,8 @@ def print_merged_results(
         if v_sim is not None:
             match_types.append("映像")
         type_str = "+".join(match_types)
+        if result.get("position_diverged") and a_conf is not None and v_sim is not None:
+            type_str += " ※音声位置が映像と乖離（二重一致から除外）"
 
         print(f"  {i}. {title}")
         print(
