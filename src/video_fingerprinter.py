@@ -65,11 +65,18 @@ DEFAULT_NORMALIZE_LONG_SIDE = 1280
 
 
 def _create_akaze():
-    """OpenCV 4.x / 5.x 両対応のAKAZE生成"""
+    """OpenCV 4.x / 5.x 両対応のAKAZE生成
+
+    4.x: AKAZEはfeatures2d(本体)に含まれ ``cv2.AKAZE_create`` として露出する。
+    5.x: AKAZEはxfeatures2d(contrib)へ移動し
+    ``cv2.xfeatures2d.AKAZE_create`` として露出する。
+    いずれもopencv-contrib-pythonが必要。
+    """
     if hasattr(cv2, 'AKAZE_create'):
         return cv2.AKAZE_create()
-    if hasattr(cv2, 'xfeatures2d_AKAZE'):
-        return cv2.xfeatures2d_AKAZE.create()
+    xfeatures2d = getattr(cv2, 'xfeatures2d', None)
+    if xfeatures2d is not None and hasattr(xfeatures2d, 'AKAZE_create'):
+        return xfeatures2d.AKAZE_create()
     raise RuntimeError(
         "AKAZEが利用できません。"
         "opencv-contrib-python をインストールしてください"
