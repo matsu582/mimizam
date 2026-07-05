@@ -7,9 +7,9 @@
 既存の video_search.py（音声指紋検索）とは異なり、
 映像の視覚的特徴量を用いた検索を行う。
 
-2段階検索:
-  1. 映像全体指紋で高速候補絞り込み
-  2. フレーム単位指紋で精密照合（PiP対策）
+検索の流れ:
+  1. フレーム単位指紋の近傍検索（ANN）と得票集計で候補絞り込み
+  2. フレーム単位の時間整合照合とPiP矩形照合で確定
 """
 
 import argparse
@@ -461,7 +461,6 @@ AKAZE記述子→VLAD集約→PCA圧縮の変換パイプラインを保持し�
         logger.info(
             f"映像指紋DB統計 - "
             f"映像数: {video_count}, "
-            f"映像指紋: {stats.get('video_fingerprints', 0)}, "
             f"フレーム指紋: {stats.get('frame_fingerprints', 0)}"
         )
 

@@ -584,11 +584,9 @@ class ElasticsearchBackend(DatabaseBackend):
     def _ensure_video_indices(self) -> None:
         """映像指紋用インデックスを作成（存在しない場合のみ）"""
         videos_idx = f"{self.songs_index.rsplit('_', 1)[0]}_videos"
-        vfp_idx = f"{self.songs_index.rsplit('_', 1)[0]}_video_fingerprints"
         ffp_idx = f"{self.songs_index.rsplit('_', 1)[0]}_frame_fingerprints"
 
         self._videos_index = videos_idx
-        self._video_fp_index = vfp_idx
         self._frame_fp_index = ffp_idx
 
         videos_body = {
@@ -605,23 +603,6 @@ class ElasticsearchBackend(DatabaseBackend):
                 "duration": {"type": "double"},
                 "frame_count": {"type": "integer"},
                 "created_at": {"type": "date"},
-            }},
-        }
-        vfp_body = {
-            "settings": {
-                "number_of_shards": 1,
-                "number_of_replicas": 0,
-            },
-            "mappings": {"properties": {
-                "video_id": {"type": "keyword"},
-                "fingerprint": {"type": "binary"},
-                "embedding": {
-                    "type": "dense_vector",
-                    "index": True,
-                    "similarity": "cosine",
-                },
-                "dimensions": {"type": "integer"},
-                "descriptor_count": {"type": "integer"},
             }},
         }
         ffp_body = {
@@ -644,23 +625,6 @@ class ElasticsearchBackend(DatabaseBackend):
 
         try:
             self._create_index_if_missing(videos_idx, videos_body)
-            self._create_index_if_missing(vfp_idx, vfp_body)
-
-            # 既存インデックスにembeddingフィールドを追加
-            try:
-                self.client.indices.put_mapping(
-                    index=vfp_idx,
-                    body={"properties": {
-                        "embedding": {
-                            "type": "dense_vector",
-                            "index": True,
-                            "similarity": "cosine",
-                        },
-                    }},
-                )
-            except ElasticsearchException:
-                pass
-
             self._create_index_if_missing(ffp_idx, ffp_body)
 
             # 既存フレームインデックスにもembeddingフィールドを追加
@@ -701,34 +665,6 @@ class ElasticsearchBackend(DatabaseBackend):
             return resp.get("result") in ("created", "updated")
         except ElasticsearchException as e:
             self.logger.error(f"Elasticsearch video addition error: {e}")
-            return False
-
-    def add_video_fingerprint(
-        self, video_id: str, fingerprint: bytes, dimensions: int,
-        descriptor_count: int = 0,
-    ) -> bool:
-        """Elasticsearchに映像全体指紋を保存"""
-        import base64
-        import numpy as np
-        try:
-            self._ensure_video_indices()
-            vec = np.frombuffer(fingerprint, dtype=np.float32)
-            doc = {
-                "video_id": video_id,
-                "fingerprint": base64.b64encode(fingerprint).decode(),
-                "embedding": vec.tolist(),
-                "dimensions": dimensions,
-                "descriptor_count": descriptor_count,
-            }
-            resp = self.client.index(
-                index=self._video_fp_index, id=video_id,
-                body=doc, refresh=False, timeout="60s",
-            )
-            return resp.get("result") in ("created", "updated")
-        except ElasticsearchException as e:
-            self.logger.error(
-                f"Elasticsearch video fingerprint save error: {e}"
-            )
             return False
 
     def add_frame_fingerprints(
@@ -890,113 +826,6 @@ class ElasticsearchBackend(DatabaseBackend):
             self.logger.error(f"ESフレーム候補総当りエラー: {e}")
         return agg
 
-    def _search_video_fps_knn(
-        self, query_fp: bytes, dimensions: int, top_k: int,
-        threshold: float,
-    ) -> Optional[List[Dict[str, Any]]]:
-        """Elasticsearch KNNによるベクトル検索"""
-        import numpy as np
-        try:
-            self._ensure_video_indices()
-            try:
-                self.client.indices.refresh(index=self._video_fp_index)
-            except ElasticsearchException:
-                pass
-
-            query_vec = np.frombuffer(query_fp, dtype=np.float32).tolist()
-            fetch_k = max(top_k * 3, 30)
-
-            resp = self.client.search(
-                index=self._video_fp_index,
-                body={
-                    "knn": {
-                        "field": "embedding",
-                        "query_vector": query_vec,
-                        "k": fetch_k,
-                        "num_candidates": max(fetch_k * 5, 100),
-                    },
-                    "_source": ["video_id"],
-                    "size": fetch_k,
-                },
-            )
-
-            candidates: list = []
-            for hit in resp["hits"]["hits"]:
-                vid_id = hit["_source"]["video_id"]
-                # ES cosine: _score = (1 + cosine_similarity) / 2
-                sim = 2.0 * float(hit["_score"]) - 1.0
-                if sim >= threshold:
-                    video_info = self.get_video(vid_id)
-                    candidates.append({
-                        "video_id": vid_id,
-                        "similarity": sim,
-                        "video": video_info,
-                    })
-            candidates.sort(key=lambda c: c["similarity"], reverse=True)
-            return candidates[:top_k]
-        except Exception as e:
-            self.logger.debug(
-                f"ES KNN検索フォールバック: {e}"
-            )
-            return None
-
-    def search_video_fingerprints(
-        self, query_fp: bytes, dimensions: int, top_k: int = 10,
-        threshold: float = 0.3,
-    ) -> List[Dict[str, Any]]:
-        """Elasticsearchで映像全体指紋を検索（KNN優先、フォールバックあり）"""
-        # KNN検索を試行
-        result = self._search_video_fps_knn(
-            query_fp, dimensions, top_k, threshold
-        )
-        if result is not None:
-            return result
-
-        # フォールバック: 全件スキャン
-        import numpy as np
-        import base64
-
-        try:
-            self._ensure_video_indices()
-            try:
-                self.client.indices.refresh(index=self._video_fp_index)
-            except ElasticsearchException:
-                pass
-
-            resp = self.client.search(
-                index=self._video_fp_index,
-                body={"query": {"match_all": {}}, "size": 10000},
-            )
-
-            query_arr = np.frombuffer(query_fp, dtype=np.float32)
-            candidates: list = []
-
-            for hit in resp["hits"]["hits"]:
-                src = hit["_source"]
-                fp_bytes = base64.b64decode(src["fingerprint"])
-                db_fp = np.frombuffer(fp_bytes, dtype=np.float32)
-                if db_fp.shape[0] != query_arr.shape[0]:
-                    continue
-                sim = float(np.dot(query_arr, db_fp))
-                if sim < threshold:
-                    continue
-
-                vid_id = src["video_id"]
-                video_info = self.get_video(vid_id)
-                candidates.append({
-                    "video_id": vid_id,
-                    "similarity": sim,
-                    "video": video_info,
-                })
-
-            candidates.sort(key=lambda c: c["similarity"], reverse=True)
-            return candidates[:top_k]
-        except ElasticsearchException as e:
-            self.logger.error(
-                f"Elasticsearch video fingerprint search error: {e}"
-            )
-            return []
-
     def get_frame_fingerprints(
         self, video_id: str,
     ) -> List[Tuple[int, float, bytes]]:
@@ -1137,10 +966,6 @@ class ElasticsearchBackend(DatabaseBackend):
             self.client.delete(
                 index=self._videos_index, id=video_id
             )
-            self.client.delete(
-                index=self._video_fp_index, id=video_id,
-                ignore=[404],
-            )
             self.client.delete_by_query(
                 index=self._frame_fp_index,
                 body={"query": {"term": {"video_id": video_id}}},
@@ -1156,14 +981,12 @@ class ElasticsearchBackend(DatabaseBackend):
         """Elasticsearchの映像指紋統計を取得"""
         stats = {
             "videos": 0,
-            "video_fingerprints": 0,
             "frame_fingerprints": 0,
         }
         try:
             self._ensure_video_indices()
             for idx_name, key in [
                 (self._videos_index, "videos"),
-                (self._video_fp_index, "video_fingerprints"),
                 (self._frame_fp_index, "frame_fingerprints"),
             ]:
                 try:

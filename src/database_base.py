@@ -183,7 +183,6 @@ class DatabaseBackend(ABC):
     ) -> Dict[str, Dict[str, float]]:
         """クエリ各フレームのANN近傍から映像別の得票・類似度を集計
 
-        全体指紋ゲートに代わる候補生成。
         戻り値: {video_id: {"votes": 得票数, "score_sum": 類似度合計}}
         """
         raise NotImplementedError("このバックエンドは映像指紋に未対応です")

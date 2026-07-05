@@ -307,7 +307,6 @@ def main() -> int:
         logger.info(
             f"映像指紋DB統計 - "
             f"映像数: {stats.get('videos', 0)}, "
-            f"映像指紋: {stats.get('video_fingerprints', 0)}, "
             f"フレーム指紋: {stats.get('frame_fingerprints', 0)}"
         )
 

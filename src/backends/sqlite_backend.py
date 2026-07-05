@@ -378,7 +378,7 @@ class SQLiteBackend(DatabaseBackend):
     ) -> Dict[str, Dict[str, float]]:
         """クエリ各フレームでフレーム指紋のANN近傍を引き、映像別に集計
 
-        全体指紋ゲートに代わる候補生成。音声のhash投票と同じ思想で、
+        音声のhash投票と同じ思想で、
         クエリフレームがどの映像に何票ヒットしたか（votes）と
         類似度合計（score_sum）を返す。
 

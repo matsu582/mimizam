@@ -158,9 +158,9 @@ class VideoFrameInfo:
 class VideoFingerprint:
     """映像指紋データ
 
-    映像全体を1本のベクトルに平均する「全体指紋」は、部分クリップ検索と
-    相性が悪く候補選抜に使えないため廃止した。検索・照合は
-    frame_fingerprints（フレーム単位指紋）のANN + 投票で行う。
+    キーフレームごとのVLAD→PCA→L2正規化ベクトル（frame_fingerprints）
+    の集合で映像を表現する。検索・照合はこのフレーム単位指紋の
+    近傍検索（ANN）と映像別の得票集計で行う。
     """
     frame_fingerprints: List[Tuple[int, float, np.ndarray]] = field(
         default_factory=list
@@ -710,16 +710,16 @@ class VLADEncoder:
         per_frame_desc: List[Tuple[int, float, np.ndarray]],
     ) -> VideoFingerprint:
         """
-        映像全体の指紋を生成
+        フレーム単位指紋を生成
 
-        全フレームのVLADベクトルを平均し、PCA圧縮してL2正規化。
-        フレーム単位指紋も同時に生成（PiP対策用）。
+        キーフレームごとにVLADベクトルを計算し、PCA圧縮してL2正規化した
+        フレーム指紋群を生成する（ANN検索の対象）。
 
         Args:
             per_frame_desc: [(インデックス, タイムスタンプ, 記述子), ...]
 
         Returns:
-            VideoFingerprint: 映像全体指紋 + フレーム単位指紋
+            VideoFingerprint: フレーム単位指紋の集合
         """
         if not self.is_trained:
             raise RuntimeError("モデルが未学習です。先にtrain()を呼んでください")
@@ -1028,9 +1028,9 @@ class VideoFingerprinter:
         """
         PiP矩形を検出し、各矩形内を切り出して指紋化
 
-        PiP映像では全体指紋が背景に引きずられるため、
-        矩形内を切り出してアップスケール後に指紋化することで
-        DB側の全体指紋との類似度を向上させる。
+        PiP映像ではフレーム全体の指紋が背景に引きずられるため、
+        矩形内を切り出してアップスケール後に指紋化することで、
+        DB側のフレーム指紋との類似度を向上させる。
 
         Args:
             video_path: 映像ファイルパス
