@@ -18,7 +18,6 @@ class SQLiteBackend(DatabaseBackend):
         super().__init__(config)
         self.connection = None
         self.db_path = config.file_path or "fingerprints.db"
-        self._vec_available = False
         self._vec_dim = None
         self._vec_frame_dim = None
     
@@ -44,19 +43,14 @@ class SQLiteBackend(DatabaseBackend):
             cursor.execute("PRAGMA mmap_size = 268435456")     # 256MBメモリマップ
             cursor.execute("PRAGMA optimize")                  # 統計情報最適化
             
-            # sqlite-vec拡張の読み込み
-            self._vec_available = False
+            # sqlite-vec拡張の読み込み（ANNに必須）
             self._vec_dim = None
             self._vec_frame_dim = None
-            try:
-                import sqlite_vec
-                self.connection.enable_load_extension(True)
-                sqlite_vec.load(self.connection)
-                self.connection.enable_load_extension(False)
-                self._vec_available = True
-                self.logger.info("sqlite-vec拡張を読み込みました")
-            except (ImportError, Exception) as e:
-                self.logger.debug(f"sqlite-vec未使用（フォールバック）: {e}")
+            import sqlite_vec
+            self.connection.enable_load_extension(True)
+            sqlite_vec.load(self.connection)
+            self.connection.enable_load_extension(False)
+            self.logger.info("sqlite-vec拡張を読み込みました")
             
             self.logger.info(f"Connected to SQLite database with optimization settings: {self.db_path}")
             return True
@@ -318,8 +312,6 @@ class SQLiteBackend(DatabaseBackend):
         video_id / timestamp をメタデータ列として保持し、
         KNN結果から所属映像と時刻を直接引けるようにする。
         """
-        if not self._vec_available:
-            return False
         if self._vec_frame_dim == dimensions:
             return True
         try:
@@ -348,7 +340,7 @@ class SQLiteBackend(DatabaseBackend):
         frames: List[Tuple[int, float, bytes]],
     ) -> None:
         """フレーム指紋をvec0索引へ投入（既存分は置換）"""
-        if not self._vec_available or not frames:
+        if not frames:
             return
         dims = len(frames[0][2]) // 4  # float32バイト列 → 次元数
         if not self._ensure_vec_frame_table(dims):
@@ -388,12 +380,8 @@ class SQLiteBackend(DatabaseBackend):
         agg: Dict[str, Dict[str, float]] = {}
         if not query_fps:
             return agg
-        if not self._vec_available or not self._ensure_vec_frame_table(
-            dimensions
-        ):
-            return self._search_frame_candidates_bruteforce(
-                query_fps, dimensions, k_per_query, sim_threshold
-            )
+        if not self._ensure_vec_frame_table(dimensions):
+            return agg
         try:
             cursor = self.connection.cursor()
             for q_blob in query_fps:
@@ -415,53 +403,8 @@ class SQLiteBackend(DatabaseBackend):
                     slot["score_sum"] += sim
             return agg
         except Exception as e:
-            self.logger.debug(f"vec0フレーム検索フォールバック: {e}")
-            return self._search_frame_candidates_bruteforce(
-                query_fps, dimensions, k_per_query, sim_threshold
-            )
-
-    def _search_frame_candidates_bruteforce(
-        self, query_fps: List[bytes], dimensions: int,
-        k_per_query: int, sim_threshold: float,
-    ) -> Dict[str, Dict[str, float]]:
-        """vec0非対応時のフォールバック（全フレーム総当り）"""
-        import numpy as np
-        agg: Dict[str, Dict[str, float]] = {}
-        try:
-            self._create_video_tables()
-            cursor = self.connection.cursor()
-            cursor.execute(
-                "SELECT video_id, fingerprint FROM frame_fingerprints"
-            )
-            rows = cursor.fetchall()
-            if not rows:
-                return agg
-            db_vids = [r[0] for r in rows]
-            d_mat = np.stack([
-                np.frombuffer(r[1], dtype=np.float32) for r in rows
-            ])
-            q_mat = np.stack([
-                np.frombuffer(q, dtype=np.float32) for q in query_fps
-            ])
-            with np.errstate(all="ignore"):
-                sims = q_mat @ d_mat.T
-            np.nan_to_num(sims, copy=False, nan=0.0, posinf=0.0, neginf=0.0)
-            k = min(k_per_query, sims.shape[1])
-            for i in range(sims.shape[0]):
-                top_idx = np.argpartition(sims[i], -k)[-k:]
-                for j in top_idx:
-                    sim = float(sims[i, j])
-                    if sim < sim_threshold:
-                        continue
-                    vid_id = db_vids[j]
-                    slot = agg.setdefault(
-                        vid_id, {"votes": 0.0, "score_sum": 0.0}
-                    )
-                    slot["votes"] += 1.0
-                    slot["score_sum"] += sim
-        except Exception as e:
-            self.logger.error(f"フレーム候補総当りエラー: {e}")
-        return agg
+            self.logger.error(f"vec0フレーム検索エラー: {e}")
+            return agg
 
     def _create_video_tables(self) -> bool:
         """映像指紋テーブルを作成"""
@@ -757,15 +700,14 @@ class SQLiteBackend(DatabaseBackend):
             self._create_video_tables()
             cursor = self.connection.cursor()
             # vec0フレーム索引からも削除
-            if self._vec_available:
-                try:
-                    cursor.execute(
-                        "DELETE FROM vec_frame_fingerprints "
-                        "WHERE video_id = ?",
-                        (video_id,),
-                    )
-                except Exception:
-                    pass
+            try:
+                cursor.execute(
+                    "DELETE FROM vec_frame_fingerprints "
+                    "WHERE video_id = ?",
+                    (video_id,),
+                )
+            except Exception:
+                pass
             cursor.execute(
                 "DELETE FROM frame_descriptors WHERE video_id = ?",
                 (video_id,),

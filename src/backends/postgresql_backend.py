@@ -73,7 +73,9 @@ class PostgreSQLBackend(DatabaseBackend):
                 self._pgvector_available = True
                 self.logger.info("pgvector拡張を有効化しました")
             except PostgresError as e:
-                self.logger.info(f"pgvector未使用（フォールバック）: {e}")
+                self.logger.info(
+                    f"pgvector未検出（音声のみ利用可、映像指紋には必須）: {e}"
+                )
             
             cursor.close()
             
@@ -394,8 +396,8 @@ class PostgreSQLBackend(DatabaseBackend):
             return agg
         if not self._pgvector_available or not \
                 self._ensure_pgvector_frame_column(dimensions):
-            return self._search_frame_candidates_bruteforce(
-                query_fps, dimensions, k_per_query, sim_threshold
+            raise QueryError(
+                "pgvector拡張が必要です（映像指紋にはpgvectorが必須）"
             )
         try:
             cursor = self.connection.cursor()
@@ -426,53 +428,11 @@ class PostgreSQLBackend(DatabaseBackend):
                     slot["score_sum"] += sim
             cursor.close()
             return agg
+        except QueryError:
+            raise
         except Exception as e:
-            self.logger.debug(f"pgvectorフレーム検索フォールバック: {e}")
-            return self._search_frame_candidates_bruteforce(
-                query_fps, dimensions, k_per_query, sim_threshold
-            )
-
-    def _search_frame_candidates_bruteforce(
-        self, query_fps: List[bytes], dimensions: int,
-        k_per_query: int, sim_threshold: float,
-    ) -> Dict[str, Dict[str, float]]:
-        """pgvector非対応時のフォールバック（全フレーム総当り）"""
-        import numpy as np
-        agg: Dict[str, Dict[str, float]] = {}
-        try:
-            self._create_video_tables()
-            cursor = self.connection.cursor()
-            cursor.execute(
-                "SELECT video_id, fingerprint FROM frame_fingerprints"
-            )
-            rows = cursor.fetchall()
-            if not rows:
-                return agg
-            db_vids = [r[0] for r in rows]
-            d_mat = np.stack([
-                np.frombuffer(bytes(r[1]), dtype=np.float32) for r in rows
-            ])
-            q_mat = np.stack([
-                np.frombuffer(q, dtype=np.float32) for q in query_fps
-            ])
-            with np.errstate(all="ignore"):
-                sims = q_mat @ d_mat.T
-            np.nan_to_num(sims, copy=False, nan=0.0, posinf=0.0, neginf=0.0)
-            k = min(k_per_query, sims.shape[1])
-            for i in range(sims.shape[0]):
-                top_idx = np.argpartition(sims[i], -k)[-k:]
-                for j in top_idx:
-                    sim = float(sims[i, j])
-                    if sim < sim_threshold:
-                        continue
-                    slot = agg.setdefault(
-                        db_vids[j], {"votes": 0.0, "score_sum": 0.0}
-                    )
-                    slot["votes"] += 1.0
-                    slot["score_sum"] += sim
-        except Exception as e:
-            self.logger.error(f"PostgreSQLフレーム候補総当りエラー: {e}")
-        return agg
+            self.logger.error(f"pgvectorフレーム検索エラー: {e}")
+            return agg
 
     def _create_video_tables(self) -> bool:
         """映像指紋テーブルを作成"""
@@ -546,34 +506,26 @@ class PostgreSQLBackend(DatabaseBackend):
                 "DELETE FROM frame_fingerprints WHERE video_id = %s",
                 (video_id,),
             )
-            use_vec = False
-            if self._pgvector_available and frames:
-                dims = len(frames[0][2]) // 4  # float32バイト列 → 次元数
-                use_vec = self._ensure_pgvector_frame_column(dims)
-            if use_vec:
-                rows = [
-                    (video_id, fidx, float(ts), fp_blob,
-                     self._vec_literal(fp_blob))
-                    for fidx, ts, fp_blob in frames
-                ]
-                cursor.executemany(
-                    """INSERT INTO frame_fingerprints
-                        (video_id, frame_index, timestamp,
-                         fingerprint, embedding)
-                    VALUES (%s, %s, %s, %s, %s::vector)""",
-                    rows,
+            if not frames:
+                return True
+            dims = len(frames[0][2]) // 4  # float32バイト列 → 次元数
+            if not self._pgvector_available or not \
+                    self._ensure_pgvector_frame_column(dims):
+                raise QueryError(
+                    "pgvector拡張が必要です（映像指紋にはpgvectorが必須）"
                 )
-            else:
-                rows = [
-                    (video_id, fidx, float(ts), fp_blob)
-                    for fidx, ts, fp_blob in frames
-                ]
-                cursor.executemany(
-                    """INSERT INTO frame_fingerprints
-                        (video_id, frame_index, timestamp, fingerprint)
-                    VALUES (%s, %s, %s, %s)""",
-                    rows,
-                )
+            rows = [
+                (video_id, fidx, float(ts), fp_blob,
+                 self._vec_literal(fp_blob))
+                for fidx, ts, fp_blob in frames
+            ]
+            cursor.executemany(
+                """INSERT INTO frame_fingerprints
+                    (video_id, frame_index, timestamp,
+                     fingerprint, embedding)
+                VALUES (%s, %s, %s, %s, %s::vector)""",
+                rows,
+            )
             return True
         except PostgresError as e:
             self.logger.error(f"PostgreSQL frame fingerprint save error: {e}")

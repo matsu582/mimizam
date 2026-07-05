@@ -372,12 +372,12 @@ numpy配列のみを保存する形式（format_version=2）を使用し、sklea
 
 ### 6.2 対応バックエンドとフレームANN
 
-フレーム単位指紋の近傍検索（`search_frame_candidates`）は全バックエンドで同一の結果形式（`{video_id: {votes, score_sum}}`）を返す。ネイティブなベクトルANN索引を持つバックエンドはそれを使い、ない場合は全フレーム総当たり（brute-force）にフォールバックする。
+フレーム単位指紋の近傍検索（`search_frame_candidates`）は全バックエンドで同一の結果形式（`{video_id: {votes, score_sum}}`）を返す。sqlite-vec / pgvector / Elasticsearch `dense_vector` / MariaDB の各バックエンドはネイティブなベクトルANN索引を用いる。MySQL はネイティブANN索引を持たないため全フレーム総当たり（brute-force）で同一形式の結果を返す。
 
 | バックエンド | フレームANNの実現方式 | 備考 |
 |---|---|---|
-| **SQLite** | sqlite-vec 拡張によるANN | ローカル・既定バックエンド |
-| **PostgreSQL** | pgvector の HNSW（cosine、`<=>`） | ネイティブANN |
+| **SQLite** | sqlite-vec 拡張によるANN | ローカル・既定バックエンド。sqlite-vec はコア必須依存 |
+| **PostgreSQL** | pgvector の HNSW（cosine、`<=>`） | ネイティブANN。映像指紋には pgvector 拡張が必須（未導入時はエラー） |
 | **Elasticsearch** | `dense_vector`（cosine、kNN/msearch） | ネイティブANN |
 | **MariaDB** | 11.7+ の `VECTOR(N)` + `VECTOR INDEX (DISTANCE=cosine, HNSW)` + `VEC_DISTANCE_COSINE` | ネイティブANN（コミュニティ版で利用可、MySQLバックエンドを継承） |
 | **MySQL** | ネイティブANN索引なし → brute-force 総当たり | 小〜中規模向け。大規模では低速 |

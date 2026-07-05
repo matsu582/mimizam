@@ -766,65 +766,8 @@ class ElasticsearchBackend(DatabaseBackend):
                     slot["score_sum"] += sim
             return agg
         except Exception as e:
-            self.logger.debug(f"ESフレームkNN検索フォールバック: {e}")
-            return self._search_frame_candidates_bruteforce(
-                query_fps, dimensions, k_per_query, sim_threshold
-            )
-
-    def _search_frame_candidates_bruteforce(
-        self, query_fps: List[bytes], dimensions: int,
-        k_per_query: int, sim_threshold: float,
-    ) -> Dict[str, Dict[str, float]]:
-        """kNN不可時のフォールバック（全フレーム総当り）"""
-        import numpy as np
-        import base64
-        agg: Dict[str, Dict[str, float]] = {}
-        try:
-            self._ensure_video_indices()
-            try:
-                self.client.indices.refresh(index=self._frame_fp_index)
-            except ElasticsearchException:
-                pass
-            resp = self.client.search(
-                index=self._frame_fp_index,
-                body={
-                    "query": {"match_all": {}},
-                    "_source": ["video_id", "fingerprint"],
-                    "size": 10000,
-                },
-            )
-            hits = resp["hits"]["hits"]
-            if not hits:
-                return agg
-            db_vids = [h["_source"]["video_id"] for h in hits]
-            d_mat = np.stack([
-                np.frombuffer(
-                    base64.b64decode(h["_source"]["fingerprint"]),
-                    dtype=np.float32,
-                )
-                for h in hits
-            ])
-            q_mat = np.stack([
-                np.frombuffer(q, dtype=np.float32) for q in query_fps
-            ])
-            with np.errstate(all="ignore"):
-                sims = q_mat @ d_mat.T
-            np.nan_to_num(sims, copy=False, nan=0.0, posinf=0.0, neginf=0.0)
-            k = min(k_per_query, sims.shape[1])
-            for i in range(sims.shape[0]):
-                top_idx = np.argpartition(sims[i], -k)[-k:]
-                for j in top_idx:
-                    sim = float(sims[i, j])
-                    if sim < sim_threshold:
-                        continue
-                    slot = agg.setdefault(
-                        db_vids[j], {"votes": 0.0, "score_sum": 0.0}
-                    )
-                    slot["votes"] += 1.0
-                    slot["score_sum"] += sim
-        except Exception as e:
-            self.logger.error(f"ESフレーム候補総当りエラー: {e}")
-        return agg
+            self.logger.error(f"ESフレームkNN検索エラー: {e}")
+            return agg
 
     def get_frame_fingerprints(
         self, video_id: str,
