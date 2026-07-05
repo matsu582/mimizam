@@ -20,6 +20,7 @@ class SQLiteBackend(DatabaseBackend):
         self.db_path = config.file_path or "fingerprints.db"
         self._vec_available = False
         self._vec_dim = None
+        self._vec_frame_dim = None
     
     def connect(self) -> bool:
         """SQLiteデータベースに接続（最適化設定付き）"""
@@ -46,6 +47,7 @@ class SQLiteBackend(DatabaseBackend):
             # sqlite-vec拡張の読み込み
             self._vec_available = False
             self._vec_dim = None
+            self._vec_frame_dim = None
             try:
                 import sqlite_vec
                 self.connection.enable_load_extension(True)
@@ -310,86 +312,156 @@ class SQLiteBackend(DatabaseBackend):
 
     # ===== 映像指紋メソッド =====
 
-    def _ensure_vec_video_table(self, dimensions: int) -> bool:
-        """映像指紋用vec0テーブルを確認・作成（sqlite-vec）"""
+    def _ensure_vec_frame_table(self, dimensions: int) -> bool:
+        """フレーム指紋用vec0テーブルを確認・作成（sqlite-vec）
+
+        video_id / timestamp をメタデータ列として保持し、
+        KNN結果から所属映像と時刻を直接引けるようにする。
+        """
         if not self._vec_available:
             return False
-        if self._vec_dim == dimensions:
+        if self._vec_frame_dim == dimensions:
             return True
         try:
             cursor = self.connection.cursor()
             cursor.execute(
                 "SELECT name FROM sqlite_master "
-                "WHERE type='table' AND name='vec_video_fingerprints'"
+                "WHERE type='table' AND name='vec_frame_fingerprints'"
             )
             if cursor.fetchone() is None:
                 cursor.execute(
-                    f"CREATE VIRTUAL TABLE vec_video_fingerprints USING vec0("
-                    f"video_id TEXT PRIMARY KEY, "
-                    f"fingerprint float[{dimensions}] distance_metric=cosine"
+                    f"CREATE VIRTUAL TABLE vec_frame_fingerprints USING vec0("
+                    f"fingerprint float[{dimensions}] distance_metric=cosine, "
+                    f"video_id TEXT, "
+                    f"timestamp FLOAT"
                     f")"
                 )
-                # 既存データの移行
-                try:
-                    cursor.execute(
-                        "SELECT video_id, fingerprint, dimensions "
-                        "FROM video_fingerprints"
-                    )
-                    for vid, fp_blob, dim in cursor.fetchall():
-                        if dim == dimensions:
-                            try:
-                                cursor.execute(
-                                    "INSERT INTO vec_video_fingerprints"
-                                    "(video_id, fingerprint) VALUES (?, ?)",
-                                    (vid, fp_blob),
-                                )
-                            except Exception:
-                                pass
-                except Exception:
-                    pass
                 self.connection.commit()
-            self._vec_dim = dimensions
+            self._vec_frame_dim = dimensions
             return True
         except Exception as e:
-            self.logger.warning(f"vec0テーブル作成エラー: {e}")
+            self.logger.warning(f"vec0フレームテーブル作成エラー: {e}")
             return False
 
-    def _search_video_fps_vec(
-        self, query_fp: bytes, dimensions: int, top_k: int,
-        threshold: float,
-    ) -> Optional[List[Dict[str, Any]]]:
-        """sqlite-vecによるベクトルKNN検索"""
-        if not self._ensure_vec_video_table(dimensions):
-            return None
+    def _index_frames_vec(
+        self, video_id: str,
+        frames: List[Tuple[int, float, bytes]],
+    ) -> None:
+        """フレーム指紋をvec0索引へ投入（既存分は置換）"""
+        if not self._vec_available or not frames:
+            return
+        dims = len(frames[0][2]) // 4  # float32バイト列 → 次元数
+        if not self._ensure_vec_frame_table(dims):
+            return
         try:
             cursor = self.connection.cursor()
-            fetch_k = max(top_k * 3, 30)
             cursor.execute(
-                """SELECT vv.video_id, vv.distance,
-                          v.title, v.file_path, v.duration, v.frame_count
-                   FROM vec_video_fingerprints vv
-                   JOIN videos v ON v.id = vv.video_id
-                   WHERE vv.fingerprint MATCH ? AND k = ?
-                   ORDER BY vv.distance""",
-                (query_fp, fetch_k),
+                "DELETE FROM vec_frame_fingerprints WHERE video_id = ?",
+                (video_id,),
             )
-            candidates: list = []
-            for vid_id, dist, title, fpath, dur, fcount in cursor.fetchall():
-                sim = 1.0 - dist
-                if sim >= threshold:
-                    candidates.append({
-                        "video_id": vid_id,
-                        "similarity": sim,
-                        "video": Video(
-                            id=vid_id, title=title, file_path=fpath,
-                            duration=dur, frame_count=fcount,
-                        ),
-                    })
-            candidates.sort(key=lambda c: c["similarity"], reverse=True)
-            return candidates[:top_k]
+            cursor.executemany(
+                """INSERT INTO vec_frame_fingerprints
+                    (fingerprint, video_id, timestamp)
+                VALUES (?, ?, ?)""",
+                [
+                    (fp_blob, video_id, float(ts))
+                    for _, ts, fp_blob in frames
+                ],
+            )
+            self.connection.commit()
         except Exception as e:
-            self.logger.debug(f"vec0検索フォールバック: {e}")
-            return None
+            self.logger.warning(f"vec0フレーム索引投入エラー: {e}")
+
+    def search_frame_candidates(
+        self, query_fps: List[bytes], dimensions: int,
+        k_per_query: int = 10, sim_threshold: float = 0.4,
+    ) -> Dict[str, Dict[str, float]]:
+        """クエリ各フレームでフレーム指紋のANN近傍を引き、映像別に集計
+
+        全体指紋ゲートに代わる候補生成。音声のhash投票と同じ思想で、
+        クエリフレームがどの映像に何票ヒットしたか（votes）と
+        類似度合計（score_sum）を返す。
+
+        Returns:
+            {video_id: {"votes": 得票数, "score_sum": 類似度合計}}
+        """
+        agg: Dict[str, Dict[str, float]] = {}
+        if not query_fps:
+            return agg
+        if not self._vec_available or not self._ensure_vec_frame_table(
+            dimensions
+        ):
+            return self._search_frame_candidates_bruteforce(
+                query_fps, dimensions, k_per_query, sim_threshold
+            )
+        try:
+            cursor = self.connection.cursor()
+            for q_blob in query_fps:
+                cursor.execute(
+                    """SELECT video_id, distance
+                       FROM vec_frame_fingerprints
+                       WHERE fingerprint MATCH ? AND k = ?
+                       ORDER BY distance""",
+                    (q_blob, k_per_query),
+                )
+                for vid_id, dist in cursor.fetchall():
+                    sim = 1.0 - float(dist)
+                    if sim < sim_threshold:
+                        continue
+                    slot = agg.setdefault(
+                        vid_id, {"votes": 0.0, "score_sum": 0.0}
+                    )
+                    slot["votes"] += 1.0
+                    slot["score_sum"] += sim
+            return agg
+        except Exception as e:
+            self.logger.debug(f"vec0フレーム検索フォールバック: {e}")
+            return self._search_frame_candidates_bruteforce(
+                query_fps, dimensions, k_per_query, sim_threshold
+            )
+
+    def _search_frame_candidates_bruteforce(
+        self, query_fps: List[bytes], dimensions: int,
+        k_per_query: int, sim_threshold: float,
+    ) -> Dict[str, Dict[str, float]]:
+        """vec0非対応時のフォールバック（全フレーム総当り）"""
+        import numpy as np
+        agg: Dict[str, Dict[str, float]] = {}
+        try:
+            self._create_video_tables()
+            cursor = self.connection.cursor()
+            cursor.execute(
+                "SELECT video_id, fingerprint FROM frame_fingerprints"
+            )
+            rows = cursor.fetchall()
+            if not rows:
+                return agg
+            db_vids = [r[0] for r in rows]
+            d_mat = np.stack([
+                np.frombuffer(r[1], dtype=np.float32) for r in rows
+            ])
+            q_mat = np.stack([
+                np.frombuffer(q, dtype=np.float32) for q in query_fps
+            ])
+            with np.errstate(all="ignore"):
+                sims = q_mat @ d_mat.T
+            np.nan_to_num(sims, copy=False, nan=0.0, posinf=0.0, neginf=0.0)
+            k = min(k_per_query, sims.shape[1])
+            for i in range(sims.shape[0]):
+                top_idx = np.argpartition(sims[i], -k)[-k:]
+                for j in top_idx:
+                    sim = float(sims[i, j])
+                    if sim < sim_threshold:
+                        continue
+                    vid_id = db_vids[j]
+                    slot = agg.setdefault(
+                        vid_id, {"votes": 0.0, "score_sum": 0.0}
+                    )
+                    slot["votes"] += 1.0
+                    slot["score_sum"] += sim
+        except Exception as e:
+            self.logger.error(f"フレーム候補総当りエラー: {e}")
+        return agg
 
     def _create_video_tables(self) -> bool:
         """映像指紋テーブルを作成"""
@@ -404,17 +476,6 @@ class SQLiteBackend(DatabaseBackend):
                     duration REAL,
                     frame_count INTEGER,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            """)
-
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS video_fingerprints (
-                    video_id TEXT PRIMARY KEY,
-                    fingerprint BLOB NOT NULL,
-                    dimensions INTEGER NOT NULL,
-                    descriptor_count INTEGER DEFAULT 0,
-                    FOREIGN KEY (video_id) REFERENCES videos (id)
-                        ON DELETE CASCADE
                 )
             """)
 
@@ -480,41 +541,6 @@ class SQLiteBackend(DatabaseBackend):
             )
             return False
 
-    def add_video_fingerprint(
-        self, video_id: str, fingerprint: bytes, dimensions: int,
-        descriptor_count: int = 0,
-    ) -> bool:
-        """SQLiteに映像全体指紋を保存"""
-        try:
-            self._create_video_tables()
-            cursor = self.connection.cursor()
-            cursor.execute(
-                """INSERT OR REPLACE INTO video_fingerprints
-                    (video_id, fingerprint, dimensions, descriptor_count)
-                VALUES (?, ?, ?, ?)""",
-                (video_id, fingerprint, dimensions, descriptor_count),
-            )
-            self.connection.commit()
-            # vec0テーブルにも挿入
-            if self._vec_available:
-                try:
-                    self._ensure_vec_video_table(dimensions)
-                    cursor.execute(
-                        "INSERT OR REPLACE INTO vec_video_fingerprints"
-                        "(video_id, fingerprint) VALUES (?, ?)",
-                        (video_id, fingerprint),
-                    )
-                    self.connection.commit()
-                except Exception:
-                    pass
-            return True
-        except Exception as e:
-            self.logger.error(
-                f"SQLite video fingerprint save error: {e} | "
-                f"Context: {{'video_id': '{video_id}'}}"
-            )
-            return False
-
     def add_frame_fingerprints(
         self, video_id: str,
         frames: List[Tuple[int, float, bytes]],
@@ -538,6 +564,8 @@ class SQLiteBackend(DatabaseBackend):
                 rows,
             )
             self.connection.commit()
+            # ANN検索用のvec0索引にも投入
+            self._index_frames_vec(video_id, frames)
             return True
         except Exception as e:
             self.logger.error(
@@ -546,55 +574,9 @@ class SQLiteBackend(DatabaseBackend):
             )
             return False
 
-    def search_video_fingerprints(
-        self, query_fp: bytes, dimensions: int, top_k: int = 10,
-        threshold: float = 0.3,
-    ) -> List[Dict[str, Any]]:
-        """SQLiteで映像全体指紋を検索（vec0利用時はKNN検索）"""
-        # sqlite-vecによるKNN検索を試行
-        if self._vec_available:
-            result = self._search_video_fps_vec(
-                query_fp, dimensions, top_k, threshold
-            )
-            if result is not None:
-                return result
-
-        # フォールバック: 全件スキャン
-        import numpy as np
-        try:
-            self._create_video_tables()
-            cursor = self.connection.cursor()
-            cursor.execute(
-                """SELECT vf.video_id, vf.fingerprint, vf.dimensions,
-                          v.title, v.file_path, v.duration, v.frame_count
-                   FROM video_fingerprints vf
-                   JOIN videos v ON vf.video_id = v.id"""
-            )
-
-            query_arr = np.frombuffer(query_fp, dtype=np.float32)
-            candidates: list = []
-
-            for row in cursor.fetchall():
-                vid_id, fp_blob, dims, title, fpath, dur, fcount = row
-                db_fp = np.frombuffer(fp_blob, dtype=np.float32)
-                if db_fp.shape[0] != query_arr.shape[0]:
-                    continue
-                sim = float(np.dot(query_arr, db_fp))
-                if sim >= threshold:
-                    candidates.append({
-                        "video_id": vid_id,
-                        "similarity": sim,
-                        "video": Video(
-                            id=vid_id, title=title, file_path=fpath,
-                            duration=dur, frame_count=fcount,
-                        ),
-                    })
-
-            candidates.sort(key=lambda c: c["similarity"], reverse=True)
-            return candidates[:top_k]
-        except Exception as e:
-            self.logger.error(f"SQLite video fingerprint search error: {e}")
-            return []
+    def get_video_by_id(self, video_id: str) -> Optional[Video]:
+        """video_idから映像メタデータを取得（フレームANN候補の詳細補完用）"""
+        return self.get_video(video_id)
 
     def get_frame_fingerprints(
         self, video_id: str,
@@ -774,11 +756,11 @@ class SQLiteBackend(DatabaseBackend):
         try:
             self._create_video_tables()
             cursor = self.connection.cursor()
-            # vec0テーブルからも削除
+            # vec0フレーム索引からも削除
             if self._vec_available:
                 try:
                     cursor.execute(
-                        "DELETE FROM vec_video_fingerprints "
+                        "DELETE FROM vec_frame_fingerprints "
                         "WHERE video_id = ?",
                         (video_id,),
                     )
@@ -790,10 +772,6 @@ class SQLiteBackend(DatabaseBackend):
             )
             cursor.execute(
                 "DELETE FROM frame_fingerprints WHERE video_id = ?",
-                (video_id,),
-            )
-            cursor.execute(
-                "DELETE FROM video_fingerprints WHERE video_id = ?",
                 (video_id,),
             )
             cursor.execute("DELETE FROM videos WHERE id = ?", (video_id,))
@@ -808,14 +786,12 @@ class SQLiteBackend(DatabaseBackend):
 
     def get_video_stats(self) -> Dict[str, int]:
         """SQLiteの映像指紋統計を取得"""
-        stats = {"videos": 0, "video_fingerprints": 0, "frame_fingerprints": 0}
+        stats = {"videos": 0, "frame_fingerprints": 0}
         try:
             self._create_video_tables()
             cursor = self.connection.cursor()
             cursor.execute("SELECT COUNT(*) FROM videos")
             stats["videos"] = cursor.fetchone()[0]
-            cursor.execute("SELECT COUNT(*) FROM video_fingerprints")
-            stats["video_fingerprints"] = cursor.fetchone()[0]
             cursor.execute("SELECT COUNT(*) FROM frame_fingerprints")
             stats["frame_fingerprints"] = cursor.fetchone()[0]
         except Exception as e:

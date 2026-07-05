@@ -104,29 +104,6 @@ class VideoFingerprintDatabase:
 
     # ===== 映像指紋 =====
 
-    def add_video_fingerprint(
-        self,
-        video_id: str,
-        fingerprint: np.ndarray,
-        descriptor_count: int = 0,
-    ) -> bool:
-        """
-        映像全体指紋を保存
-
-        Args:
-            video_id: 映像ID
-            fingerprint: L2正規化済み指紋ベクトル（numpy配列）
-            descriptor_count: 抽出された記述子の総数
-
-        Returns:
-            成功時True
-        """
-        fp_blob = fingerprint.astype(np.float32).tobytes()
-        dims = fingerprint.shape[0]
-        return self.backend.add_video_fingerprint(
-            video_id, fp_blob, dims, descriptor_count
-        )
-
     def add_frame_fingerprints(
         self,
         video_id: str,
@@ -216,28 +193,63 @@ class VideoFingerprintDatabase:
 
     # ===== 検索 =====
 
-    def search_video(
+    def search_frame_candidates(
         self,
-        query_fp: np.ndarray,
+        query_frame_fps: List[Tuple[int, float, np.ndarray]],
         top_k: int = 10,
-        threshold: float = 0.3,
+        k_per_query: int = 10,
+        sim_threshold: float = 0.4,
     ) -> List[Dict]:
         """
-        映像全体指紋で候補を高速検索
+        フレーム指紋のANN近傍投票で候補映像を絞り込む
+
+        全体指紋ゲートを廃止し、クエリ各フレームのANN近傍から
+        映像別の得票数・類似度合計を集計して候補化する。
+        音声のhash投票と同じ思想で、部分クリップでも該当フレームを
+        直接引ける。
 
         Args:
-            query_fp: クエリ映像のL2正規化済み指紋
+            query_frame_fps: クエリ映像のフレーム指紋リスト
             top_k: 返す候補数
-            threshold: 最低類似度閾値
+            k_per_query: クエリ1フレームあたりのANN近傍数
+            sim_threshold: ヒットとみなす最低類似度
 
         Returns:
-            [{"video_id": ..., "similarity": ..., "video": ...}, ...]
+            [{"video_id": ..., "similarity": ..., "votes": ...,
+              "video": ...}, ...]
         """
-        fp_blob = query_fp.astype(np.float32).tobytes()
-        dims = query_fp.shape[0]
-        return self.backend.search_video_fingerprints(
-            fp_blob, dims, top_k, threshold
+        if not query_frame_fps:
+            return []
+
+        query_blobs = [
+            fp_vec.astype(np.float32).tobytes()
+            for _, _, fp_vec in query_frame_fps
+        ]
+        dims = query_frame_fps[0][2].shape[0]
+
+        agg = self.backend.search_frame_candidates(
+            query_blobs, dims, k_per_query, sim_threshold
         )
+
+        candidates: List[Dict] = []
+        for vid_id, stats in agg.items():
+            votes = int(stats.get("votes", 0))
+            if votes <= 0:
+                continue
+            avg_sim = stats.get("score_sum", 0.0) / max(votes, 1)
+            video = self.backend.get_video(vid_id)
+            candidates.append({
+                "video_id": vid_id,
+                "similarity": float(avg_sim),
+                "votes": votes,
+                "video": video,
+            })
+
+        # 得票数を主指標、平均類似度を副指標に候補を順位付け
+        candidates.sort(
+            key=lambda c: (c["votes"], c["similarity"]), reverse=True
+        )
+        return candidates[:top_k]
 
     def search_video_with_frame_matching(
         self,
@@ -287,7 +299,10 @@ class VideoFingerprintDatabase:
                 [q_fp.astype(np.float32) for _, _, q_fp in query_frame_fps]
             )
             d_mat = np.stack([d_fp for _, _, d_fp in db_frame_vecs])
-            sims = q_mat @ d_mat.T  # (クエリフレーム数, DBフレーム数)
+            # 非有限値（NaN/inf）混入時の行列積警告を抑止し0類似度化
+            with np.errstate(all="ignore"):
+                sims = q_mat @ d_mat.T  # (クエリフレーム数, DBフレーム数)
+            np.nan_to_num(sims, copy=False, nan=0.0, posinf=0.0, neginf=0.0)
 
             best_idx = np.argmax(sims, axis=1)
             best_per_query = sims[np.arange(sims.shape[0]), best_idx]

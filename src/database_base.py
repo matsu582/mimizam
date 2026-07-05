@@ -170,13 +170,6 @@ class DatabaseBackend(ABC):
         """映像メタデータを追加"""
         raise NotImplementedError("このバックエンドは映像指紋に未対応です")
 
-    def add_video_fingerprint(
-        self, video_id: str, fingerprint: bytes, dimensions: int,
-        descriptor_count: int = 0
-    ) -> bool:
-        """映像全体指紋を保存（fingerprintはfloat32のバイト列）"""
-        raise NotImplementedError("このバックエンドは映像指紋に未対応です")
-
     def add_frame_fingerprints(
         self, video_id: str,
         frames: List[Tuple[int, float, bytes]]
@@ -184,11 +177,15 @@ class DatabaseBackend(ABC):
         """フレーム単位指紋を一括保存（各要素は(frame_index, timestamp, fp_bytes)）"""
         raise NotImplementedError("このバックエンドは映像指紋に未対応です")
 
-    def search_video_fingerprints(
-        self, query_fp: bytes, dimensions: int, top_k: int = 10,
-        threshold: float = 0.3
-    ) -> List[Dict[str, Any]]:
-        """映像全体指紋で候補検索"""
+    def search_frame_candidates(
+        self, query_fps: List[bytes], dimensions: int,
+        k_per_query: int = 10, sim_threshold: float = 0.4
+    ) -> Dict[str, Dict[str, float]]:
+        """クエリ各フレームのANN近傍から映像別の得票・類似度を集計
+
+        全体指紋ゲートに代わる候補生成。
+        戻り値: {video_id: {"votes": 得票数, "score_sum": 類似度合計}}
+        """
         raise NotImplementedError("このバックエンドは映像指紋に未対応です")
 
     def get_frame_fingerprints(

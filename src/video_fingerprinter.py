@@ -156,8 +156,12 @@ class VideoFrameInfo:
 
 @dataclass
 class VideoFingerprint:
-    """映像指紋データ"""
-    video_fingerprint: np.ndarray
+    """映像指紋データ
+
+    映像全体を1本のベクトルに平均する「全体指紋」は、部分クリップ検索と
+    相性が悪く候補選抜に使えないため廃止した。検索・照合は
+    frame_fingerprints（フレーム単位指紋）のANN + 投票で行う。
+    """
     frame_fingerprints: List[Tuple[int, float, np.ndarray]] = field(
         default_factory=list
     )
@@ -720,7 +724,6 @@ class VLADEncoder:
         if not self.is_trained:
             raise RuntimeError("モデルが未学習です。先にtrain()を呼んでください")
 
-        frame_vlads = []
         frame_fingerprints = []
         total_desc = 0
 
@@ -734,7 +737,6 @@ class VLADEncoder:
             vlad_vec = self._compute_vlad_vector(desc)
             if prof_on:
                 t_vlad += time.perf_counter() - _t
-            frame_vlads.append(vlad_vec)
             total_desc += desc.shape[0]
 
             # フレーム単位指紋
@@ -745,11 +747,6 @@ class VLADEncoder:
                 t_pca += time.perf_counter() - _t
             frame_fingerprints.append((fidx, ts, frame_fp))
 
-        # 映像全体指紋 = 全フレームVLADの平均 → PCA → L2正規化
-        agg_vlad = np.mean(frame_vlads, axis=0)
-        compressed = self._pca_transform(agg_vlad)
-        video_fp = self._l2_normalize(compressed)
-
         if prof_on:
             logger.info(
                 f"指紋集約 内訳[秒]: vlad(量子化+残差×{len(per_frame_desc)})"
@@ -757,7 +754,6 @@ class VLADEncoder:
             )
 
         return VideoFingerprint(
-            video_fingerprint=video_fp,
             frame_fingerprints=frame_fingerprints,
             frame_count=len(per_frame_desc),
             descriptor_count=total_desc,
@@ -950,11 +946,15 @@ class VideoFingerprinter:
 
         fp = self.encoder.encode_video(per_frame)
         fp.raw_descriptors = per_frame
+        dims = (
+            fp.frame_fingerprints[0][2].shape[0]
+            if fp.frame_fingerprints else 0
+        )
         logger.info(
             f"映像指紋生成: {os.path.basename(video_path)} "
             f"({fp.frame_count}フレーム, "
             f"{fp.descriptor_count}記述子, "
-            f"{fp.video_fingerprint.shape[0]}次元)"
+            f"{dims}次元)"
         )
         return fp
 
@@ -962,27 +962,24 @@ class VideoFingerprinter:
         self,
         fp_a: VideoFingerprint,
         fp_b: VideoFingerprint,
-        use_frame_matching: bool = False,
+        use_frame_matching: bool = True,
     ) -> float:
         """
         2つの映像指紋の類似度を計算
 
+        フレーム単位指紋どうしを総当りし、各クエリフレームの最高一致
+        スコアの最大値を採用する（部分一致に強い）。
+
         Args:
             fp_a: 映像指紋A
             fp_b: 映像指紋B
-            use_frame_matching: フレーム単位マッチング（PiP対策）を使用するか
+            use_frame_matching: 互換用フラグ（現在は常にフレーム照合）
 
         Returns:
-            類似度スコア（ドット積、-1.0〜1.0）
+            類似度スコア（-1.0〜1.0）
         """
-        if not use_frame_matching:
-            return float(np.dot(fp_a.video_fingerprint, fp_b.video_fingerprint))
-
-        # フレーム単位マッチング: 各クエリフレームの最高一致スコアのmaxを採用
         if not fp_a.frame_fingerprints or not fp_b.frame_fingerprints:
-            return float(
-                np.dot(fp_a.video_fingerprint, fp_b.video_fingerprint)
-            )
+            return 0.0
 
         # 各クエリフレーム×DBフレームの類似度を行列積で一括計算
         q_mat = np.stack(
@@ -991,7 +988,9 @@ class VideoFingerprinter:
         d_mat = np.stack(
             [d_fp.astype(np.float32) for _, _, d_fp in fp_b.frame_fingerprints]
         )
-        sims = q_mat @ d_mat.T
+        with np.errstate(all="ignore"):
+            sims = q_mat @ d_mat.T
+        np.nan_to_num(sims, copy=False, nan=0.0, posinf=0.0, neginf=0.0)
 
         return float(np.max(sims.max(axis=1)))
 

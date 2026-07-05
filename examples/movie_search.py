@@ -417,12 +417,14 @@ def _print_detail_section(result: Dict[str, Any]) -> None:
         visual = result.get("visual_match", {})
         video_sim = visual.get("video_similarity")
         frame_sim = visual.get("frame_similarity")
+        votes = visual.get("vote_count")
         video = visual.get("video")
 
         print(f"     --- 映像マッチ ---")
         print(f"     映像類似度: {v_sim:.3f}")
-        if video_sim is not None:
-            print(f"     全体指紋: {video_sim:.3f}")
+        if votes is not None:
+            print(f"     候補得票(ANN): {votes}票 平均類似度: "
+                  f"{(video_sim or 0.0):.3f}")
         if frame_sim is not None:
             print(f"     フレーム指紋: {frame_sim:.3f}")
         if video and hasattr(video, "duration") and video.duration > 0:
@@ -844,8 +846,6 @@ def main() -> int:
             logger.info(
                 f"映像指紋DB - "
                 f"映像数: {video_stats.get('videos', 0)}, "
-                f"映像指紋: "
-                f"{video_stats.get('video_fingerprints', 0)}, "
                 f"フレーム指紋: "
                 f"{video_stats.get('frame_fingerprints', 0)}"
             )

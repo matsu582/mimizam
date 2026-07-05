@@ -432,9 +432,6 @@ class Mimizam:
                 frame_count=fp.frame_count,
             )
             vdb.add_video(video)
-            vdb.add_video_fingerprint(
-                video_id, fp.video_fingerprint, fp.descriptor_count
-            )
             vdb.add_frame_fingerprints(
                 video_id, fp.frame_fingerprints
             )
@@ -465,15 +462,18 @@ class Mimizam:
         """
         映像ファイルでデータベースを検索
 
-        3段階検索:
-          1. 映像全体指紋で高速候補絞り込み
-          2. フレーム単位指紋で精密照合
+        2段階検索:
+          1. フレーム指紋のANN近傍投票で候補映像を絞り込み
+          2. フレーム単位指紋で精密照合（時間整合区間を確認）
           3. PiP矩形検出 → 矩形内指紋でDB検索（PiP対策）
+
+        全体指紋ゲートは廃止。部分クリップでも該当フレームがANNで
+        直接引けるため、25分全編に対する数分クリップの検索でも取りこぼしにくい。
 
         Args:
             query_file_path: 検索対象の映像ファイルパス
             top_k: 返す結果の最大数
-            use_frame_matching: フレーム単位マッチングを使用するか
+            use_frame_matching: フレーム単位マッチングで精密照合するか
             detect_pip: PiP矩形検出を行うか
             video_db_path: 映像DBファイルパス
 
@@ -500,9 +500,9 @@ class Mimizam:
             if fp is None:
                 return []
 
-            # Step 1: 映像全体指紋で候補絞り込み
-            candidates = vdb.search_video(
-                fp.video_fingerprint, top_k=top_k * 2
+            # Step 1: フレーム指紋のANN近傍投票で候補絞り込み
+            candidates = vdb.search_frame_candidates(
+                fp.frame_fingerprints, top_k=top_k * 2
             )
 
             if not use_frame_matching or not candidates:
@@ -518,22 +518,18 @@ class Mimizam:
                 frame_map = {
                     r["video_id"]: r for r in frame_results
                 }
+                cand_map = {c["video_id"]: c for c in candidates}
                 # フレームマッチで時間的一貫性が確認された結果のみ採用
                 results = []
-                for cand in candidates:
-                    vid = cand["video_id"]
-                    if vid not in frame_map:
-                        continue
-                    fm = frame_map[vid]
+                for vid, fm in frame_map.items():
+                    cand = cand_map.get(vid, {})
                     entry = {
                         "video_id": vid,
-                        "video_similarity": cand["similarity"],
-                        "video": cand["video"],
+                        "video_similarity": cand.get("similarity", 0.0),
+                        "video": cand.get("video"),
+                        "vote_count": cand.get("votes", 0),
                         "frame_similarity": fm["frame_similarity"],
-                        "similarity": max(
-                            cand["similarity"],
-                            fm["frame_similarity"],
-                        ),
+                        "similarity": fm["frame_similarity"],
                     }
                     if "match_details" in fm:
                         entry["match_details"] = fm[
@@ -575,8 +571,8 @@ class Mimizam:
 
             pip_results = []
             for region, pip_fp in pip_fps:
-                matches = vdb.search_video(
-                    pip_fp.video_fingerprint, top_k=top_k
+                matches = vdb.search_frame_candidates(
+                    pip_fp.frame_fingerprints, top_k=top_k
                 )
                 for m in matches:
                     m["pip_region"] = {
@@ -693,9 +689,6 @@ class Mimizam:
                 stats["skip"] += 1
                 continue
 
-            vdb.add_video_fingerprint(
-                vid_id, fp.video_fingerprint, fp.descriptor_count
-            )
             vdb.add_frame_fingerprints(
                 vid_id, fp.frame_fingerprints
             )
