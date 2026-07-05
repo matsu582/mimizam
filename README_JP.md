@@ -1,6 +1,6 @@
 # mimizam
 
-**mimizam**は音声指紋（Audio Fingerprinting）と識別のためのShazam風アルゴリズムのPython実装です。音声からユニークな指紋を生成し、データベースと照合することで高精度な音楽識別を実現します。
+**mimizam**は音声指紋（Audio Fingerprinting）と映像指紋（Video Fingerprinting）のためのPython実装です。音声はShazam風アルゴリズムでユニークな指紋を生成し、映像はAKAZE特徴量＋VLAD＋PCAでフレーム単位の指紋を生成します。いずれもデータベースと照合することで高精度な識別を実現します。
 
 [![Python](https://img.shields.io/badge/python-3.9+-blue.svg)](https://python.org)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
@@ -9,8 +9,10 @@
 ## 主な機能
 
 - **高精度音声指紋生成**: Shazamアルゴリズムベースの指紋生成
+- **映像指紋生成**: AKAZE特徴量＋VLAD＋PCAによるフレーム単位指紋と、フレーム単位ANN投票による部分クリップ検索
+- **音声＋映像の統合検索**: 音声・映像の一致を統合スコアで評価（位置乖離チェック付き）
 - **適応パラメータ最適化**: 音声特性に応じた自動パラメータ調整
-- **マルチデータベース対応**: SQLite、MySQL、PostgreSQL、Elasticsearch
+- **マルチデータベース対応**: SQLite、MySQL、MariaDB、PostgreSQL、Elasticsearch（映像指紋のANNはsqlite-vec / pgvector / Elasticsearch dense_vector / MariaDBネイティブVECTORを使用）
 - **リアルタイム音声識別**: 短い音声クリップから楽曲を特定
 - **可視化機能**: スペクトログラムとピーク検出の可視化
 
@@ -29,6 +31,10 @@ pip install -r requirements.txt
 # パッケージをインストール（開発モード）
 pip install -e .
 ```
+
+映像指紋機能に必要な依存（`opencv-contrib-python` / `scikit-learn` / `scenedetect`）はコア依存に含まれています。既定バックエンドSQLiteのANNに必須の`sqlite-vec`もコア依存です。
+
+> **OpenCVについて**: 映像指紋はAKAZEを使用するため`opencv-contrib-python`が必須です（`opencv-python`とは競合するため入れないでください）。AKAZEはOpenCV 4.xでは`cv2.AKAZE_create`、OpenCV 5.xでは`cv2.xfeatures2d.AKAZE_create`として提供され、mimizamは両対応です。
 
 ### 基本的な使用方法
 
@@ -55,6 +61,35 @@ with create_mimizam_sqlite("my_music.db") as mimizam:
         print(f"識別結果: {song.title} (信頼度: {confidence:.2%})")
 ```
 
+### 映像の基本的な使用方法
+
+```python
+from mimizam import create_mimizam_sqlite
+
+with create_mimizam_sqlite("my_media.db") as mimizam:
+    # 映像指紋の実行時設定（環境変数ではなくクラス機能として設定）
+    mimizam.configure_video(scene_eval_fps=4.0, profile_frames=False)
+
+    # 映像を登録（初回はこの映像でコードブック/PCAモデルを学習）
+    video_id = mimizam.add_video("path/to/video.mp4", "My Video")
+
+    # 映像で検索（フレーム単位ANN投票→精密照合、PiP矩形検出付き）
+    results = mimizam.search_video("path/to/clip.mp4", top_k=5)
+    for result in results:
+        print(result)
+```
+
+学習済みコードブックモデル（`model/codebook_model.pki`）を使うCLIツールも同梱しています。
+
+```bash
+# 映像の登録（音声＋映像の統合指紋を登録）
+python examples/movie_fingerprinter.py path/to/video.mp4 --database ./media.db
+
+# 映像で統合検索（音声＋映像）
+python examples/movie_search.py -D -k 10 -m ./model/codebook_model.pki \
+    path/to/clip.mp4 --database ./media.db
+```
+
 ### デモの実行
 
 ```bash
@@ -75,6 +110,13 @@ python examples/mimizam_demo.py
 3. **ハッシュベース指紋**: アンカー・ターゲットピークペアからSHA-256ハッシュ生成
 4. **インテリジェントマッチング**: 時間アライメントと信頼度スコアリング
 
+### 映像指紋
+
+1. **シーン/キーフレーム選定**: `scene_eval_fps`で間引いた評価フレームに対しPySceneDetect（`ContentDetector`）でカットを検出。加えて定期サンプリングも実施
+2. **AKAZE特徴量抽出**: キーフレームごとに局所AKAZE（MLDB）記述子を抽出（`opencv-contrib-python`が必須）
+3. **VLAD＋PCAエンコード**: 学習済みコードブック上でVLADにより記述子を集約してフレーム単位指紋を生成し、PCAで次元削減
+4. **フレーム単位ANN投票**: クエリの各フレームがバックエンドのベクトルANNで近傍を取得し、映像別に得票/類似度を集計。その後、時間整合区間を精密照合で確認（PiP矩形検出付き）
+
 ## データベースバックエンド
 
 mimizamは複数のデータベースに対応：
@@ -83,30 +125,39 @@ mimizamは複数のデータベースに対応：
 from mimizam import (
     create_mimizam_sqlite,
     create_mimizam_mysql,
+    create_mimizam_mariadb,
     create_mimizam_postgresql,
     create_mimizam_elasticsearch
 )
 
-# SQLite（簡単・高速・推奨）
+# SQLite（簡単・高速・推奨。映像ANNはsqlite-vec）
 mimizam = create_mimizam_sqlite("fingerprints.db")
 
-# MySQL（拡張性）
+# MySQL（拡張性。映像ANNは総当たり）
 mimizam = create_mimizam_mysql(
     host="localhost", database="music_db",
     username="user", password="pass"
 )
 
-# PostgreSQL（高性能）
+# MariaDB（11.7+のネイティブVECTOR索引で映像ANN）
+mimizam = create_mimizam_mariadb(
+    host="localhost", database="music_db",
+    username="user", password="pass"
+)
+
+# PostgreSQL（高性能。映像ANNはpgvector）
 mimizam = create_mimizam_postgresql(
     host="localhost", database="music_db",
     username="user", password="pass"
 )
 
-# Elasticsearch（分散検索）
+# Elasticsearch（分散検索。映像ANNはdense_vector kNN）
 mimizam = create_mimizam_elasticsearch(
     host="localhost", index_name="music_index"
 )
 ```
+
+映像指紋のフレーム近傍検索（ANN）は、SQLite=`sqlite-vec`、PostgreSQL=`pgvector`、Elasticsearch=`dense_vector`、MariaDB=ネイティブ`VECTOR`索引を用います。MySQLはネイティブANN索引が無いため全フレーム総当たりで同一形式の結果を返します。
 
 ## プロジェクト構造
 
@@ -119,14 +170,20 @@ mimizam/
 │   ├── database_backends.py          # 統一バックエンド
 │   ├── adaptive_parameters.py        # 適応パラメータ調整
 │   └── backends/                     # 個別バックエンド実装
+│   ├── video_fingerprinter.py        # 映像指紋生成（AKAZE+VLAD+PCA）
+│   ├── video_database.py             # 映像指紋データベース
+│   ├── pip_detector.py               # PiP（ワイプ）矩形検出
+│   └── backends/                     # 個別バックエンド実装（sqlite/mysql/mariadb/postgresql/elasticsearch）
 ├── examples/
-│   ├── mimizam_demo.py               # APIデモ
-│   ├── video_search.py.py  　　　　　　# 動画音声検索
-│   └── video_fingerprinter.py        # 動画音声処理
+│   ├── mimizam_demo.py               # 音声APIデモ
+│   ├── movie_fingerprinter.py        # 映像＋音声の統合指紋登録CLI
+│   ├── movie_search.py               # 映像＋音声の統合検索CLI
+│   └── video_search.py               # 動画音声検索
+├── model/                            # 学習済みコードブックモデル
 ├── test_media/                       # デモ用音声ファイル
 ├── tests/                           # テストスイート
 ├── docs/                            # ドキュメント
-└── scripts/                         # ユーティリティ
+└── scripts/                         # ユーティリティ（モデル学習・DB移行等）
 ```
 
 ## 使用例
@@ -199,6 +256,7 @@ python run_tests.py
 
 詳細なドキュメントは`docs/`ディレクトリに含まれています：
 
+- [映像指紋の仕様](docs/video_fingerprint_spec.md)
 - [データベースセットアップ](docs/DATABASE_SETUP.md)
 - [指紋生成詳細](docs/fingerprint_generation_details.md)
 - [指紋スコアリング詳細](docs/fingerprint_scoring_details.md)
