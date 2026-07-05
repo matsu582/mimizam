@@ -451,6 +451,29 @@ class Mimizam:
             self.logger.error(f"映像追加エラー: {exc}")
             return None
 
+    @staticmethod
+    def _effective_video_score(
+        frame_similarity: float,
+        match_details: Dict[str, Any],
+        votes: int,
+        floor: float = 0.2,
+    ) -> float:
+        """被覆率・票数を反映した実効的な映像スコアを算出する
+
+        frame_similarity（最良フレームのピーク類似度）だけでは、ごく僅かな
+        フレームが偶発的に高一致した候補（例: 4/84フレーム）が高評価に
+        なってしまう。クエリのどれだけが一致したかを表す被覆率(match_ratio)と
+        ANN得票率を反映し、薄い偶発一致を減点する。
+
+        strength = 0.5 * 被覆率 + 0.5 * 得票率  (いずれも0..1に正規化)
+        実効スコア = frame_similarity * (floor + (1 - floor) * strength)
+        """
+        total = match_details.get("total_frames", 0) or 0
+        coverage = match_details.get("match_ratio", 0.0) or 0.0
+        vote_ratio = min(1.0, votes / total) if total > 0 else 0.0
+        strength = 0.5 * coverage + 0.5 * vote_ratio
+        return frame_similarity * (floor + (1.0 - floor) * strength)
+
     def search_video(
         self,
         query_file_path: str,
@@ -523,13 +546,19 @@ class Mimizam:
                 results = []
                 for vid, fm in frame_map.items():
                     cand = cand_map.get(vid, {})
+                    votes = cand.get("votes", 0)
+                    md = fm.get("match_details", {})
+                    effective = self._effective_video_score(
+                        fm["frame_similarity"], md, votes
+                    )
                     entry = {
                         "video_id": vid,
                         "video_similarity": cand.get("similarity", 0.0),
                         "video": cand.get("video"),
-                        "vote_count": cand.get("votes", 0),
+                        "vote_count": votes,
                         "frame_similarity": fm["frame_similarity"],
-                        "similarity": fm["frame_similarity"],
+                        # ランキング/統合に使う実効スコアは被覆率・票数を反映
+                        "similarity": effective,
                     }
                     if "match_details" in fm:
                         entry["match_details"] = fm[
