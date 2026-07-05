@@ -19,7 +19,6 @@ class MySQLBackend(DatabaseBackend):
     def __init__(self, config: DatabaseConfig):
         super().__init__(config)
         self.connection = None
-        self._vector_available = False
     
     def connect(self) -> bool:
         """MySQLデータベースに接続"""

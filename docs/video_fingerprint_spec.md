@@ -31,8 +31,6 @@
 
 シーン検出には PySceneDetect の `ContentDetector` を用いる。`ContentDetector` はフレームをHSV色空間に変換し、隣接フレーム間のHSV各成分の差分を統合したコンテンツスコアが閾値（`scene_threshold` = 27.0）を超えた時点を「シーン変化」と判定する。自前のデコードループから縮小フレームを逐次 `process_frame()` に渡すため、PySceneDetect側での追加デコードは発生しない。
 
-PySceneDetectが導入されていない環境では、縮小フレームをグレースケール化し前フレームとの画素値の平均差分が閾値（`scene_threshold` × 2 = 54.0）を超えたらシーン変化とみなす方式にフォールバックする。
-
 ```
 フレームN:   [暗い室内シーン]
 フレームN+1: [明るい屋外シーン]  ← 差分が大きい → シーン変化
@@ -390,7 +388,7 @@ numpy配列のみを保存する形式（format_version=2）を使用し、sklea
 
 | パラメータ | デフォルト値 | 説明 |
 |---|---|---|
-| `scene_threshold` | 27.0 | シーン変化検出の閾値。PySceneDetect `ContentDetector` にそのまま渡す。フォールバック（輝度差分）時は×2=54.0を使用 |
+| `scene_threshold` | 27.0 | シーン変化検出の閾値。PySceneDetect `ContentDetector` にそのまま渡す |
 | `scene_eval_fps` | 8.0 | シーン検出・フレーム評価を行うfps（全フレームは処理しない） |
 | `sample_interval` | 1.0秒 | シーン変化がない区間での定期サンプリング採用の間隔 |
 | `redundancy_threshold` | 0.95 (HSV相関) | 冗長フレーム除外の閾値 |
