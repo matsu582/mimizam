@@ -788,9 +788,20 @@ def main() -> int:
         action="store_true",
         help="詳細ログを出力",
     )
+    parser.add_argument(
+        "--scene-eval-fps",
+        type=float,
+        default=None,
+        help="シーン検出の評価fps（既定4.0）。登録時と同じ値に揃える必要がある。"
+             "登録を8fpsで行った場合は検索も8を指定する",
+    )
 
     args = parser.parse_args()
     setup_logging(args.verbose)
+
+    # 評価fpsを指定時は環境変数で指紋生成側に伝える（登録側と同じ配線）
+    if args.scene_eval_fps:
+        os.environ["MIMIZAM_SCENE_EVAL_FPS"] = str(args.scene_eval_fps)
     logger = logging.getLogger(__name__)
 
     try:
