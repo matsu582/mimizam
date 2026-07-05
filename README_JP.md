@@ -178,6 +178,7 @@ mimizam/
 │   ├── mimizam_demo.py               # 音声APIデモ
 │   ├── movie_fingerprinter.py        # 映像＋音声の統合指紋登録CLI
 │   ├── movie_search.py               # 映像＋音声の統合検索CLI
+│   ├── video_fingerprinter.py        # 動画から音声を抽出して音声指紋を生成
 │   └── video_search.py               # 動画音声検索
 ├── model/                            # 学習済みコードブックモデル
 ├── test_media/                       # デモ用音声ファイル

@@ -177,6 +177,7 @@ mimizam/
 │   ├── mimizam_demo.py               # Audio API demo
 │   ├── movie_fingerprinter.py        # Combined audio + video registration CLI
 │   ├── movie_search.py               # Combined audio + video search CLI
+│   ├── video_fingerprinter.py        # Extract audio from video and create audio fingerprints
 │   └── video_search.py               # Video audio search
 ├── model/                            # Pretrained codebook model
 ├── test_media/                       # Demo audio files
