@@ -862,10 +862,6 @@ def main() -> int:
 
     args = parser.parse_args()
     setup_logging(args.verbose)
-
-    # 評価fpsを指定時は環境変数で指紋生成側に伝える（登録側と同じ配線）
-    if args.scene_eval_fps:
-        os.environ["MIMIZAM_SCENE_EVAL_FPS"] = str(args.scene_eval_fps)
     logger = logging.getLogger(__name__)
 
     try:
@@ -882,6 +878,9 @@ def main() -> int:
         # Mimizamシステムを初期化
         logger.info("Mimizamシステムを初期化中...")
         mimizam = create_mimizam_instance(args)
+
+        # 映像指紋の実行時設定（環境変数ではなくConfig経由で渡す）
+        mimizam.configure_video(scene_eval_fps=args.scene_eval_fps or None)
 
         # 映像モデルの読み込み
         if not args.skip_visual:

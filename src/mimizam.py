@@ -314,13 +314,48 @@ class Mimizam:
             self._video_fingerprinter = None
         if not hasattr(self, '_video_db'):
             self._video_db = None
+        if not hasattr(self, '_video_config'):
+            self._video_config = None
+
+    def configure_video(
+        self,
+        scene_eval_fps: Optional[float] = None,
+        profile_frames: Optional[bool] = None,
+    ) -> None:
+        """映像指紋の実行時設定を行う
+
+        環境変数ではなく VideoFingerprintConfig のフィールドとして
+        渡す。VideoFingerprinter 生成前・生成後のどちらでも呼べる。
+
+        Args:
+            scene_eval_fps: シーン検出の評価fps（Noneで変更なし）
+            profile_frames: 処理時間内訳のログ出力（Noneで変更なし）
+        """
+        from .video_fingerprinter import VideoFingerprintConfig
+        self._ensure_video_system()
+        if self._video_config is None:
+            self._video_config = VideoFingerprintConfig()
+        if scene_eval_fps is not None:
+            self._video_config.scene_eval_fps = scene_eval_fps
+        if profile_frames is not None:
+            self._video_config.profile_frames = profile_frames
+        # 既に生成済みなら即反映（全クラスでconfigを共有）
+        vfp = self._video_fingerprinter
+        if vfp is not None:
+            vfp.config.scene_eval_fps = self._video_config.scene_eval_fps
+            vfp.config.profile_frames = self._video_config.profile_frames
+            vfp.frame_selector.config = vfp.config
+            vfp.encoder.config.scene_eval_fps = vfp.config.scene_eval_fps
+            vfp.encoder.config.profile_frames = vfp.config.profile_frames
 
     def _get_video_fingerprinter(self):
         """映像指紋生成器を取得（遅延インポート）"""
         self._ensure_video_system()
         if self._video_fingerprinter is None:
             from .video_fingerprinter import VideoFingerprinter
-            self._video_fingerprinter = VideoFingerprinter()
+            self._video_fingerprinter = VideoFingerprinter(
+                config=self._video_config
+            )
         return self._video_fingerprinter
 
     def _get_video_db(

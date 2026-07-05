@@ -306,12 +306,6 @@ def main() -> int:
     )
 
     args = parser.parse_args()
-    # フレーム選定の内訳計測を有効化（video_fingerprinter側が参照する環境変数）
-    if args.profile:
-        os.environ["MIMIZAM_PROFILE_FRAMES"] = "1"
-    # シーン検出の評価fpsを上書き（video_fingerprinter側が参照する環境変数）
-    if args.scene_eval_fps:
-        os.environ["MIMIZAM_SCENE_EVAL_FPS"] = str(args.scene_eval_fps)
     setup_logging(args.verbose)
     logger = logging.getLogger(__name__)
 
@@ -351,6 +345,12 @@ def main() -> int:
         # Mimizamシステムを初期化
         logger.info("Mimizamシステムを初期化中...")
         mimizam = create_mimizam_instance(args)
+
+        # 映像指紋の実行時設定（環境変数ではなくConfig経由で渡す）
+        mimizam.configure_video(
+            scene_eval_fps=args.scene_eval_fps or None,
+            profile_frames=args.profile or None,
+        )
 
         # 映像モデルの読み込み（映像指紋が有効な場合）
         if not args.skip_visual:

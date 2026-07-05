@@ -128,6 +128,9 @@ class VideoFingerprintConfig:
     # 回数が減って高速化するため既定を4.0とする。
     scene_eval_fps: float = 4.0
 
+    # Trueにするとフレーム選定・VLAD等の処理時間内訳をログ出力する
+    profile_frames: bool = False
+
     # フレーム正規化（長辺ピクセル数、0で無効）
     normalize_long_side: int = DEFAULT_NORMALIZE_LONG_SIDE
 
@@ -176,7 +179,8 @@ class FrameSelector:
     """映像からキーフレームを選定するクラス
 
     1回の映像走査でシーン検出とフレーム選定を同時に行う。
-    シーン検出はフレーム間の輝度差分、冗長除去はHSVヒストグラム相関で判定。
+    シーン検出はPySceneDetectのContentDetector、冗長除去はHSVヒストグラム
+    相関で判定する。
     """
 
     # シーン検出用の縮小解像度
@@ -224,14 +228,7 @@ class FrameSelector:
         interval_frames = max(1, int(self.config.sample_interval * fps))
 
         # 評価間隔: scene_eval_fps でフレームを評価（精度と速度のバランス）
-        # 環境変数 MIMIZAM_SCENE_EVAL_FPS があれば設定値を上書きする
         eval_fps = self.config.scene_eval_fps or 8.0
-        env_fps = os.environ.get("MIMIZAM_SCENE_EVAL_FPS")
-        if env_fps:
-            try:
-                eval_fps = float(env_fps) or eval_fps
-            except ValueError:
-                pass
         eval_stride = max(1, int(round(fps / eval_fps)))
 
         detector = self._create_scene_detector()
@@ -242,8 +239,8 @@ class FrameSelector:
         evaluated = 0
         first_eval = True
 
-        # 環境変数 MIMIZAM_PROFILE_FRAMES 設定時のみ各処理の所要時間を集計
-        prof_on = bool(os.environ.get("MIMIZAM_PROFILE_FRAMES"))
+        # config.profile_frames が True のときのみ各処理の所要時間を集計
+        prof_on = self.config.profile_frames
         prof = {
             "grab": 0.0, "retrieve": 0.0, "resize": 0.0,
             "scene": 0.0, "dedup": 0.0, "accept": 0.0,
@@ -706,8 +703,8 @@ class VLADEncoder:
         frame_fingerprints = []
         total_desc = 0
 
-        # 環境変数 MIMIZAM_PROFILE_FRAMES 設定時のみ内訳を集計
-        prof_on = bool(os.environ.get("MIMIZAM_PROFILE_FRAMES"))
+        # config.profile_frames が True のときのみ内訳を集計
+        prof_on = self.config.profile_frames
         t_vlad = 0.0
         t_pca = 0.0
 
@@ -911,7 +908,7 @@ class VideoFingerprinter:
             logger.warning(f"フレームを選定できませんでした: {video_path}")
             return None
 
-        prof_on = bool(os.environ.get("MIMIZAM_PROFILE_FRAMES"))
+        prof_on = self.config.profile_frames
         _t = time.perf_counter() if prof_on else 0.0
         _, per_frame = self.encoder.extract_descriptors(frames)
         if prof_on:
@@ -1115,5 +1112,16 @@ class VideoFingerprinter:
         self.encoder.save_model(path)
 
     def load_model(self, path: str) -> None:
-        """保存済みモデルを読み込み"""
+        """保存済みモデルを読み込み
+
+        モデルには学習時の構造パラメータ（コードブック/PCA次元等）が保存されるが、
+        scene_eval_fps・profile_frames といった実行時設定は現在のconfigを維持する。
+        読み込み後は3クラスで同一のconfigインスタンスを共有する。
+        """
+        runtime_scene_eval_fps = self.config.scene_eval_fps
+        runtime_profile_frames = self.config.profile_frames
         self.encoder.load_model(path)
+        self.encoder.config.scene_eval_fps = runtime_scene_eval_fps
+        self.encoder.config.profile_frames = runtime_profile_frames
+        self.config = self.encoder.config
+        self.frame_selector.config = self.encoder.config
