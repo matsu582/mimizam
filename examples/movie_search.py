@@ -168,6 +168,25 @@ def _format_similarity(similarity: float) -> str:
         return f"LOW    ({similarity:.3f})"
 
 
+def _dominant_time_offset(
+    time_diffs: List[float], bin_width: float = 0.5,
+) -> float:
+    """時間差の最頻ビン中心を返す
+
+    短いクリップを長い全編で照合すると、全編に散る偶発一致（ノイズ）が
+    多数を占め、時間差の中央値はノイズの重心へ引かれて誤位置を示す。
+    最大整列クラスタ＝最頻ビンを採ることでノイズに強い代表オフセットを得る。
+    """
+    if not time_diffs:
+        return 0.0
+    from collections import Counter
+    counts = Counter(round(d / bin_width) for d in time_diffs)
+    best_bin = max(counts.items(), key=lambda kv: kv[1])[0]
+    center = best_bin * bin_width
+    near = [d for d in time_diffs if abs(d - center) <= bin_width]
+    return sum(near) / len(near) if near else center
+
+
 def _format_time_offset(offset: float) -> str:
     """時間オフセットを人間が読める形式に変換する"""
     abs_time = abs(offset)
@@ -456,16 +475,16 @@ def _print_audio_match_detail(
     if not positions:
         return
 
-    # 一致区間の計算（時間差の中央値でクラスタリング）
-    time_diffs = sorted(
-        pos["time_diff"] for pos in positions
-    )
-    median_offset = time_diffs[len(time_diffs) // 2]
+    # 一致区間の計算（時間差の最頻ビンでクラスタリング）
+    # 全マッチの中央値は全編に散るノイズに引かれて誤位置を示すため、
+    # 最大整列クラスタ＝最頻ビンの中心を代表オフセットに採る。
+    time_diffs = [pos["time_diff"] for pos in positions]
+    dominant_offset = _dominant_time_offset(time_diffs)
 
-    # 中央値±2秒以内の一致ポジションを集計
+    # 最頻オフセット±2秒以内の一致ポジションを集計
     consistent = [
         p for p in positions
-        if abs(p["time_diff"] - median_offset) < 2.0
+        if abs(p["time_diff"] - dominant_offset) < 2.0
     ]
 
     if consistent:
