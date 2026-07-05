@@ -113,7 +113,7 @@ python examples/mimizam_demo.py
 ### 映像指紋
 
 1. **シーン/キーフレーム選定**: `scene_eval_fps`で間引いた評価フレームに対しPySceneDetect（`ContentDetector`）でカットを検出。加えて定期サンプリングも実施
-2. **AKAZE特徴量抽出**: キーフレームごとに局所AKAZE（MLDB）記述子を抽出（`opencv-contrib-python`が必須）
+2. **AKAZE特徴量抽出**: キーフレームごとに局所AKAZE（MLDB）記述子を抽出（`opencv-contrib-python`が必須）。AKAZEを採用したのは、回転・スケール・輝度変化（再エンコードやPiP縮小）に頑健で、非線形拡散スケール空間により圧縮ぼけ下でもエッジを保存でき、バイナリMLDB記述子が省メモリかつ高速照合（1,000フレームで約100万記述子規模でも実用的）で、SURFのような特許制約がなくOpenCV 4.x/5.x双方で利用可能なためです。詳細な理由は[仕様書](docs/video_fingerprint_spec.md)を参照。
 3. **VLAD＋PCAエンコード**: 学習済みコードブック上でVLADにより記述子を集約してフレーム単位指紋を生成し、PCAで次元削減
 4. **フレーム単位ANN投票**: クエリの各フレームがバックエンドのベクトルANNで近傍を取得し、映像別に得票/類似度を集計。その後、時間整合区間を精密照合で確認（PiP矩形検出付き）
 
