@@ -71,7 +71,7 @@ database = FingerprintDatabase(config)
 ### 4. アプリケーション・ツール層
 ```bash
 # CLI ツールとデモアプリケーション
-python examples/video_search.py
+python examples/audio_from_video_search.py
 python examples/mimizam_demo.py
 ```
 

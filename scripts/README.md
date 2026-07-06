@@ -173,7 +173,7 @@ PiP画像背景（`pip_center_*_image`）では、別の映像の最初のフレ
 
 AKAZE + VLAD + PCA の事前学習済みモデルを構築する。大規模画像/動画データセットから AKAZE 記述子を抽出し、K-Means codebook + PCA 変換器を学習して `.pkl` ファイルとして保存する。
 
-出力モデルは `examples/visual_fingerprinter.py` と `examples/visual_search.py` の `--model` オプションで使用する。
+出力モデルは `examples/visual_from_video_fingerprinter.py` と `examples/visual_from_video_search.py` の `--model` オプションで使用する。
 
 ### 依存パッケージ
 
@@ -244,10 +244,10 @@ python scripts/train_pretrained_model.py \
 
 ```bash
 # 映像の登録
-python examples/visual_fingerprinter.py /path/to/videos \
+python examples/visual_from_video_fingerprinter.py /path/to/videos \
     --model models/akaze_vlad_pca_pretrained.pkl
 
 # 映像の検索
-python examples/visual_search.py /path/to/query.mp4 \
+python examples/visual_from_video_search.py /path/to/query.mp4 \
     --model models/akaze_vlad_pca_pretrained.pkl --details
 ```

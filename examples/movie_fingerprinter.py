@@ -4,7 +4,7 @@
 
 動画ファイルから音声指紋と映像指紋の両方を生成し、
 同一のUUIDでデータベースに登録する。
-video_fingerprinter.py（音声）とvisual_fingerprinter.py（映像）を
+audio_from_video_fingerprinter.py（音声）とvisual_from_video_fingerprinter.py（映像）を
 統合したスクリプト。
 """
 

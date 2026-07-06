@@ -4,7 +4,7 @@
 
 動画ファイルから音声指紋と映像指紋の両方で検索し、
 結果を統合して表示する。
-video_search.py（音声検索）とvisual_search.py（映像検索）を
+audio_from_video_search.py（音声検索）とvisual_from_video_search.py（映像検索）を
 統合したスクリプト。
 
 同一UUIDで登録された音声・映像の結果をIDで結合し、

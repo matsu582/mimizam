@@ -407,11 +407,11 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 使用例:
-  python video_fingerprinter.py /path/to/videos
-  python video_fingerprinter.py /path/to/videos --database custom.db
-  python video_fingerprinter.py /path/to/videos --recursive --verbose
-  python video_fingerprinter.py /path/to/videos --no-adaptive --verbose
-  python video_fingerprinter.py /path/to/videos --no-adaptive
+  python audio_from_video_fingerprinter.py /path/to/videos
+  python audio_from_video_fingerprinter.py /path/to/videos --database custom.db
+  python audio_from_video_fingerprinter.py /path/to/videos --recursive --verbose
+  python audio_from_video_fingerprinter.py /path/to/videos --no-adaptive --verbose
+  python audio_from_video_fingerprinter.py /path/to/videos --no-adaptive
         """
     )
     

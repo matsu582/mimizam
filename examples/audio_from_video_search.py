@@ -632,12 +632,12 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  python video_search.py /path/to/video.mp4
-  python video_search.py /path/to/video.mp4 --details
-  python video_search.py /path/to/folder --database custom.db --details
-  python video_search.py /path/to/audio.mp3 --verbose --details
-  python video_search.py /path/to/folder --min-confidence 0.7 --details
-  python video_search.py /path/to/video.mp4 --disable-adaptive --details
+  python audio_from_video_search.py /path/to/video.mp4
+  python audio_from_video_search.py /path/to/video.mp4 --details
+  python audio_from_video_search.py /path/to/folder --database custom.db --details
+  python audio_from_video_search.py /path/to/audio.mp3 --verbose --details
+  python audio_from_video_search.py /path/to/folder --min-confidence 0.7 --details
+  python audio_from_video_search.py /path/to/video.mp4 --disable-adaptive --details
         """
     )
     
@@ -736,7 +736,7 @@ Examples:
             # SQLite用のデータベースを検証
             if not os.path.exists(args.database):
                 logger.error(f"SQLite database not found: {args.database}")
-                logger.info("Run video_fingerprinter.py first to create a database")
+                logger.info("Run audio_from_video_fingerprinter.py first to create a database")
                 return 1
             
             mimizam = create_mimizam_sqlite(args.database, matcher_config, **fingerprinter_config)
@@ -759,7 +759,7 @@ Examples:
         
         if stats['songs'] == 0:
             logger.error("Database is empty!")
-            logger.info("Run video_fingerprinter.py first to add songs to the database")
+            logger.info("Run audio_from_video_fingerprinter.py first to add songs to the database")
             return 1
         
         # 適応指紋生成ステータス

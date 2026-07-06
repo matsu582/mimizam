@@ -4,7 +4,7 @@
 
 動画ファイルから AKAZE + VLAD + PCA ベースの映像指紋を生成し、
 データベースに登録済みの映像と照合して類似映像を検索するスクリプト。
-既存の video_search.py（音声指紋検索）とは異なり、
+既存の audio_from_video_search.py（音声指紋検索）とは異なり、
 映像の視覚的特徴量を用いた検索を行う。
 
 検索の流れ:
@@ -350,19 +350,19 @@ def main() -> int:
         epilog="""\
 使用例:
   # 単一ファイルで検索
-  python visual_search.py /path/to/query.mp4 --model model.pkl
+  python visual_from_video_search.py /path/to/query.mp4 --model model.pkl
 
   # 詳細情報付きで検索
-  python visual_search.py /path/to/query.mp4 --model model.pkl --details
+  python visual_from_video_search.py /path/to/query.mp4 --model model.pkl --details
 
   # フォルダ内の全動画で検索
-  python visual_search.py /path/to/folder --model model.pkl --details
+  python visual_from_video_search.py /path/to/folder --model model.pkl --details
 
   # フレーム単位マッチングを無効化（高速モード）
-  python visual_search.py /path/to/query.mp4 --model model.pkl --no-frame-matching
+  python visual_from_video_search.py /path/to/query.mp4 --model model.pkl --no-frame-matching
 
   # MySQLバックエンドを使用
-  python visual_search.py /path/to/query.mp4 --model model.pkl --db-type mysql \\
+  python visual_from_video_search.py /path/to/query.mp4 --model model.pkl --db-type mysql \\
       --db-host localhost --db-name mimizam --db-user user --db-password pass
 
 modelファイルは scripts/train_pretrained_model.py で事前学習。
@@ -448,7 +448,7 @@ AKAZE記述子→VLAD集約→PCA圧縮の変換パイプラインを保持し�
         if not os.path.isfile(args.model):
             logger.error(f"モデルファイルが見つかりません: {args.model}")
             logger.info(
-                "visual_fingerprinter.py --model model.pkl で"
+                "visual_from_video_fingerprinter.py --model model.pkl で"
                 "モデルを生成してください"
             )
             return 1
@@ -467,7 +467,7 @@ AKAZE記述子→VLAD集約→PCA圧縮の変換パイプラインを保持し�
         if video_count == 0:
             logger.error("データベースが空です")
             logger.info(
-                "visual_fingerprinter.py を使って映像を登録してください"
+                "visual_from_video_fingerprinter.py を使って映像を登録してください"
             )
             return 1
 
