@@ -63,7 +63,7 @@ def _ascii_hist(counts: List[int], width: int = 50) -> List[str]:
     lines = []
     for c in counts:
         n = int(round(c / peak * width)) if peak > 0 else 0
-        lines.append("\u2588" * n)
+        lines.append("█" * n)
     return lines
 
 

@@ -18,6 +18,7 @@ import subprocess
 
 # インストール済みのmimizamパッケージからインポート
 from mimizam import Mimizam, create_mimizam_sqlite, create_mimizam_mysql, create_mimizam_postgresql, create_mimizam_elasticsearch, DatabaseConfig
+from mimizam import dominant_time_offset
 
 # サポートされている動画ファイル拡張子
 VIDEO_EXTENSIONS = {
@@ -224,25 +225,6 @@ def _print_match_results(matches: List[Dict[str, Any]], file_name: str,
             print()
 
 
-def _dominant_time_offset(
-    time_diffs: List[float], bin_width: float = 0.5,
-) -> float:
-    """時間差の最頻ビン中心を返す
-
-    短いクリップを長い全編で照合すると、全編に散る偶発一致（ノイズ）が
-    多数を占め、時間差の中央値はノイズの重心へ引っ張られて誤位置を示す。
-    最大整列クラスタ＝最頻ビンを採ることでノイズに強い代表オフセットを得る。
-    """
-    if not time_diffs:
-        return 0.0
-    from collections import Counter
-    counts = Counter(round(d / bin_width) for d in time_diffs)
-    best_bin = max(counts.items(), key=lambda kv: kv[1])[0]
-    center = best_bin * bin_width
-    near = [d for d in time_diffs if abs(d - center) <= bin_width]
-    return sum(near) / len(near) if near else center
-
-
 def _print_detailed_match_info_from_result(match_result: Dict[str, Any]) -> None:
     """マッチ結果から詳細情報を表示"""
     if 'detailed_info' not in match_result:
@@ -264,7 +246,7 @@ def _print_detailed_match_info_from_result(match_result: Dict[str, Any]) -> None
     # 時間差から最頻オフセット（最大整列クラスタの中心）を求める
     # 全マッチの中央値はノイズに引かれてズレるため最頻ビンを採用
     time_diffs = [pos['time_diff'] for pos in match_positions]
-    dominant_offset = _dominant_time_offset(time_diffs)
+    dominant_offset = dominant_time_offset(time_diffs)
     
     # クエリとDBの時間範囲
     query_times = [pos['query_time'] for pos in match_positions]
@@ -650,12 +632,12 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  python video_search.py /path/to/video.mp4
-  python video_search.py /path/to/video.mp4 --details
-  python video_search.py /path/to/folder --database custom.db --details
-  python video_search.py /path/to/audio.mp3 --verbose --details
-  python video_search.py /path/to/folder --min-confidence 0.7 --details
-  python video_search.py /path/to/video.mp4 --disable-adaptive --details
+  python audio_from_video_search.py /path/to/video.mp4
+  python audio_from_video_search.py /path/to/video.mp4 --details
+  python audio_from_video_search.py /path/to/folder --database custom.db --details
+  python audio_from_video_search.py /path/to/audio.mp3 --verbose --details
+  python audio_from_video_search.py /path/to/folder --min-confidence 0.7 --details
+  python audio_from_video_search.py /path/to/video.mp4 --disable-adaptive --details
         """
     )
     
@@ -754,7 +736,7 @@ Examples:
             # SQLite用のデータベースを検証
             if not os.path.exists(args.database):
                 logger.error(f"SQLite database not found: {args.database}")
-                logger.info("Run video_fingerprinter.py first to create a database")
+                logger.info("Run audio_from_video_fingerprinter.py first to create a database")
                 return 1
             
             mimizam = create_mimizam_sqlite(args.database, matcher_config, **fingerprinter_config)
@@ -777,7 +759,7 @@ Examples:
         
         if stats['songs'] == 0:
             logger.error("Database is empty!")
-            logger.info("Run video_fingerprinter.py first to add songs to the database")
+            logger.info("Run audio_from_video_fingerprinter.py first to add songs to the database")
             return 1
         
         # 適応指紋生成ステータス
