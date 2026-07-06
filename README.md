@@ -91,6 +91,12 @@ CLI tools that use the pretrained codebook model (`model/codebook_model.npz`) ar
 # Register a video (registers combined audio + video fingerprints)
 python examples/movie_fingerprinter.py path/to/video.mp4 --database ./media.db
 
+# Register while keeping raw AKAZE descriptors in the DB.
+# Required if you later want to regenerate fingerprints after updating the
+# model (rebuild_video_fingerprints); note the DB grows larger.
+python examples/movie_fingerprinter.py path/to/video.mp4 --database ./media.db \
+    --model ./model/codebook_model.npz --store-descriptors
+
 # Combined search by video (audio + video)
 python examples/movie_search.py -D -k 10 -m ./model/codebook_model.npz \
     path/to/clip.mp4 --database ./media.db
