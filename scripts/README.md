@@ -7,7 +7,6 @@ mimizam の開発・運用補助スクリプト集。
 | スクリプト | 概要 |
 |---|---|
 | `create_demo_audio.py` | デモ用合成音声ファイルの生成 |
-| `migrate_database.py` | データベーススキーマの移行（全バックエンド対応） |
 | `generate_transformed_videos.py` | 映像指紋検証用の改変動画生成 |
 | `train_pretrained_model.py` | AKAZE + VLAD + PCA 事前学習済みモデルの構築 |
 
@@ -25,26 +24,6 @@ python scripts/create_demo_audio.py
 - `test_media/demo_song1.wav`
 - `test_media/demo_song2.wav`
 - `test_media/demo_query.wav`
-
----
-
-## migrate_database.py
-
-データベーススキーマを新バージョンに移行する。SQLite / MySQL / PostgreSQL / Elasticsearch の全バックエンドに対応。
-
-```bash
-# SQLite（デフォルト）
-python scripts/migrate_database.py
-
-# MySQL
-python scripts/migrate_database.py --backend mysql --host localhost --database mimizam
-
-# PostgreSQL
-python scripts/migrate_database.py --backend postgresql --host localhost --database mimizam
-
-# Elasticsearch
-python scripts/migrate_database.py --backend elasticsearch --host localhost
-```
 
 ---
 

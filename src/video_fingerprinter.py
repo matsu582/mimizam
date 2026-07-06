@@ -7,8 +7,7 @@ PySceneDetect + AKAZE + VLAD + PCA を組み合わせた映像指紋パイプラ
 
 import os
 import logging
-import io
-import pickle
+import json
 import time
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -19,45 +18,6 @@ import cv2
 import numpy as np
 
 logger = logging.getLogger(__name__)
-
-
-# モジュールパスの再マッピング（pickle互換性のため）
-_MODULE_REMAP = {
-    "src.video_fingerprinter": "mimizam.src.video_fingerprinter",
-    "src.pip_detector": "mimizam.src.pip_detector",
-}
-
-
-class _ModuleRemapUnpickler(pickle.Unpickler):
-    """pickleのモジュールパスを再マッピングするUnpickler
-
-    学習スクリプトが `from src.video_fingerprinter import ...` で
-    保存したモデルを、パッケージインストール環境（mimizam.src.）
-    でも読み込めるようにする。逆方向の変換も対応。
-    """
-
-    def find_class(self, module: str, name: str):
-        remapped = _MODULE_REMAP.get(module)
-        if remapped is None:
-            for old, new in _MODULE_REMAP.items():
-                if module == new:
-                    remapped = old
-                    break
-        if remapped:
-            try:
-                return super().find_class(remapped, name)
-            except (ModuleNotFoundError, ImportError):
-                pass
-        return super().find_class(module, name)
-
-
-def _safe_pickle_load(f: io.IOBase):
-    """モジュールパス互換性を考慮したpickle読み込み"""
-    try:
-        return _ModuleRemapUnpickler(f).load()
-    except (ModuleNotFoundError, ImportError):
-        f.seek(0)
-        return pickle.load(f)
 
 
 # フレーム正規化のデフォルト長辺ピクセル数
@@ -154,6 +114,12 @@ class VideoFingerprintConfig:
     # 検索閾値
     similarity_threshold: float = 0.5
 
+    # 生AKAZE記述子(raw_descriptors)を指紋に保持するか
+    # Trueにすると元映像なしでの指紋再生成(rebuild_from_descriptors)が
+    # 可能になるが、フレーム毎に多数×61次元の記述子をDB保存するため容量が
+    # 肥大化する。既定Falseで保持しない。
+    store_raw_descriptors: bool = False
+
 
 @dataclass
 class VideoFrameInfo:
@@ -248,39 +214,27 @@ class FrameSelector:
         # config.profile_frames が True のときのみ各処理の所要時間を集計
         prof_on = self.config.profile_frames
         prof = {
-            "grab": 0.0, "retrieve": 0.0, "resize": 0.0,
+            "decode": 0.0, "resize": 0.0,
             "scene": 0.0, "dedup": 0.0, "accept": 0.0,
         }
         n_dedup = 0
 
         frame_idx = 0
         while True:
+            # 全フレームを復号する。ContentDetectorは連続フレーム前提で
+            # フレーム間差分を評価するため、間引くとscene_thresholdの実効
+            # 感度がfpsに依存してぶれる。シーン検出は全フレームを投入し、
+            # eval_strideはキーフレーム候補の間引きにのみ用いる。
             _t = time.perf_counter() if prof_on else 0.0
-            grabbed = cap.grab()
+            ret, frame = cap.read()
             if prof_on:
-                prof["grab"] += time.perf_counter() - _t
-            if not grabbed:
+                prof["decode"] += time.perf_counter() - _t
+            if not ret:
                 break
 
-            # 評価間隔でのみフレームを処理
-            if frame_idx % eval_stride != 0:
-                frame_idx += 1
-                continue
-
-            _t = time.perf_counter() if prof_on else 0.0
-            ret, frame = cap.retrieve()
-            if prof_on:
-                prof["retrieve"] += time.perf_counter() - _t
-            if not ret:
-                frame_idx += 1
-                continue
-
-            evaluated += 1
             ts = frame_idx / fps
 
-            # シーン変化検出
-            # カラー縮小フレームをContentDetectorに逐次投入し、単一デコード
-            # パスのままカット検出する
+            # シーン変化検出（全フレーム投入）
             _t = time.perf_counter() if prof_on else 0.0
             small = cv2.resize(
                 frame, (self._SCENE_W, self._SCENE_H),
@@ -292,7 +246,7 @@ class FrameSelector:
             _t = time.perf_counter() if prof_on else 0.0
             is_scene_change = False
             if first_eval:
-                # 最初の評価フレームは常にシーン開始として採用
+                # 最初のフレームは常にシーン開始として採用
                 is_scene_change = True
                 first_eval = False
                 detector.process_frame(frame_idx, small)
@@ -303,6 +257,15 @@ class FrameSelector:
 
             if is_scene_change:
                 scene_count += 1
+
+            # キーフレーム候補の評価はeval_strideで間引く
+            # （シーン変化フレームは常に評価・採用対象）
+            is_eval = (frame_idx % eval_stride == 0)
+            if not (is_eval or is_scene_change):
+                frame_idx += 1
+                continue
+
+            evaluated += 1
 
             # フレーム採用判定
             should_accept = False
@@ -343,8 +306,7 @@ class FrameSelector:
         if prof_on:
             logger.info(
                 "フレーム選定 内訳[秒]: "
-                f"grab(全復号)={prof['grab']:.1f} "
-                f"retrieve(色変換)={prof['retrieve']:.1f} "
+                f"decode(全復号)={prof['decode']:.1f} "
                 f"resize(縮小)={prof['resize']:.1f} "
                 f"scene(ContentDetector)={prof['scene']:.1f} "
                 f"dedup(ヒスト判定×{n_dedup})={prof['dedup']:.1f} "
@@ -469,7 +431,12 @@ class VLADEncoder:
         fidx, ts, img = frame
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
         if self.config.normalize_long_side > 0:
-            gray = normalize_frame(gray, self.config.normalize_long_side)
+            # 低解像度映像も含め全フレームの長辺を統一する。
+            # 縮小のみ(allow_upscale=False)だと小さい映像だけスケールが
+            # 揃わず、コードブック量子化の安定性が損なわれるため拡大も許可。
+            gray = normalize_frame(
+                gray, self.config.normalize_long_side, allow_upscale=True
+            )
         _, desc = self._get_thread_akaze().detectAndCompute(gray, None)
         if desc is not None and len(desc) > 0:
             return (fidx, ts, desc)
@@ -773,44 +740,54 @@ class VLADEncoder:
         return vlad.flatten()
 
     def save_model(self, path: str) -> None:
-        """学習済みモデルをファイルに保存（sklearn非依存形式）"""
-        model_data = {
-            "format_version": 2,
-            "codebook_centers": self._codebook_centers,
-            "pca_components": self._pca_components,
-            "pca_mean": self._pca_mean,
+        """学習済みモデルをファイルに保存
+
+        pickleは任意コード実行のリスクがあるため使用せず、numpy配列と
+        JSONメタデータのみをnpz(zip)形式で保存する（format_version:3）。
+        設定はJSON文字列としてnumpy配列に格納し、読み込み時に
+        allow_pickle=False で安全に復元できるようにする。
+        """
+        meta = {
+            "format_version": 3,
             "descriptor_dim": self._descriptor_dim,
             "config_dict": asdict(self.config),
         }
+        # np.savez はファイル名に .npz を付加するため、ファイルオブジェクトへ書く
         with open(path, "wb") as f:
-            pickle.dump(model_data, f)
+            np.savez(
+                f,
+                codebook_centers=self._codebook_centers,
+                pca_components=self._pca_components,
+                pca_mean=self._pca_mean,
+                meta_json=np.array(json.dumps(meta)),
+            )
         logger.info(f"モデル保存: {path}")
 
     def load_model(self, path: str) -> None:
-        """保存済みモデルをファイルから読み込み"""
+        """保存済みモデルをファイルから読み込み（npz形式のみ対応）
+
+        セキュリティ上の理由からpickle形式は読み込まない。npz以外の
+        ファイルを渡した場合はエラーとする（旧pickleモデルはnpz形式へ
+        再保存が必要）。
+        """
         with open(path, "rb") as f:
-            model_data = _safe_pickle_load(f)
+            head = f.read(4)
 
-        if model_data.get("format_version") == 2:
-            # 新形式: numpy配列のみ（sklearn非依存）
-            self._codebook_centers = model_data["codebook_centers"]
-            self._pca_components = model_data["pca_components"]
-            self._pca_mean = model_data["pca_mean"]
-        else:
-            # 旧形式: sklearnオブジェクトからnumpy配列を抽出
-            codebook = model_data["codebook"]
-            pca = model_data["pca"]
-            self._codebook_centers = codebook.cluster_centers_.copy()
-            self._pca_components = pca.components_.copy()
-            self._pca_mean = pca.mean_.copy()
-
-        self._descriptor_dim = model_data["descriptor_dim"]
-        if "config_dict" in model_data:
-            self.config = VideoFingerprintConfig(
-                **model_data["config_dict"]
+        # npz(zip)はマジックバイト "PK\x03\x04" で始まる
+        if head[:2] != b"PK":
+            raise ValueError(
+                "npz形式ではないモデルファイルです。セキュリティ上pickle"
+                "形式は読み込みません。npz形式へ再保存してください。"
             )
-        elif "config" in model_data:
-            self.config = model_data["config"]
+        with open(path, "rb") as f:
+            data = np.load(f, allow_pickle=False)
+            self._codebook_centers = data["codebook_centers"]
+            self._pca_components = data["pca_components"]
+            self._pca_mean = data["pca_mean"]
+            meta = json.loads(str(data["meta_json"]))
+        self._descriptor_dim = meta["descriptor_dim"]
+        if "config_dict" in meta:
+            self.config = VideoFingerprintConfig(**meta["config_dict"])
         logger.info(f"モデル読み込み: {path}")
 
     @staticmethod
@@ -927,7 +904,8 @@ class VideoFingerprinter:
             return None
 
         fp = self.encoder.encode_video(per_frame)
-        fp.raw_descriptors = per_frame
+        if self.config.store_raw_descriptors:
+            fp.raw_descriptors = per_frame
         dims = (
             fp.frame_fingerprints[0][2].shape[0]
             if fp.frame_fingerprints else 0
@@ -965,7 +943,8 @@ class VideoFingerprinter:
             return None
 
         fp = self.encoder.encode_video(per_frame_desc)
-        fp.raw_descriptors = per_frame_desc
+        if self.config.store_raw_descriptors:
+            fp.raw_descriptors = per_frame_desc
         return fp
 
     def fingerprint_pip_regions(
@@ -1063,7 +1042,8 @@ class VideoFingerprinter:
                 continue
 
             fp = self.encoder.encode_video(per_frame_desc)
-            fp.raw_descriptors = per_frame_desc
+            if self.config.store_raw_descriptors:
+                fp.raw_descriptors = per_frame_desc
             results.append((region, fp))
 
             logger.info(
@@ -1082,7 +1062,7 @@ class VideoFingerprinter:
         self.encoder.save_model(path)
 
     def load_model(self, path: str) -> None:
-        """保存済みモデルを読み込み
+        """保存済みモデルを読み込み（npz形式のみ対応）
 
         モデルには学習時の構造パラメータ（コードブック/PCA次元等）が保存されるが、
         scene_eval_fps・profile_frames といった実行時設定は現在のconfigを維持する。

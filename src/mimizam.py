@@ -1003,7 +1003,7 @@ class Mimizam:
 
     def load_video_model(self, model_path: str) -> None:
         """
-        保存済み映像指紋モデルを読み込み
+        保存済み映像指紋モデルを読み込み（npz形式のみ対応）
 
         Args:
             model_path: モデルファイルパス
