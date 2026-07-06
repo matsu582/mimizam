@@ -175,16 +175,16 @@ def main() -> int:
         epilog="""\
 使用例:
   # 事前学習済みモデルを使って動画を登録
-  python visual_from_video_fingerprinter.py /path/to/videos --model models/akaze_vlad_pca_pretrained.pkl
+  python visual_from_video_fingerprinter.py /path/to/videos --model models/akaze_vlad_pca_pretrained.npz
 
   # 単一ファイルを登録
-  python visual_from_video_fingerprinter.py /path/to/video.mp4 --model models/akaze_vlad_pca_pretrained.pkl
+  python visual_from_video_fingerprinter.py /path/to/video.mp4 --model models/akaze_vlad_pca_pretrained.npz
 
   # モデルの事前学習は scripts/train_pretrained_model.py で実行:
   #   python scripts/train_pretrained_model.py --coco-dir /path/to/coco/val2017
 
   # MySQLバックエンドを使用
-  python visual_from_video_fingerprinter.py /path/to/videos --model model.pkl --db-type mysql \\
+  python visual_from_video_fingerprinter.py /path/to/videos --model model.npz --db-type mysql \\
       --db-host localhost --db-name mimizam --db-user user --db-password pass
 """,
     )
@@ -208,7 +208,7 @@ def main() -> int:
     parser.add_argument(
         "--model", "-m",
         required=True,
-        help="VLAD/PCAモデルファイルのパス（.pkl、必須）。"
+        help="VLAD/PCAモデルファイルのパス（.npz、必須）。"
              "scripts/train_pretrained_model.py で事前学習したモデルを指定。"
              "検索時にvisual_from_video_search.pyで同じモデルを指定する必要あり",
     )
@@ -232,7 +232,15 @@ def main() -> int:
         "--rebuild",
         action="store_true",
         help="DB内の全映像指紋を保存済み記述子から再生成。"
-             "モデル更新後に元映像なしで指紋を再計算する",
+             "モデル更新後に元映像なしで指紋を再計算する。"
+             "登録時に --store-descriptors で記述子を保持しておく必要がある",
+    )
+    parser.add_argument(
+        "--store-descriptors",
+        action="store_true",
+        help="登録時に生AKAZE記述子をDBに保存する（既定は保存しない）。"
+             "後で --rebuild による指紋再生成を行う場合に指定する。"
+             "容量が増える点に注意",
     )
     parser.add_argument(
         "--verbose", "-v",
@@ -251,6 +259,11 @@ def main() -> int:
 
         # VLAD/PCAモデルの読み込み
         load_model(mimizam, args.model)
+
+        # --store-descriptors: 登録時に生記述子を保持（再生成用）
+        if args.store_descriptors:
+            mimizam.configure_video(store_raw_descriptors=True)
+            logger.info("生記述子の保存を有効化しました（--rebuild用）")
 
         # --rebuild: DB内の指紋を記述子から再生成
         if args.rebuild:

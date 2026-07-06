@@ -99,7 +99,7 @@ class MySQLBackend(DatabaseBackend):
                 CREATE TABLE IF NOT EXISTS fingerprints (
                     id BIGINT AUTO_INCREMENT PRIMARY KEY,
                     song_id VARCHAR(255) NOT NULL,
-                    hash_value VARCHAR(64) NOT NULL,
+                    hash_value BIGINT NOT NULL,
                     time_offset DOUBLE NOT NULL,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     INDEX idx_fingerprints_hash (hash_value),
@@ -455,7 +455,7 @@ class MySQLBackend(DatabaseBackend):
                     slot["votes"] += 1.0
                     slot["score_sum"] += sim
         except MySQLError as e:
-            self.logger.error(f"MySQLフレーム候補総当りエラー: {e}")
+            self.logger.error(f"MySQL frame candidate brute-force error: {e}")
         return agg
 
     def get_frame_fingerprints(

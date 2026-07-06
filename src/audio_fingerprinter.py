@@ -9,9 +9,7 @@ import librosa
 from pydub import AudioSegment
 import matplotlib.pyplot as plt
 from scipy.signal import find_peaks
-from skimage.feature import peak_local_max
 from typing import List, Tuple, Dict, Optional
-import hashlib
 import sqlite3
 from dataclasses import dataclass
 import pickle
@@ -204,107 +202,36 @@ class SpectrogramAnalyzer:
         
         return mask, min_amplitude
 
-    # 局所最大値検出のオリジナル（未使用）
-    def _original_find_local_maxima(self, magnitude: np.ndarray, mask: np.ndarray, 
-                          frequencies: np.ndarray, times: np.ndarray,
-                          peak_neighborhood_size: int, debug: bool) -> List[Peak]:
-        """スペクトログラム内の局所最大値を検出"""
-        logger = logging.getLogger(__name__)
-        
-        peaks = []
-        search_range_t = range(peak_neighborhood_size, magnitude.shape[1] - peak_neighborhood_size)
-        search_range_f = range(peak_neighborhood_size, magnitude.shape[0] - peak_neighborhood_size)
-        
-        candidates_found = 0
-        
-        for t_idx in search_range_t:
-            for f_idx in search_range_f:
-                if not mask[f_idx, t_idx]:
-                    continue
-                
-                candidates_found += 1
-                
-                # この点が局所最大値かどうかをチェック
-                neighborhood = magnitude[
-                    f_idx - peak_neighborhood_size:f_idx + peak_neighborhood_size + 1,
-                    t_idx - peak_neighborhood_size:t_idx + peak_neighborhood_size + 1
-                ]
-                
-                if magnitude[f_idx, t_idx] == np.max(neighborhood):
-                    peak = Peak(
-                        time=np.float64(times[t_idx]),
-                        frequency=np.float64(frequencies[f_idx]),
-                        amplitude=np.float64(magnitude[f_idx, t_idx])
-                    )
-                    peaks.append(peak)
-        
-        if debug:
-            logger.info(f"Candidate points: {candidates_found}")
-            logger.info(f"Detected peaks: {len(peaks)}")
-            if len(peaks) > 0:
-                amplitudes = [p.amplitude for p in peaks]
-                logger.info(f"Peak amplitude range: {np.min(amplitudes):.2f} to {np.max(amplitudes):.2f} dB")
-        
-        return peaks
-
     def _find_local_maxima(self, magnitude: np.ndarray, mask: np.ndarray,
                           frequencies: np.ndarray, times: np.ndarray,
                           peak_neighborhood_size: int, debug: bool) -> List[Peak]:
         """
         スペクトログラム内の局所最大値を検出
-        
-        Numba最適化対応
+
+        Numbaの有無に関わらず同一の検出関数（_numba_optimized_peak_detection）
+        を用いる。Numba未導入時はnjitがno-opとなり同じ関数が純Pythonで実行
+        されるため、生成される指紋は環境に依存せず一致する（DB整合性を保証）。
         """
         logger = logging.getLogger(__name__)
-        
-        if self.enable_numba_optimization:
-            # 修正されたNumba版を使用（元の処理ロジックと完全一致）
-            peak_f_indices, peak_t_indices = _numba_optimized_peak_detection(
-                magnitude, mask, peak_neighborhood_size
+
+        peak_f_indices, peak_t_indices = _numba_optimized_peak_detection(
+            magnitude, mask, peak_neighborhood_size
+        )
+
+        peaks = [
+            Peak(
+                time=np.float64(times[t_idx]),
+                frequency=np.float64(frequencies[f_idx]),
+                amplitude=np.float64(magnitude[f_idx, t_idx])
             )
-            
-            # Peak オブジェクト生成（元の実装と同じ）
-            peaks = [
-                Peak(
-                    time=np.float64(times[t_idx]), 
-                    frequency=np.float64(frequencies[f_idx]), 
-                    amplitude=np.float64(magnitude[f_idx, t_idx])
-                )
-                for f_idx, t_idx in zip(peak_f_indices, peak_t_indices)
-            ]
-            
-            if debug:
-                logger.info("use Numba:")
-                logger.info(f"Detected peaks: {len(peaks)}")
-                if len(peaks) > 0:
-                    amplitudes = [p.amplitude for p in peaks]
-                    logger.info(f"Peak amplitude range: {np.min(amplitudes):.2f} to {np.max(amplitudes):.2f} dB")
-        else:
-            # peak_local_max版
-            coords = peak_local_max(
-                magnitude,
-                min_distance=peak_neighborhood_size,
-                threshold_abs=None  # マスクで閾値制御
-            )
-            # マスク適用
-            coords = coords[mask[coords[:, 0], coords[:, 1]]]
-            candidates_found = coords.shape[0]
-            # 有効範囲外の座標を削除
-            valid = []
-            f_start, f_end = peak_neighborhood_size, magnitude.shape[0] - peak_neighborhood_size
-            t_start, t_end = peak_neighborhood_size, magnitude.shape[1] - peak_neighborhood_size
-            for f_idx, t_idx in coords:
-                if f_start <= f_idx < f_end and t_start <= t_idx < t_end:
-                    valid.append((f_idx, t_idx))
-            # Peakオブジェクトを作成
-            peaks = [Peak(time=np.float64(times[t]), frequency=np.float64(frequencies[f]), amplitude=np.float64(magnitude[f, t]))
-                     for f, t in valid]
-            if debug:
-                logger.info(f"Candidate points: {candidates_found}")
-                logger.info(f"Detected peaks: {len(peaks)}")
-                if len(peaks) > 0:
-                    amplitudes = [p.amplitude for p in peaks]
-                    logger.info(f"Peak amplitude range: {np.min(amplitudes):.2f} to {np.max(amplitudes):.2f} dB")
+            for f_idx, t_idx in zip(peak_f_indices, peak_t_indices)
+        ]
+
+        if debug:
+            logger.info(f"Detected peaks: {len(peaks)}")
+            if len(peaks) > 0:
+                amplitudes = [p.amplitude for p in peaks]
+                logger.info(f"Peak amplitude range: {np.min(amplitudes):.2f} to {np.max(amplitudes):.2f} dB")
         return peaks
     
     def detect_peaks(self, 
@@ -473,65 +400,6 @@ class HashGenerator:
         
         return fingerprints
 
-    def _generate_hashes_from_peaks_numpy(self, sorted_peaks: List[Peak], debug: bool, logger) -> List[Fingerprint]:
-        """
-            NumPyベクトル化によるハッシュ生成
-                -ベンチの結果速度改善に優位がなかった為、採用しないけどとりあえず残しておく
-        """
-        fingerprints = []
-        seen_hashes = set()
-        anchor_count = 0
-        pairs_checked = 0
-        valid_time_deltas = []
-
-        # NumPy配列化
-        times = np.array([p.time for p in sorted_peaks])
-        freqs = np.array([p.frequency for p in sorted_peaks])
-        amps = np.array([p.amplitude for p in sorted_peaks])
-        N = len(sorted_peaks)
-
-        for i in range(N):
-            anchor_time = times[i]
-            anchor_freq = freqs[i]
-            anchor_amp = amps[i]
-            # ターゲット候補のインデックス
-            idx_start = i + 1
-            idx_end = min(i + 1 + self.target_zone_size, N)
-            if idx_start >= N:
-                continue
-            candidate_idx = np.arange(idx_start, idx_end)
-            time_deltas = times[candidate_idx] - anchor_time
-            valid_mask = (self.time_delta_range[0] <= time_deltas) & (time_deltas <= self.time_delta_range[1])
-            valid_idx = candidate_idx[valid_mask]
-            if len(valid_idx) > 0:
-                anchor_count += 1
-            for j in valid_idx:
-                target_time = times[j]
-                target_freq = freqs[j]
-                time_delta = target_time - anchor_time
-                valid_time_deltas.append(time_delta)
-                # ハッシュ生成（元のロジックと同じ）
-                f1_quantized = int(anchor_freq // 30) * 30
-                f2_quantized = int(target_freq // 30) * 30
-                if time_delta > 0:
-                    time_delta_q = int(time_delta * 20) * 5
-                else:
-                    time_delta_q = 0
-                primary_hash_input = f"{f1_quantized}|{f2_quantized}|{time_delta_q}"
-                hash_object = hashlib.sha256(primary_hash_input.encode())
-                hash_value = hash_object.hexdigest()
-                if hash_value not in seen_hashes:
-                    seen_hashes.add(hash_value)
-                    fingerprint = Fingerprint(
-                        hash_value=hash_value,
-                        time_offset=anchor_time
-                    )
-                    fingerprints.append(fingerprint)
-                pairs_checked += 1
-        if debug:
-            self._log_generation_summary(pairs_checked, anchor_count, N, valid_time_deltas, len(fingerprints), logger)
-        return fingerprints
-    
     def _debug_anchor_info(self, i: int, anchor_peak: Peak, sorted_peaks: List[Peak], logger) -> None:
         """アンカー情報をデバッグ出力"""
         candidates = sorted_peaks[i+1:i+1+self.target_zone_size]
@@ -580,49 +448,62 @@ class HashGenerator:
             
         Returns:
             有効なターゲットピークのリスト
+
+        candidate_peaks は時間昇順であることを前提とする。先に件数で
+        切ると先頭が時間窓(time_delta_range)より手前に密集した場合に
+        有効なターゲットを取りこぼすため、時間窓で絞ってから
+        target_zone_size 件に制限する。
         """
+        min_delta, max_delta = self.time_delta_range
         target_peaks = []
-        
-        for peak in candidate_peaks[:self.target_zone_size]:
+
+        for peak in candidate_peaks:
             time_delta = peak.time - anchor.time
-            
-            # 時間差が許容範囲内かどうかをチェック
-            if self.time_delta_range[0] <= time_delta <= self.time_delta_range[1]:
+
+            # 時間昇順のため、上限を超えたらそれ以降も全て範囲外
+            if time_delta > max_delta:
+                break
+
+            if time_delta >= min_delta:
                 target_peaks.append(peak)
-        
+                if len(target_peaks) >= self.target_zone_size:
+                    break
+
         return target_peaks
     
-    def _create_hash(self, anchor: Peak, target: Peak) -> str:
+    def _create_hash(self, anchor: Peak, target: Peak) -> int:
         """
         広い速度変化に対する改良されたロバスト性を持つアンカー-ターゲットピークペアからハッシュを作成
-        
+
         Args:
             anchor: アンカーピーク
             target: ターゲットピーク
-            
+
         Returns:
-            ハッシュ文字列
+            32bit符号なし整数のハッシュ値
+
+        f1ビン・f2ビン・Δtビンを可逆にビットパックして32bit整数に収める。
+        crc32のような非可逆ハッシュは量子化空間内でも衝突し、別ピーク対が
+        同一一致として扱われて誤ヒット要因になるため使用しない。
+        レイアウト: [f1ビン:11bit][f2ビン:11bit][Δtビン:10bit]
+        可聴域(≤20kHz→666ビン)・Δt≤2.0s(40ビン)は各フィールド幅に収まり、
+        通常入力では飽和が発生しないため衝突しない。
         """
-        # より堅牢な周波数量子化 - 広い速度変化対応のため大きなビン
-        f1_quantized = int(anchor.frequency // 30) * 30  # 0.5x-2x速度変化対応のため大きなビン
-        f2_quantized = int(target.frequency // 30) * 30
-        
-        # より広い速度範囲対応の適応的量子化を持つ時間差
+        # 周波数量子化（0.5x-2x速度変化対応のため30Hzビン）
+        f1_bin = int(anchor.frequency // 30)
+        f2_bin = int(target.frequency // 30)
+
+        # 時間差の量子化（50msビン: 1/20秒刻み）
         time_delta_raw = target.time - anchor.time
-        
-        # 0.5x-2x範囲のより良いカバレッジのため対数時間量子化を使用
-        if time_delta_raw > 0:
-            # より良い速度許容度のため50msビン（10msの代わり）に量子化
-            time_delta = int(time_delta_raw * 20) * 5  # センチ秒単位での50msビン
-        else:
-            time_delta = 0
-        
-        # 速度変化に対する改良されたロバスト性を持つハッシュを作成
-        primary_hash_input = f"{f1_quantized}|{f2_quantized}|{time_delta}"
-        
-        # ハッシュを生成
-        hash_object = hashlib.sha256(primary_hash_input.encode())
-        return hash_object.hexdigest()
+        dt_bin = int(time_delta_raw * 20) if time_delta_raw > 0 else 0
+
+        # フィールド幅への飽和クランプ（範囲外は端に丸める＝決定的）
+        f1_bin = min(max(f1_bin, 0), 0x7FF)   # 11bit
+        f2_bin = min(max(f2_bin, 0), 0x7FF)   # 11bit
+        dt_bin = min(max(dt_bin, 0), 0x3FF)   # 10bit
+
+        # 可逆ビットパック（32bit符号なし整数）
+        return (f1_bin << 21) | (f2_bin << 10) | dt_bin
     
     def _filter_peaks_by_density(self, peaks: List[Peak], debug: bool = False) -> List[Peak]:
         """
@@ -788,16 +669,23 @@ class AudioFingerprinter:
             min_amplitude = adjusted_params['min_amplitude']
             peak_neighborhood_size = adjusted_params['peak_neighborhood_size']
             
-            # HashGeneratorのパラメータも更新
-            self.hash_generator.target_zone_size = adjusted_params['target_zone_size']
-            self.hash_generator.max_peaks_per_second = adjusted_params['max_peaks_per_second']
-            self.hash_generator.min_peak_separation = adjusted_params['min_peak_separation']
+            # 共有インスタンスを書き換えず、この呼び出し専用のHashGeneratorを作成
+            # （同一インスタンスを複数スレッドで使っても競合しないようにするため）
+            hash_generator = HashGenerator(
+                target_zone_size=adjusted_params['target_zone_size'],
+                time_delta_range=self.hash_generator.time_delta_range,
+                max_peaks_per_second=adjusted_params['max_peaks_per_second'],
+                min_peak_separation=adjusted_params['min_peak_separation'],
+            )
         else:
             min_amplitude = self.min_amplitude
             peak_neighborhood_size = self.peak_neighborhood_size
+            hash_generator = self.hash_generator
         
 
-        fingerprints = self._process_audio_sequential(audio, min_amplitude, peak_neighborhood_size, debug)
+        fingerprints = self._process_audio_sequential(
+            audio, min_amplitude, peak_neighborhood_size, hash_generator, debug
+        )
         
         # パフォーマンス監視
         processing_time = time.time() - start_time
@@ -812,7 +700,9 @@ class AudioFingerprinter:
         return fingerprints
     
     def _process_audio_sequential(self, audio: np.ndarray, min_amplitude: float,
-                                peak_neighborhood_size: int, debug: bool) -> List[Fingerprint]:
+                                peak_neighborhood_size: int,
+                                hash_generator: 'HashGenerator',
+                                debug: bool) -> List[Fingerprint]:
         """音声を順次処理"""
         logger = logging.getLogger(__name__)
         
@@ -836,7 +726,7 @@ class AudioFingerprinter:
             self.performance_monitor.record_peak_count(len(peaks))
         
         # ハッシュを生成
-        fingerprints = self.hash_generator.generate_hashes(peaks, debug)
+        fingerprints = hash_generator.generate_hashes(peaks, debug)
         return fingerprints
     
 

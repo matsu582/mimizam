@@ -104,24 +104,22 @@ print(f"検索結果: {results}")
 
 ### Q7: Numba機能について教えてください
 
-**A:** mimizamにはNumba JIT機能が実装されていますが、現在はデフォルトで無効化されています：
+**A:** `enable_numba_optimization` は**処理速度のみ**を制御するフラグで、**検出結果（生成される指紋）には影響しません**：
 
 **現在の状況:**
-- ベンチマーク結果で処理速度の優位性が確認されていない
-- ピークオーバーフロー問題により最大ピーク数が制限される
-- `SpectrogramAnalyzer`ではデフォルトで`enable_numba_optimization=False`に設定
+- ピーク検出はNumbaの有無に関わらず同一の関数を使用する
+- Numba未導入時は `njit` がno-opとなり、同じ関数が純Pythonで実行される
+- そのため生成指紋は環境に依存せず一致し、**DB整合性は常に保証される**
 
 ```python
 from mimizam import AudioFingerprinter
 
-# デフォルト設定（Numba機能は無効）
-fingerprinter = AudioFingerprinter()
-
-# 実験的に有効化する場合
-fingerprinter = AudioFingerprinter(enable_numba_optimization=True)
+# どちらでも生成される指紋は同一（速度のみ異なる）
+fingerprinter = AudioFingerprinter()  # 既定でJIT有効
+fingerprinter = AudioFingerprinter(enable_numba_optimization=False)  # JIT無効
 ```
 
-**注意:** 現在のバージョンでは、Numba機能を有効にしても性能向上は期待できません。
+**注意:** フラグの有効/無効で指紋は変わりません。無効化した場合はJITコンパイルされず処理が遅くなるだけです。
 
 ### Q8: 複数のデータベースバックエンドを同時に使用できますか？
 
@@ -316,7 +314,7 @@ mimizam = create_mimizam_mysql(
 )
 ```
 
-**注意:** Numba機能は現在無効化されており、有効にしても性能向上は期待できません（Q7参照）。
+**注意:** `enable_numba_optimization` は速度のみに影響し、生成される指紋・検索結果は変わりません（Q7参照）。
 
 ### Q14: 大規模データベースでの検索が遅いです
 

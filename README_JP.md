@@ -71,7 +71,7 @@ with create_mimizam_sqlite("my_media.db") as mimizam:
     mimizam.configure_video(scene_eval_fps=4.0, profile_frames=False)
 
     # 学習済みコードブック/PCAモデルを読み込み（推奨）
-    mimizam.load_video_model("model/codebook_model.pki")
+    mimizam.load_video_model("model/codebook_model.npz")
 
     # 映像を登録
     # （モデル未読込の場合は初回登録映像でモデルを自作するが、
@@ -85,14 +85,21 @@ with create_mimizam_sqlite("my_media.db") as mimizam:
         print(result)
 ```
 
-学習済みコードブックモデル（`model/codebook_model.pki`）を使うCLIツールも同梱しています。
+学習済みコードブックモデル（`model/codebook_model.npz`）を使うCLIツールも同梱しています。
 
 ```bash
 # 映像の登録（音声＋映像の統合指紋を登録）
-python examples/movie_fingerprinter.py path/to/video.mp4 --database ./media.db
+python examples/movie_fingerprinter.py path/to/video.mp4 --database ./media.db \
+    --model ./model/codebook_model.npz
+
+# 生AKAZE記述子をDBに保存しつつ登録する。
+# モデル更新後に指紋を再生成（rebuild_video_fingerprints）したい場合は必須。
+# DB容量が増える点に注意。
+python examples/movie_fingerprinter.py path/to/video.mp4 --database ./media.db \
+    --model ./model/codebook_model.npz --store-descriptors
 
 # 映像で統合検索（音声＋映像）
-python examples/movie_search.py -D -k 10 -m ./model/codebook_model.pki \
+python examples/movie_search.py -D -k 10 -m ./model/codebook_model.npz \
     path/to/clip.mp4 --database ./media.db
 ```
 

@@ -175,7 +175,7 @@ class ElasticsearchBackend(DatabaseBackend):
                             "doc_values": True
                         },
                         "hash_value": {
-                            "type": "keyword",
+                            "type": "long",
                             "index": True
                         },
                         "time_offset": {
@@ -766,7 +766,7 @@ class ElasticsearchBackend(DatabaseBackend):
                     slot["score_sum"] += sim
             return agg
         except Exception as e:
-            self.logger.error(f"ESフレームkNN検索エラー: {e}")
+            self.logger.error(f"ES frame kNN search error: {e}")
             return agg
 
     def get_frame_fingerprints(

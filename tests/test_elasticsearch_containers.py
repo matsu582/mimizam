@@ -3,6 +3,7 @@ Elasticsearchコンテナを使用したインテグレーションテスト
 """
 
 import unittest
+import zlib
 import time
 import sys
 import os
@@ -193,9 +194,9 @@ class TestElasticsearchContainers(TestAudioMixin, unittest.TestCase):
                 # フィンガープリント追加
                 print("🎵 フィンガープリントを追加中...")
                 test_fingerprints = [
-                    Fingerprint(hash_value="es_hash1", time_offset=0.1),
-                    Fingerprint(hash_value="es_hash2", time_offset=0.2),
-                    Fingerprint(hash_value="es_hash3", time_offset=0.3),
+                    Fingerprint(hash_value=401, time_offset=0.1),
+                    Fingerprint(hash_value=402, time_offset=0.2),
+                    Fingerprint(hash_value=403, time_offset=0.3),
                 ]
                 
                 success = db.add_fingerprints(test_song.id, test_fingerprints)
@@ -207,8 +208,8 @@ class TestElasticsearchContainers(TestAudioMixin, unittest.TestCase):
                 # フィンガープリント検索
                 print("🔎 フィンガープリントを検索中...")
                 query_fingerprints = [
-                    Fingerprint(hash_value="es_hash1", time_offset=0.05),
-                    Fingerprint(hash_value="es_hash2", time_offset=0.15),
+                    Fingerprint(hash_value=401, time_offset=0.05),
+                    Fingerprint(hash_value=402, time_offset=0.15),
                 ]
                 
                 matches = db.search_fingerprints(query_fingerprints)
@@ -270,7 +271,7 @@ class TestElasticsearchContainers(TestAudioMixin, unittest.TestCase):
                 print("🎵 フィンガープリントを追加中...")
                 for i, song in enumerate(songs):
                     fingerprints = [
-                        Fingerprint(hash_value=f"es_search_hash_{i}_{j}", time_offset=j*0.1)
+                        Fingerprint(hash_value=1000 + i*10 + j, time_offset=j*0.1)
                         for j in range(5)
                     ]
                     success = db.add_fingerprints(song.id, fingerprints)
@@ -286,7 +287,7 @@ class TestElasticsearchContainers(TestAudioMixin, unittest.TestCase):
                 # 特定楽曲の検索
                 print("🔎 特定楽曲を検索中...")
                 query_fingerprints = [
-                    Fingerprint(hash_value="es_search_hash_1_0", time_offset=0.05),
+                    Fingerprint(hash_value=1010, time_offset=0.05),
                 ]
                 
                 matches = db.search_fingerprints(query_fingerprints)
@@ -354,7 +355,7 @@ class TestElasticsearchContainers(TestAudioMixin, unittest.TestCase):
                 start_time = time.time()
                 for i, song in enumerate(test_songs):
                     fingerprints = [
-                        Fingerprint(hash_value=f"es_perf_hash_{song.id}_{j}", time_offset=j*0.1)
+                        Fingerprint(hash_value=zlib.crc32(f"es_perf_hash_{song.id}_{j}".encode()) & 0xFFFFFFFF, time_offset=j*0.1)
                         for j in range(10)  # 楽曲あたり10個
                     ]
                     success = db.add_fingerprints(song.id, fingerprints)
@@ -367,7 +368,7 @@ class TestElasticsearchContainers(TestAudioMixin, unittest.TestCase):
                 print("📊 検索性能を測定中...")
                 start_time = time.time()
                 query_fingerprints = [
-                    Fingerprint(hash_value=f"es_perf_hash_{test_songs[0].id}_0", time_offset=0.05)
+                    Fingerprint(hash_value=zlib.crc32(f"es_perf_hash_{test_songs[0].id}_0".encode()) & 0xFFFFFFFF, time_offset=0.05)
                 ]
                 matches = db.search_fingerprints(query_fingerprints)
                 search_time = time.time() - start_time
@@ -425,11 +426,11 @@ class TestElasticsearchContainers(TestAudioMixin, unittest.TestCase):
             )
             
             test_fingerprints = [
-                Fingerprint(hash_value="es_backend_hash1", time_offset=0.1),
-                Fingerprint(hash_value="es_backend_hash2", time_offset=0.2),
-                Fingerprint(hash_value="es_backend_hash3", time_offset=0.3),
-                Fingerprint(hash_value="es_backend_hash4", time_offset=0.4),
-                Fingerprint(hash_value="es_backend_hash5", time_offset=0.5),
+                Fingerprint(hash_value=411, time_offset=0.1),
+                Fingerprint(hash_value=412, time_offset=0.2),
+                Fingerprint(hash_value=413, time_offset=0.3),
+                Fingerprint(hash_value=414, time_offset=0.4),
+                Fingerprint(hash_value=415, time_offset=0.5),
             ]
             
             try:
@@ -458,8 +459,8 @@ class TestElasticsearchContainers(TestAudioMixin, unittest.TestCase):
                 
                 # フィンガープリント検索テスト
                 query_fingerprints = [
-                    Fingerprint(hash_value="es_backend_hash1", time_offset=0.05),
-                    Fingerprint(hash_value="es_backend_hash2", time_offset=0.15),
+                    Fingerprint(hash_value=411, time_offset=0.05),
+                    Fingerprint(hash_value=412, time_offset=0.15),
                 ]
                 
                 matches = db.search_fingerprints(query_fingerprints)
@@ -526,7 +527,7 @@ class TestElasticsearchContainers(TestAudioMixin, unittest.TestCase):
                 fingerprints = []
                 for i in range(50):  # フィンガープリント数も調整
                     fingerprints.append(
-                        Fingerprint(hash_value=f"large_es_hash_{i}", time_offset=i * 0.1)
+                        Fingerprint(hash_value=10000 + i, time_offset=i * 0.1)
                     )
                 
                 success = db.add_fingerprints("large_es_song_0", fingerprints)

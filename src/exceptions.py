@@ -20,7 +20,7 @@ class MimizamError(Exception):
     
     def __str__(self) -> str:
         if self.original_error:
-            return f"{self.message} (原因: {self.original_error})"
+            return f"{self.message} (cause: {self.original_error})"
         return self.message
 
 

@@ -176,19 +176,19 @@ def main() -> int:
         epilog="""\
 使用例:
   # 音声+映像の両方の指紋を登録
-  python movie_fingerprinter.py /path/to/videos --model model.pki
+  python movie_fingerprinter.py /path/to/videos --model model.npz
 
   # 映像指紋のみ登録（音声スキップ）
-  python movie_fingerprinter.py /path/to/videos --model model.pki --skip-audio
+  python movie_fingerprinter.py /path/to/videos --model model.npz --skip-audio
 
   # 音声指紋のみ登録（映像スキップ）
-  python movie_fingerprinter.py /path/to/videos --model model.pki --skip-visual
+  python movie_fingerprinter.py /path/to/videos --model model.npz --skip-visual
 
   # フレーム選定の処理内訳を計測しながら登録
-  python movie_fingerprinter.py /path/to/videos --model model.pki --profile
+  python movie_fingerprinter.py /path/to/videos --model model.npz --profile
 
   # シーン検出の評価fpsを4に下げて登録（retrieve回数を削減し高速化）
-  python movie_fingerprinter.py /path/to/videos --model model.pki \\
+  python movie_fingerprinter.py /path/to/videos --model model.npz \\
       --scene-eval-fps 4 --profile
 """,
     )
@@ -251,6 +251,13 @@ def main() -> int:
         help="フレーム選定の処理内訳（grab/retrieve/resize/シーン検出/"
              "ヒストグラム等の所要時間）をログ出力する",
     )
+    parser.add_argument(
+        "--store-descriptors",
+        action="store_true",
+        help="登録時に生AKAZE記述子をDBに保存する（既定は保存しない）。"
+             "後でモデル更新後の指紋再生成（rebuild_video_fingerprints）を"
+             "行う場合に指定する。容量が増える点に注意",
+    )
 
     args = parser.parse_args()
     setup_logging(args.verbose)
@@ -297,7 +304,10 @@ def main() -> int:
         mimizam.configure_video(
             scene_eval_fps=args.scene_eval_fps or None,
             profile_frames=args.profile or None,
+            store_raw_descriptors=args.store_descriptors or None,
         )
+        if args.store_descriptors:
+            logger.info("生記述子の保存を有効化しました（再生成用）")
 
         # 映像モデルの読み込み（映像指紋が有効な場合）
         if not args.skip_visual:

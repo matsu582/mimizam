@@ -6,6 +6,7 @@ import unittest
 import time
 import sys
 import os
+import zlib
 from pathlib import Path
 
 try:
@@ -112,9 +113,9 @@ class TestPostgreSQLContainers(TestAudioMixin, unittest.TestCase):
                 
                 # フィンガープリント追加
                 test_fingerprints = [
-                    Fingerprint(hash_value="pg_hash1", time_offset=0.1),
-                    Fingerprint(hash_value="pg_hash2", time_offset=0.2),
-                    Fingerprint(hash_value="pg_hash3", time_offset=0.3),
+                    Fingerprint(hash_value=201, time_offset=0.1),
+                    Fingerprint(hash_value=202, time_offset=0.2),
+                    Fingerprint(hash_value=203, time_offset=0.3),
                 ]
                 
                 success = db.add_fingerprints(test_song.id, test_fingerprints)
@@ -122,8 +123,8 @@ class TestPostgreSQLContainers(TestAudioMixin, unittest.TestCase):
                 
                 # フィンガープリント検索
                 query_fingerprints = [
-                    Fingerprint(hash_value="pg_hash1", time_offset=0.05),
-                    Fingerprint(hash_value="pg_hash2", time_offset=0.15),
+                    Fingerprint(hash_value=201, time_offset=0.05),
+                    Fingerprint(hash_value=202, time_offset=0.15),
                 ]
                 
                 matches = db.search_fingerprints(query_fingerprints)
@@ -175,7 +176,7 @@ class TestPostgreSQLContainers(TestAudioMixin, unittest.TestCase):
                 # 各楽曲にフィンガープリントを追加
                 for i, song in enumerate(songs):
                     fingerprints = [
-                        Fingerprint(hash_value=f"pg_advanced_hash_{i}_{j}", time_offset=j*0.1)
+                        Fingerprint(hash_value=1000 + i*10 + j, time_offset=j*0.1)
                         for j in range(5)
                     ]
                     success = db.add_fingerprints(song.id, fingerprints)
@@ -187,8 +188,8 @@ class TestPostgreSQLContainers(TestAudioMixin, unittest.TestCase):
                 
                 # 複合検索テスト
                 query_fingerprints = [
-                    Fingerprint(hash_value="pg_advanced_hash_0_0", time_offset=0.05),
-                    Fingerprint(hash_value="pg_advanced_hash_1_1", time_offset=0.15),
+                    Fingerprint(hash_value=1000, time_offset=0.05),
+                    Fingerprint(hash_value=1011, time_offset=0.15),
                 ]
                 
                 matches = db.search_fingerprints(query_fingerprints)
@@ -245,7 +246,7 @@ class TestPostgreSQLContainers(TestAudioMixin, unittest.TestCase):
                 start_time = time.time()
                 for song in test_songs:
                     fingerprints = [
-                        Fingerprint(hash_value=f"pg_perf_hash_{song.id}_{j}", time_offset=j*0.1)
+                        Fingerprint(hash_value=zlib.crc32(f"pg_perf_hash_{song.id}_{j}".encode()) & 0xFFFFFFFF, time_offset=j*0.1)
                         for j in range(10)  # 楽曲あたり10個
                     ]
                     db.add_fingerprints(song.id, fingerprints)
@@ -254,7 +255,7 @@ class TestPostgreSQLContainers(TestAudioMixin, unittest.TestCase):
                 # 検索性能
                 start_time = time.time()
                 query_fingerprints = [
-                    Fingerprint(hash_value=f"pg_perf_hash_{test_songs[0].id}_0", time_offset=0.05)
+                    Fingerprint(hash_value=zlib.crc32(f"pg_perf_hash_{test_songs[0].id}_0".encode()) & 0xFFFFFFFF, time_offset=0.05)
                 ]
                 matches = db.search_fingerprints(query_fingerprints)
                 search_time = time.time() - start_time
@@ -307,11 +308,11 @@ class TestPostgreSQLContainers(TestAudioMixin, unittest.TestCase):
             )
             
             test_fingerprints = [
-                Fingerprint(hash_value="pg_backend_hash1", time_offset=0.1),
-                Fingerprint(hash_value="pg_backend_hash2", time_offset=0.2),
-                Fingerprint(hash_value="pg_backend_hash3", time_offset=0.3),
-                Fingerprint(hash_value="pg_backend_hash4", time_offset=0.4),
-                Fingerprint(hash_value="pg_backend_hash5", time_offset=0.5),
+                Fingerprint(hash_value=211, time_offset=0.1),
+                Fingerprint(hash_value=212, time_offset=0.2),
+                Fingerprint(hash_value=213, time_offset=0.3),
+                Fingerprint(hash_value=214, time_offset=0.4),
+                Fingerprint(hash_value=215, time_offset=0.5),
             ]
             
             try:
@@ -331,8 +332,8 @@ class TestPostgreSQLContainers(TestAudioMixin, unittest.TestCase):
                 
                 # フィンガープリント検索テスト
                 query_fingerprints = [
-                    Fingerprint(hash_value="pg_backend_hash1", time_offset=0.05),
-                    Fingerprint(hash_value="pg_backend_hash2", time_offset=0.15),
+                    Fingerprint(hash_value=211, time_offset=0.05),
+                    Fingerprint(hash_value=212, time_offset=0.15),
                 ]
                 
                 matches = db.search_fingerprints(query_fingerprints)
@@ -385,7 +386,7 @@ class TestPostgreSQLContainers(TestAudioMixin, unittest.TestCase):
                 fingerprints = []
                 for i in range(100):
                     fingerprints.append(
-                        Fingerprint(hash_value=f"large_pg_hash_{i}", time_offset=i * 0.1)
+                        Fingerprint(hash_value=10000 + i, time_offset=i * 0.1)
                     )
                 
                 success = db.add_fingerprints("large_pg_song_0", fingerprints)

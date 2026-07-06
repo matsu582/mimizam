@@ -3,7 +3,7 @@
 AKAZE + VLAD + PCA 事前学習済みモデルの構築スクリプト
 
 大規模画像/動画データセットからAKAZE記述子を抽出し、
-K-Means codebook + PCA変換器を学習して .pkl ファイルとして保存する。
+K-Means codebook + PCA変換器を学習して .npz ファイルとして保存する。
 出力モデルは VLADEncoder.load_model() で読み込み可能。
 
 フロー:
@@ -11,7 +11,7 @@ K-Means codebook + PCA変換器を学習して .pkl ファイルとして保存�
   2. 全記述子で K-Means codebook を学習
   3. 画像/フレームごとに VLAD ベクトルを計算
   4. VLAD ベクトル群に PCA を学習
-  5. codebook + PCA を .pkl として保存
+  5. codebook + PCA を .npz として保存
 
 依存パッケージ:
   pip install opencv-python numpy scikit-learn
@@ -20,32 +20,32 @@ K-Means codebook + PCA変換器を学習して .pkl ファイルとして保存�
   # COCO val2017 で学習
   python scripts/train_pretrained_model.py \\
       --coco-dir /path/to/coco/val2017 \\
-      -o models/akaze_vlad_pca_pretrained.pkl
+      -o models/akaze_vlad_pca_pretrained.npz
 
   # COCO + UCF-101 で学習（推奨）
   python scripts/train_pretrained_model.py \\
       --coco-dir /path/to/coco/train2017 \\
       --ucf-dir /path/to/UCF-101 \\
-      -o models/akaze_vlad_pca_pretrained.pkl
+      -o models/akaze_vlad_pca_pretrained.npz
 
   # PCA次元数を変更
   python scripts/train_pretrained_model.py \\
       --coco-dir /path/to/coco/val2017 \\
       --pca-dim 256 \\
-      -o models/model_pca256.pkl
+      -o models/model_pca256.npz
 
   # 既存モデルに追加データで追加学習
   python scripts/train_pretrained_model.py \\
-      --resume models/akaze_vlad_pca_pretrained.pkl \\
+      --resume models/akaze_vlad_pca_pretrained.npz \\
       --video-dir /path/to/new_videos \\
-      -o models/akaze_vlad_pca_v2.pkl
+      -o models/akaze_vlad_pca_v2.npz
 """
 
 import argparse
 import glob
+import json
 import logging
 import os
-import pickle
 import sys
 import time
 
@@ -109,8 +109,8 @@ PCA次元数の目安:
     )
     parser.add_argument(
         "-o", "--output",
-        default="models/akaze_vlad_pca_pretrained.pkl",
-        help="出力モデルファイルパス（デフォルト: models/akaze_vlad_pca_pretrained.pkl）",
+        default="models/akaze_vlad_pca_pretrained.npz",
+        help="出力モデルファイルパス（デフォルト: models/akaze_vlad_pca_pretrained.npz）",
     )
     parser.add_argument(
         "--codebook-size", "-K",
@@ -531,12 +531,20 @@ def main():
     k = args.codebook_size
 
     if args.resume:
-        # 追加学習モード: 既存codebookをpartial_fitで更新
+        # 追加学習モード: 既存codebook中心で初期化しpartial_fitで更新
+        # モデルはnpz形式(codebook_centers)のみ対応（pickle非対応）
         logger.info(f"既存モデル読み込み: {args.resume}")
         with open(args.resume, "rb") as f:
-            existing = pickle.load(f)
-        codebook = existing["codebook"]
-        k = codebook.n_clusters
+            existing = np.load(f, allow_pickle=False)
+            centers = existing["codebook_centers"]
+        k = centers.shape[0]
+        # 保存済み中心を初期値としてウォームスタート
+        codebook = MiniBatchKMeans(
+            n_clusters=k,
+            init=centers,
+            n_init=1,
+            random_state=RANDOM_SEED,
+        )
         logger.info(
             f"codebook追加学習中 (K={k}, "
             f"{total_desc:,}新規記述子)..."
@@ -607,24 +615,28 @@ def main():
         f"分散保持率: {variance_ratio:.1%}"
     )
 
-    # VLADEncoder.load_model() 互換形式で保存
-    # sklearn非依存: numpy配列のみを保存（バージョン互換性を確保）
+    # VLADEncoder.load_model() 互換形式で保存（npz, format_version:3）
+    # pickleは任意コード実行のリスクがあるため使用せず、numpy配列と
+    # JSONメタデータのみを保存する。
     config_dict = {
         "codebook_size": k,
         "pca_dimensions": pca_dim,
     }
-    model_data = {
-        "format_version": 2,
-        "codebook_centers": codebook.cluster_centers_.copy(),
-        "pca_components": pca.components_.copy(),
-        "pca_mean": pca.mean_.copy(),
+    meta = {
+        "format_version": 3,
         "descriptor_dim": desc_dim,
         "config_dict": config_dict,
     }
 
     os.makedirs(os.path.dirname(args.output) or ".", exist_ok=True)
     with open(args.output, "wb") as f:
-        pickle.dump(model_data, f, protocol=pickle.HIGHEST_PROTOCOL)
+        np.savez(
+            f,
+            codebook_centers=codebook.cluster_centers_.copy(),
+            pca_components=pca.components_.copy(),
+            pca_mean=pca.mean_.copy(),
+            meta_json=np.array(json.dumps(meta)),
+        )
 
     file_size_kb = os.path.getsize(args.output) / 1024
     logger.info(f"モデル保存: {args.output} ({file_size_kb:.1f}KB)")

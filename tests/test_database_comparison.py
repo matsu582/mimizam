@@ -4,6 +4,7 @@ SQLite、MySQL、PostgreSQL、Elasticsearchの性能と機能比較
 """
 
 import unittest
+import zlib
 import time
 import sys
 import os
@@ -68,7 +69,7 @@ class TestDatabaseBackendComparison(unittest.TestCase):
             start_time = time.time()
             for song in test_songs:
                 fingerprints = [
-                    Fingerprint(hash_value=f"sqlite_comp_hash_{song.id}_{j}", time_offset=j*0.1)
+                    Fingerprint(hash_value=zlib.crc32(f"sqlite_comp_hash_{song.id}_{j}".encode()) & 0xFFFFFFFF, time_offset=j*0.1)
                     for j in range(fingerprints_per_song)
                 ]
                 db.add_fingerprints(song.id, fingerprints)
@@ -77,7 +78,7 @@ class TestDatabaseBackendComparison(unittest.TestCase):
             # 検索性能
             start_time = time.time()
             query_fingerprints = [
-                Fingerprint(hash_value=f"sqlite_comp_hash_{test_songs[0].id}_0", time_offset=0.05)
+                Fingerprint(hash_value=zlib.crc32(f"sqlite_comp_hash_{test_songs[0].id}_0".encode()) & 0xFFFFFFFF, time_offset=0.05)
             ]
             matches = db.search_fingerprints(query_fingerprints)
             search_time = time.time() - start_time
@@ -122,7 +123,7 @@ class TestDatabaseBackendComparison(unittest.TestCase):
                 start_time = time.time()
                 for song in test_songs:
                     fingerprints = [
-                        Fingerprint(hash_value=f"mysql_comp_hash_{song.id}_{j}", time_offset=j*0.1)
+                        Fingerprint(hash_value=zlib.crc32(f"mysql_comp_hash_{song.id}_{j}".encode()) & 0xFFFFFFFF, time_offset=j*0.1)
                         for j in range(fingerprints_per_song)
                     ]
                     db.add_fingerprints(song.id, fingerprints)
@@ -131,7 +132,7 @@ class TestDatabaseBackendComparison(unittest.TestCase):
                 # 検索性能
                 start_time = time.time()
                 query_fingerprints = [
-                    Fingerprint(hash_value=f"mysql_comp_hash_{test_songs[0].id}_0", time_offset=0.05)
+                    Fingerprint(hash_value=zlib.crc32(f"mysql_comp_hash_{test_songs[0].id}_0".encode()) & 0xFFFFFFFF, time_offset=0.05)
                 ]
                 matches = db.search_fingerprints(query_fingerprints)
                 search_time = time.time() - start_time
@@ -176,7 +177,7 @@ class TestDatabaseBackendComparison(unittest.TestCase):
                 start_time = time.time()
                 for song in test_songs:
                     fingerprints = [
-                        Fingerprint(hash_value=f"pg_comp_hash_{song.id}_{j}", time_offset=j*0.1)
+                        Fingerprint(hash_value=zlib.crc32(f"pg_comp_hash_{song.id}_{j}".encode()) & 0xFFFFFFFF, time_offset=j*0.1)
                         for j in range(fingerprints_per_song)
                     ]
                     db.add_fingerprints(song.id, fingerprints)
@@ -185,7 +186,7 @@ class TestDatabaseBackendComparison(unittest.TestCase):
                 # 検索性能
                 start_time = time.time()
                 query_fingerprints = [
-                    Fingerprint(hash_value=f"pg_comp_hash_{test_songs[0].id}_0", time_offset=0.05)
+                    Fingerprint(hash_value=zlib.crc32(f"pg_comp_hash_{test_songs[0].id}_0".encode()) & 0xFFFFFFFF, time_offset=0.05)
                 ]
                 matches = db.search_fingerprints(query_fingerprints)
                 search_time = time.time() - start_time
@@ -253,9 +254,9 @@ class TestDatabaseBackendComparison(unittest.TestCase):
         )
         
         test_fingerprints = [
-            Fingerprint(hash_value="feature_hash1", time_offset=0.1),
-            Fingerprint(hash_value="feature_hash2", time_offset=0.2),
-            Fingerprint(hash_value="feature_hash3", time_offset=0.3),
+            Fingerprint(hash_value=501, time_offset=0.1),
+            Fingerprint(hash_value=502, time_offset=0.2),
+            Fingerprint(hash_value=503, time_offset=0.3),
         ]
         
         # 機能テスト結果
@@ -346,7 +347,7 @@ class TestDatabaseBackendComparison(unittest.TestCase):
             
             # フィンガープリント検索機能
             query_fingerprints = [
-                Fingerprint(hash_value="feature_hash1", time_offset=0.05)
+                Fingerprint(hash_value=501, time_offset=0.05)
             ]
             matches = db.search_fingerprints(query_fingerprints)
             features['fingerprint_search'] = test_song.id in matches
@@ -489,7 +490,7 @@ class TestDatabaseBackendComparison(unittest.TestCase):
         start_time = time.time()
         for song in test_songs:
             fingerprints = [
-                Fingerprint(hash_value=f"{hash_prefix}_hash_{song.id}_{j}", time_offset=j*0.1)
+                Fingerprint(hash_value=zlib.crc32(f"{hash_prefix}_hash_{song.id}_{j}".encode()) & 0xFFFFFFFF, time_offset=j*0.1)
                 for j in range(fingerprints_per_song)
             ]
             db.add_fingerprints(song.id, fingerprints)
@@ -501,7 +502,7 @@ class TestDatabaseBackendComparison(unittest.TestCase):
         # 検索性能
         start_time = time.time()
         query_fingerprints = [
-            Fingerprint(hash_value=f"{hash_prefix}_hash_{test_songs[0].id}_0", time_offset=0.05)
+            Fingerprint(hash_value=zlib.crc32(f"{hash_prefix}_hash_{test_songs[0].id}_0".encode()) & 0xFFFFFFFF, time_offset=0.05)
         ]
         matches = db.search_fingerprints(query_fingerprints)
         search_time = time.time() - start_time

@@ -7,8 +7,7 @@ PySceneDetect + AKAZE + VLAD + PCA を組み合わせた映像指紋パイプラ
 
 import os
 import logging
-import io
-import pickle
+import json
 import time
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -19,45 +18,6 @@ import cv2
 import numpy as np
 
 logger = logging.getLogger(__name__)
-
-
-# モジュールパスの再マッピング（pickle互換性のため）
-_MODULE_REMAP = {
-    "src.video_fingerprinter": "mimizam.src.video_fingerprinter",
-    "src.pip_detector": "mimizam.src.pip_detector",
-}
-
-
-class _ModuleRemapUnpickler(pickle.Unpickler):
-    """pickleのモジュールパスを再マッピングするUnpickler
-
-    学習スクリプトが `from src.video_fingerprinter import ...` で
-    保存したモデルを、パッケージインストール環境（mimizam.src.）
-    でも読み込めるようにする。逆方向の変換も対応。
-    """
-
-    def find_class(self, module: str, name: str):
-        remapped = _MODULE_REMAP.get(module)
-        if remapped is None:
-            for old, new in _MODULE_REMAP.items():
-                if module == new:
-                    remapped = old
-                    break
-        if remapped:
-            try:
-                return super().find_class(remapped, name)
-            except (ModuleNotFoundError, ImportError):
-                pass
-        return super().find_class(module, name)
-
-
-def _safe_pickle_load(f: io.IOBase):
-    """モジュールパス互換性を考慮したpickle読み込み"""
-    try:
-        return _ModuleRemapUnpickler(f).load()
-    except (ModuleNotFoundError, ImportError):
-        f.seek(0)
-        return pickle.load(f)
 
 
 # フレーム正規化のデフォルト長辺ピクセル数
@@ -78,8 +38,8 @@ def _create_akaze():
     if xfeatures2d is not None and hasattr(xfeatures2d, 'AKAZE_create'):
         return xfeatures2d.AKAZE_create()
     raise RuntimeError(
-        "AKAZEが利用できません。"
-        "opencv-contrib-python をインストールしてください"
+        "AKAZE is not available. "
+        "Install opencv-contrib-python"
     )
 
 
@@ -154,6 +114,12 @@ class VideoFingerprintConfig:
     # 検索閾値
     similarity_threshold: float = 0.5
 
+    # 生AKAZE記述子(raw_descriptors)を指紋に保持するか
+    # Trueにすると元映像なしでの指紋再生成(rebuild_from_descriptors)が
+    # 可能になるが、フレーム毎に多数×61次元の記述子をDB保存するため容量が
+    # 肥大化する。既定Falseで保持しない。
+    store_raw_descriptors: bool = False
+
 
 @dataclass
 class VideoFrameInfo:
@@ -227,11 +193,10 @@ class FrameSelector:
         """
         cap = cv2.VideoCapture(video_path)
         if not cap.isOpened():
-            logger.error(f"映像を開けません: {video_path}")
+            logger.error(f"Failed to open video: {video_path}")
             return []
 
         fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
-        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         interval_frames = max(1, int(self.config.sample_interval * fps))
 
         # 評価間隔: scene_eval_fps でフレームを評価（精度と速度のバランス）
@@ -249,39 +214,27 @@ class FrameSelector:
         # config.profile_frames が True のときのみ各処理の所要時間を集計
         prof_on = self.config.profile_frames
         prof = {
-            "grab": 0.0, "retrieve": 0.0, "resize": 0.0,
+            "decode": 0.0, "resize": 0.0,
             "scene": 0.0, "dedup": 0.0, "accept": 0.0,
         }
         n_dedup = 0
 
         frame_idx = 0
         while True:
+            # 全フレームを復号する。ContentDetectorは連続フレーム前提で
+            # フレーム間差分を評価するため、間引くとscene_thresholdの実効
+            # 感度がfpsに依存してぶれる。シーン検出は全フレームを投入し、
+            # eval_strideはキーフレーム候補の間引きにのみ用いる。
             _t = time.perf_counter() if prof_on else 0.0
-            grabbed = cap.grab()
+            ret, frame = cap.read()
             if prof_on:
-                prof["grab"] += time.perf_counter() - _t
-            if not grabbed:
+                prof["decode"] += time.perf_counter() - _t
+            if not ret:
                 break
 
-            # 評価間隔でのみフレームを処理
-            if frame_idx % eval_stride != 0:
-                frame_idx += 1
-                continue
-
-            _t = time.perf_counter() if prof_on else 0.0
-            ret, frame = cap.retrieve()
-            if prof_on:
-                prof["retrieve"] += time.perf_counter() - _t
-            if not ret:
-                frame_idx += 1
-                continue
-
-            evaluated += 1
             ts = frame_idx / fps
 
-            # シーン変化検出
-            # カラー縮小フレームをContentDetectorに逐次投入し、単一デコード
-            # パスのままカット検出する
+            # シーン変化検出（全フレーム投入）
             _t = time.perf_counter() if prof_on else 0.0
             small = cv2.resize(
                 frame, (self._SCENE_W, self._SCENE_H),
@@ -293,7 +246,7 @@ class FrameSelector:
             _t = time.perf_counter() if prof_on else 0.0
             is_scene_change = False
             if first_eval:
-                # 最初の評価フレームは常にシーン開始として採用
+                # 最初のフレームは常にシーン開始として採用
                 is_scene_change = True
                 first_eval = False
                 detector.process_frame(frame_idx, small)
@@ -304,6 +257,15 @@ class FrameSelector:
 
             if is_scene_change:
                 scene_count += 1
+
+            # キーフレーム候補の評価はeval_strideで間引く
+            # （シーン変化フレームは常に評価・採用対象）
+            is_eval = (frame_idx % eval_stride == 0)
+            if not (is_eval or is_scene_change):
+                frame_idx += 1
+                continue
+
+            evaluated += 1
 
             # フレーム採用判定
             should_accept = False
@@ -337,19 +299,18 @@ class FrameSelector:
 
         cap.release()
         logger.info(
-            f"フレーム選定: {scene_count}シーン, "
-            f"{len(accepted)}フレーム採用 "
-            f"({evaluated}フレーム評価)"
+            f"Frame selection: {scene_count} scenes, "
+            f"{len(accepted)} frames accepted "
+            f"({evaluated} frames evaluated)"
         )
         if prof_on:
             logger.info(
-                "フレーム選定 内訳[秒]: "
-                f"grab(全復号)={prof['grab']:.1f} "
-                f"retrieve(色変換)={prof['retrieve']:.1f} "
-                f"resize(縮小)={prof['resize']:.1f} "
+                "Frame selection breakdown[s]: "
+                f"decode(all)={prof['decode']:.1f} "
+                f"resize={prof['resize']:.1f} "
                 f"scene(ContentDetector)={prof['scene']:.1f} "
-                f"dedup(ヒスト判定×{n_dedup})={prof['dedup']:.1f} "
-                f"accept(採用時ヒスト×{len(accepted)})={prof['accept']:.1f}"
+                f"dedup(hist×{n_dedup})={prof['dedup']:.1f} "
+                f"accept(hist×{len(accepted)})={prof['accept']:.1f}"
             )
         return accepted
 
@@ -470,7 +431,12 @@ class VLADEncoder:
         fidx, ts, img = frame
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
         if self.config.normalize_long_side > 0:
-            gray = normalize_frame(gray, self.config.normalize_long_side)
+            # 低解像度映像も含め全フレームの長辺を統一する。
+            # 縮小のみ(allow_upscale=False)だと小さい映像だけスケールが
+            # 揃わず、コードブック量子化の安定性が損なわれるため拡大も許可。
+            gray = normalize_frame(
+                gray, self.config.normalize_long_side, allow_upscale=True
+            )
         _, desc = self._get_thread_akaze().detectAndCompute(gray, None)
         if desc is not None and len(desc) > 0:
             return (fidx, ts, desc)
@@ -495,8 +461,8 @@ class VLADEncoder:
         n_samples = all_desc.shape[0]
 
         logger.info(
-            f"コードブック学習: {n_samples}記述子, "
-            f"{self._descriptor_dim}次元"
+            f"Codebook training: {n_samples} descriptors, "
+            f"{self._descriptor_dim} dimensions"
         )
 
         # K-Meansコードブック構築（Collapse対策付き）
@@ -508,7 +474,7 @@ class VLADEncoder:
         self._codebook_centers = codebook.cluster_centers_.copy()
 
         vlad_dim = k * self._descriptor_dim
-        logger.info(f"VLAD次元: {vlad_dim}")
+        logger.info(f"VLAD dimensions: {vlad_dim}")
 
         # フレーム/画像ごとのVLADベクトルを生成してPCA学習
         vlad_samples = []
@@ -531,9 +497,9 @@ class VLADEncoder:
 
         variance = np.sum(pca.explained_variance_ratio_) * 100
         logger.info(
-            f"PCA: {vlad_dim}→{target_dim}次元 "
-            f"({len(vlad_samples)}サンプル, "
-            f"分散保持率: {variance:.1f}%)"
+            f"PCA: {vlad_dim}→{target_dim} dimensions "
+            f"({len(vlad_samples)} samples, "
+            f"variance retained: {variance:.1f}%)"
         )
 
     def _train_codebook(
@@ -575,17 +541,17 @@ class VLADEncoder:
 
             if empty_count == 0 and max_ratio < 0.5:
                 logger.info(
-                    f"codebook学習完了: "
-                    f"割り当て min={counts.min()} "
+                    f"Codebook training complete: "
+                    f"assignments min={counts.min()} "
                     f"max={counts.max()} "
-                    f"(最大比率{max_ratio:.1%})"
+                    f"(max ratio {max_ratio:.1%})"
                 )
                 return codebook
 
             logger.warning(
-                f"codebook偏り検出 (試行{attempt + 1}): "
-                f"空クラスタ={empty_count}, "
-                f"最大比率={max_ratio:.1%}"
+                f"Codebook imbalance detected (attempt {attempt + 1}): "
+                f"empty clusters={empty_count}, "
+                f"max ratio={max_ratio:.1%}"
             )
 
             if empty_count > 0:
@@ -597,13 +563,13 @@ class VLADEncoder:
                 empty_after = int(np.sum(counts == 0))
                 if empty_after == 0:
                     logger.info(
-                        f"空クラスタ修復完了: "
-                        f"割り当て min={counts.min()} "
+                        f"Empty cluster repair complete: "
+                        f"assignments min={counts.min()} "
                         f"max={counts.max()}"
                     )
                     return codebook
 
-        logger.warning("codebook修復の試行回数超過。最後の結果を使用")
+        logger.warning("Exceeded codebook repair retry limit; using last result")
         return codebook
 
     @staticmethod
@@ -682,7 +648,7 @@ class VLADEncoder:
             L2正規化済み指紋ベクトル（128次元）。生成不可の場合None
         """
         if not self.is_trained:
-            raise RuntimeError("モデルが未学習です。先にtrain()を呼んでください")
+            raise RuntimeError("Model is not trained. Call train() first")
 
         vlad_vec = self._compute_vlad_vector(descriptors)
         compressed = self._pca_transform(vlad_vec)
@@ -705,7 +671,7 @@ class VLADEncoder:
             VideoFingerprint: フレーム単位指紋の集合
         """
         if not self.is_trained:
-            raise RuntimeError("モデルが未学習です。先にtrain()を呼んでください")
+            raise RuntimeError("Model is not trained. Call train() first")
 
         frame_fingerprints = []
         total_desc = 0
@@ -732,8 +698,8 @@ class VLADEncoder:
 
         if prof_on:
             logger.info(
-                f"指紋集約 内訳[秒]: vlad(量子化+残差×{len(per_frame_desc)})"
-                f"={t_vlad:.1f} pca(圧縮×{len(per_frame_desc)})={t_pca:.1f}"
+                f"Fingerprint aggregation breakdown[s]: vlad(quantize+residual×{len(per_frame_desc)})"
+                f"={t_vlad:.1f} pca(compress×{len(per_frame_desc)})={t_pca:.1f}"
             )
 
         return VideoFingerprint(
@@ -774,45 +740,55 @@ class VLADEncoder:
         return vlad.flatten()
 
     def save_model(self, path: str) -> None:
-        """学習済みモデルをファイルに保存（sklearn非依存形式）"""
-        model_data = {
-            "format_version": 2,
-            "codebook_centers": self._codebook_centers,
-            "pca_components": self._pca_components,
-            "pca_mean": self._pca_mean,
+        """学習済みモデルをファイルに保存
+
+        pickleは任意コード実行のリスクがあるため使用せず、numpy配列と
+        JSONメタデータのみをnpz(zip)形式で保存する（format_version:3）。
+        設定はJSON文字列としてnumpy配列に格納し、読み込み時に
+        allow_pickle=False で安全に復元できるようにする。
+        """
+        meta = {
+            "format_version": 3,
             "descriptor_dim": self._descriptor_dim,
             "config_dict": asdict(self.config),
         }
+        # np.savez はファイル名に .npz を付加するため、ファイルオブジェクトへ書く
         with open(path, "wb") as f:
-            pickle.dump(model_data, f)
-        logger.info(f"モデル保存: {path}")
+            np.savez(
+                f,
+                codebook_centers=self._codebook_centers,
+                pca_components=self._pca_components,
+                pca_mean=self._pca_mean,
+                meta_json=np.array(json.dumps(meta)),
+            )
+        logger.info(f"Model saved: {path}")
 
     def load_model(self, path: str) -> None:
-        """保存済みモデルをファイルから読み込み"""
+        """保存済みモデルをファイルから読み込み（npz形式のみ対応）
+
+        セキュリティ上の理由からpickle形式は読み込まない。npz以外の
+        ファイルを渡した場合はエラーとする（旧pickleモデルはnpz形式へ
+        再保存が必要）。
+        """
         with open(path, "rb") as f:
-            model_data = _safe_pickle_load(f)
+            head = f.read(4)
 
-        if model_data.get("format_version") == 2:
-            # 新形式: numpy配列のみ（sklearn非依存）
-            self._codebook_centers = model_data["codebook_centers"]
-            self._pca_components = model_data["pca_components"]
-            self._pca_mean = model_data["pca_mean"]
-        else:
-            # 旧形式: sklearnオブジェクトからnumpy配列を抽出
-            codebook = model_data["codebook"]
-            pca = model_data["pca"]
-            self._codebook_centers = codebook.cluster_centers_.copy()
-            self._pca_components = pca.components_.copy()
-            self._pca_mean = pca.mean_.copy()
-
-        self._descriptor_dim = model_data["descriptor_dim"]
-        if "config_dict" in model_data:
-            self.config = VideoFingerprintConfig(
-                **model_data["config_dict"]
+        # npz(zip)はマジックバイト "PK\x03\x04" で始まる
+        if head[:2] != b"PK":
+            raise ValueError(
+                "Model file is not in npz format. For security reasons "
+                "pickle format is not loaded. Re-save it in npz format."
             )
-        elif "config" in model_data:
-            self.config = model_data["config"]
-        logger.info(f"モデル読み込み: {path}")
+        with open(path, "rb") as f:
+            data = np.load(f, allow_pickle=False)
+            self._codebook_centers = data["codebook_centers"]
+            self._pca_components = data["pca_components"]
+            self._pca_mean = data["pca_mean"]
+            meta = json.loads(str(data["meta_json"]))
+        self._descriptor_dim = meta["descriptor_dim"]
+        if "config_dict" in meta:
+            self.config = VideoFingerprintConfig(**meta["config_dict"])
+        logger.info(f"Model loaded: {path}")
 
     @staticmethod
     def _l2_normalize(vec: np.ndarray) -> np.ndarray:
@@ -866,7 +842,7 @@ class VideoFingerprinter:
 
         for vpath in video_paths:
             if not os.path.exists(vpath):
-                logger.warning(f"映像が見つかりません: {vpath}")
+                logger.warning(f"Video not found: {vpath}")
                 continue
 
             frames = self.frame_selector.select_keyframes(vpath)
@@ -879,11 +855,11 @@ class VideoFingerprinter:
             stats["descriptors"] += n_desc
             logger.info(
                 f"  {os.path.basename(vpath)}: "
-                f"{len(frames)}フレーム, {n_desc}記述子"
+                f"{len(frames)} frames, {n_desc} descriptors"
             )
 
         if not all_descriptors:
-            raise ValueError("記述子が抽出できませんでした")
+            raise ValueError("Failed to extract descriptors")
 
         self.encoder.train(all_descriptors)
         return stats
@@ -902,17 +878,17 @@ class VideoFingerprinter:
         """
         if not self.is_trained:
             raise RuntimeError(
-                "モデルが未学習です。"
-                "先にtrain_from_videos()を呼んでください"
+                "Model is not trained. "
+                "Call train_from_videos() first"
             )
 
         if not os.path.exists(video_path):
-            logger.error(f"映像が見つかりません: {video_path}")
+            logger.error(f"Video not found: {video_path}")
             return None
 
         frames = self.frame_selector.select_keyframes(video_path)
         if not frames:
-            logger.warning(f"フレームを選定できませんでした: {video_path}")
+            logger.warning(f"Failed to select frames: {video_path}")
             return None
 
         prof_on = self.config.profile_frames
@@ -920,62 +896,27 @@ class VideoFingerprinter:
         _, per_frame = self.encoder.extract_descriptors(frames)
         if prof_on:
             logger.info(
-                f"指紋集約 内訳[秒]: akaze(記述子抽出×{len(frames)}"
-                f"フレーム)={time.perf_counter() - _t:.1f}"
+                f"Fingerprint aggregation breakdown[s]: akaze(descriptor extraction×{len(frames)}"
+                f" frames)={time.perf_counter() - _t:.1f}"
             )
         if not per_frame:
-            logger.warning(f"記述子を抽出できませんでした: {video_path}")
+            logger.warning(f"Failed to extract descriptors: {video_path}")
             return None
 
         fp = self.encoder.encode_video(per_frame)
-        fp.raw_descriptors = per_frame
+        if self.config.store_raw_descriptors:
+            fp.raw_descriptors = per_frame
         dims = (
             fp.frame_fingerprints[0][2].shape[0]
             if fp.frame_fingerprints else 0
         )
         logger.info(
-            f"映像指紋生成: {os.path.basename(video_path)} "
-            f"({fp.frame_count}フレーム, "
-            f"{fp.descriptor_count}記述子, "
-            f"{dims}次元)"
+            f"Video fingerprint generated: {os.path.basename(video_path)} "
+            f"({fp.frame_count} frames, "
+            f"{fp.descriptor_count} descriptors, "
+            f"{dims} dimensions)"
         )
         return fp
-
-    def compute_similarity(
-        self,
-        fp_a: VideoFingerprint,
-        fp_b: VideoFingerprint,
-        use_frame_matching: bool = True,
-    ) -> float:
-        """
-        2つの映像指紋の類似度を計算
-
-        フレーム単位指紋どうしを総当りし、各クエリフレームの最高一致
-        スコアの最大値を採用する（部分一致に強い）。
-
-        Args:
-            fp_a: 映像指紋A
-            fp_b: 映像指紋B
-            use_frame_matching: 互換用フラグ（現在は常にフレーム照合）
-
-        Returns:
-            類似度スコア（-1.0〜1.0）
-        """
-        if not fp_a.frame_fingerprints or not fp_b.frame_fingerprints:
-            return 0.0
-
-        # 各クエリフレーム×DBフレームの類似度を行列積で一括計算
-        q_mat = np.stack(
-            [q_fp.astype(np.float32) for _, _, q_fp in fp_a.frame_fingerprints]
-        )
-        d_mat = np.stack(
-            [d_fp.astype(np.float32) for _, _, d_fp in fp_b.frame_fingerprints]
-        )
-        with np.errstate(all="ignore"):
-            sims = q_mat @ d_mat.T
-        np.nan_to_num(sims, copy=False, nan=0.0, posinf=0.0, neginf=0.0)
-
-        return float(np.max(sims.max(axis=1)))
 
     def rebuild_from_descriptors(
         self,
@@ -995,14 +936,15 @@ class VideoFingerprinter:
         """
         if not self.is_trained:
             raise RuntimeError(
-                "モデルが未学習です。"
-                "先にload_model()を呼んでください"
+                "Model is not trained. "
+                "Call load_model() first"
             )
         if not per_frame_desc:
             return None
 
         fp = self.encoder.encode_video(per_frame_desc)
-        fp.raw_descriptors = per_frame_desc
+        if self.config.store_raw_descriptors:
+            fp.raw_descriptors = per_frame_desc
         return fp
 
     def fingerprint_pip_regions(
@@ -1028,12 +970,12 @@ class VideoFingerprinter:
 
         if not self.is_trained:
             raise RuntimeError(
-                "モデルが未学習です。"
-                "先にload_model()を呼んでください"
+                "Model is not trained. "
+                "Call load_model() first"
             )
 
         if not os.path.exists(video_path):
-            logger.error(f"映像が見つかりません: {video_path}")
+            logger.error(f"Video not found: {video_path}")
             return []
 
         # PiP矩形を検出
@@ -1100,15 +1042,16 @@ class VideoFingerprinter:
                 continue
 
             fp = self.encoder.encode_video(per_frame_desc)
-            fp.raw_descriptors = per_frame_desc
+            if self.config.store_raw_descriptors:
+                fp.raw_descriptors = per_frame_desc
             results.append((region, fp))
 
             logger.info(
-                f"PiP矩形指紋生成: "
+                f"PiP rectangle fingerprint generated: "
                 f"({region.x},{region.y}) {region.w}x{region.h} "
                 f"pip_score={region.pip_score:.2f} "
-                f"({fp.frame_count}フレーム, "
-                f"{fp.descriptor_count}記述子)"
+                f"({fp.frame_count} frames, "
+                f"{fp.descriptor_count} descriptors)"
             )
 
         cap.release()
@@ -1119,16 +1062,19 @@ class VideoFingerprinter:
         self.encoder.save_model(path)
 
     def load_model(self, path: str) -> None:
-        """保存済みモデルを読み込み
+        """保存済みモデルを読み込み（npz形式のみ対応）
 
         モデルには学習時の構造パラメータ（コードブック/PCA次元等）が保存されるが、
-        scene_eval_fps・profile_frames といった実行時設定は現在のconfigを維持する。
+        scene_eval_fps・profile_frames・store_raw_descriptors といった実行時設定は
+        現在のconfigを維持する（モデル読込で上書きしない）。
         読み込み後は3クラスで同一のconfigインスタンスを共有する。
         """
         runtime_scene_eval_fps = self.config.scene_eval_fps
         runtime_profile_frames = self.config.profile_frames
+        runtime_store_raw_descriptors = self.config.store_raw_descriptors
         self.encoder.load_model(path)
         self.encoder.config.scene_eval_fps = runtime_scene_eval_fps
         self.encoder.config.profile_frames = runtime_profile_frames
+        self.encoder.config.store_raw_descriptors = runtime_store_raw_descriptors
         self.config = self.encoder.config
         self.frame_selector.config = self.encoder.config

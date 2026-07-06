@@ -57,11 +57,11 @@ class TestCrossBackendConsistency(unittest.TestCase):
         )
 
         self.test_fingerprints = [
-            Fingerprint(hash_value="container_hash1", time_offset=0.1),
-            Fingerprint(hash_value="container_hash2", time_offset=0.2),
-            Fingerprint(hash_value="container_hash3", time_offset=0.3),
-            Fingerprint(hash_value="container_hash4", time_offset=0.4),
-            Fingerprint(hash_value="container_hash5", time_offset=0.5),
+            Fingerprint(hash_value=101, time_offset=0.1),
+            Fingerprint(hash_value=102, time_offset=0.2),
+            Fingerprint(hash_value=103, time_offset=0.3),
+            Fingerprint(hash_value=104, time_offset=0.4),
+            Fingerprint(hash_value=105, time_offset=0.5),
         ]
 
     def _run_backend_operations(self, config, backend_name):
@@ -93,8 +93,8 @@ class TestCrossBackendConsistency(unittest.TestCase):
 
         # フィンガープリント検索
         query_fps = [
-            Fingerprint(hash_value="container_hash1", time_offset=0.05),
-            Fingerprint(hash_value="container_hash2", time_offset=0.15),
+            Fingerprint(hash_value=101, time_offset=0.05),
+            Fingerprint(hash_value=102, time_offset=0.15),
         ]
         matches = db.search_fingerprints(query_fps)
         self.assertIn(

@@ -77,8 +77,8 @@ class TestHashGenerator(unittest.TestCase):
         # フィンガープリントの属性を確認
         for fingerprint in fingerprints:
             self.assertIsInstance(fingerprint, Fingerprint)
-            self.assertIsInstance(fingerprint.hash_value, str)
-            self.assertEqual(len(fingerprint.hash_value), 64)  # SHA-256の16進数長
+            self.assertIsInstance(fingerprint.hash_value, int)
+            self.assertTrue(0 <= fingerprint.hash_value <= 0xFFFFFFFF)  # 32bit符号なし整数
             self.assertGreaterEqual(fingerprint.time_offset, 0)
     
     def test_hash_consistency(self):
@@ -116,7 +116,7 @@ class TestAudioFingerprinter(unittest.TestCase):
         # フィンガープリントの属性を確認
         for fingerprint in fingerprints[:5]:  # 最初の5つを確認
             self.assertIsInstance(fingerprint, Fingerprint)
-            self.assertIsInstance(fingerprint.hash_value, str)
+            self.assertIsInstance(fingerprint.hash_value, int)
             self.assertGreaterEqual(fingerprint.time_offset, 0)
 
 

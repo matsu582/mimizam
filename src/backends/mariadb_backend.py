@@ -39,10 +39,10 @@ class MariaDBBackend(MySQLBackend):
             cursor.fetchall()
             cursor.close()
             self._mariadb_vector_available = True
-            self.logger.info("MariaDBネイティブベクトル機能を検出しました")
+            self.logger.info("Detected MariaDB native vector support")
         except MySQLError:
             self.logger.info(
-                "MariaDBベクトル機能未対応（brute-forceにフォールバック）"
+                "MariaDB vector support unavailable (falling back to brute-force)"
             )
         return True
 
@@ -105,7 +105,7 @@ class MariaDBBackend(MySQLBackend):
                 cursor.close()
             return True
         except MySQLError as e:
-            self.logger.warning(f"MariaDBフレームベクトル表準備エラー: {e}")
+            self.logger.warning(f"MariaDB frame vector table setup error: {e}")
             return False
 
     def _frame_vector_ready(self) -> bool:
@@ -204,7 +204,7 @@ class MariaDBBackend(MySQLBackend):
             cursor.close()
             return agg
         except MySQLError as e:
-            self.logger.debug(f"MariaDBフレームANN検索フォールバック: {e}")
+            self.logger.debug(f"MariaDB frame ANN search fallback: {e}")
             return super().search_frame_candidates(
                 query_fps, dimensions, k_per_query, sim_threshold
             )

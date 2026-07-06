@@ -234,7 +234,7 @@ def print_merged_results(
     print("-" * 70)
 
     for i, result in enumerate(valid, 1):
-        title = result["title"]
+        title = result["title"] or "不明"
         combined = result["combined_score"]
         a_conf = result.get("audio_confidence")
         v_sim = result.get("visual_similarity")
@@ -258,7 +258,7 @@ def print_merged_results(
         if show_details:
             _print_detail_section(result)
 
-        print(f"     ファイル: {result['file_path']}")
+        print(f"     ファイル: {result['file_path'] or '不明'}")
 
         if i < len(valid):
             print()
@@ -577,15 +577,15 @@ def main() -> int:
 使用例:
   # 音声+映像の両方で検索
   python movie_search.py /path/to/query.mp4 \\
-      --model model.pki --details
+      --model model.npz --details
 
   # 映像のみで検索（音声スキップ）
   python movie_search.py /path/to/query.mp4 \\
-      --model model.pki --skip-audio --details
+      --model model.npz --skip-audio --details
 
   # PiP検出付きで検索
   python movie_search.py /path/to/query.mp4 \\
-      --model model.pki --detect-pip --details
+      --model model.npz --detect-pip --details
 """,
     )
 
