@@ -5,6 +5,7 @@
 
 from typing import List, Optional, Tuple, Dict, Any
 import logging
+import math
 import numpy as np
 from scipy import stats
 from pathlib import Path
@@ -14,7 +15,6 @@ from .database_backends import (
     DatabaseBackend, DatabaseConfig, Song, 
     create_database_backend
 )
-from .audio_fingerprinter import HashGenerator
 
 
 class FingerprintDatabase:
@@ -186,22 +186,19 @@ class FingerprintMatcher:
         self.min_confidence = 0.1
         self.max_results = 10
         
-        # スコアリング方式の選択
+        # スコアリング方式の選択。尺度不変ハッシュへ移行したため time_scale/
+        # freq_scale のブルートフォース列挙は廃止し、いずれの方式も単一検索＋
+        # 頑健直線回帰の同一経路へ委譲する（名称は後方互換のため保持）。
         self.scoring_method = "hybrid"  # "hybrid", "histogram", "detailed"
-        
-        # 速度/ピッチ変化の許容範囲
-        self.freq_scale_factors = [0.9, 0.95, 1.0, 1.05, 1.1]  # ±10%のピッチ変化
-        
-        # スケール係数の定義（用途別）
-        self.detailed_scales = [0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.25, 1.5, 1.75, 2.0]  # 包括的（0.5倍-2倍）
-        self.histogram_scales = [0.8, 0.85, 0.9, 0.95, 1.0, 1.05, 1.1, 1.15, 1.2, 1.3, 1.5]  # 細かい刻み（ヒストグラム方式）
-        self.hybrid_fast_scales = [0.8, 0.9, 1.0, 1.1, 1.2, 1.5]  # 高速候補抽出用（限定的）
-        
-        # 後方互換性のため、detailed_scalesをtime_scale_factorsとしても参照可能
-        self.time_scale_factors = self.detailed_scales
-        
-        self.time_tolerance = 0.3  # 秒 - より広い速度範囲のため許容度を増加
-        self.freq_tolerance = 100  # Hz - 周波数許容度を増加
+
+        # 整列許容度（秒）。頑健直線回帰で速度変化を吸収した後の残差許容に用いる。
+        self.time_tolerance = 0.3
+
+        # 頑健直線回帰（ハフ投票）の傾き（＝time_scale）の妥当域と各種パラメータ。
+        self.slope_range = (0.25, 4.0)
+        self.line_fit_sample_size = 150      # ペア傾き算出のサンプル点上限（O(K^2)抑制）
+        self.slope_log2_bin = 0.03           # 傾きヒストグラムのビン幅（log2空間）
+        self.slope_min_dq = 1.0              # 傾き算出に使う query 時間差の下限（秒）
     
     def set_scoring_method(self, method: str) -> None:
         """
@@ -278,314 +275,167 @@ class FingerprintMatcher:
         
         return results
     
-    def _search_candidates_by_freq(self, query_fingerprints: List[Fingerprint],
-                                    freq_scale: float) -> Dict[str, List[Tuple[float, float]]]:
-        """指定 freq_scale の候補集合を1回のDB検索で取得する
+    def _find_matches_scale_invariant(self, query_fingerprints: List[Fingerprint],
+                                      min_matches: int, top_k: int) -> List[Dict[str, Any]]:
+        """尺度不変ハッシュ前提の単一検索マッチング（速度・ピッチ変化に頑健）
 
-        DB検索はハッシュ完全一致で候補を引くため、time_scaleを変えても
-        候補行は変わらない（ハッシュはfreq_scaleにのみ依存）。よって候補取得は
-        freq_scaleごとに1回で済ませ、time_scale仮説はメモリ上で評価する（③の重複問い合わせ回避）。
-        戻り値の query_time は time_scale=1.0（等倍）基準の値。
+        ハッシュ自体が時間伸縮・ピッチ変化に不変なため、time_scale/freq_scale の
+        ブルートフォース列挙もDB再検索の多重発行も行わない（DB検索は1回のみ）。
+        マッチした (query_time, db_time) を頑健直線回帰 db≈s·query+c にフィットし、
+        傾き s を time_scale、切片 c を offset として復元する。曲ごとの信頼度は、
+        傾きで正規化したペア (s·query, db) の時間整列から算出する（速度変化しても
+        オフセットが一定になるため、既存の整列ベース信頼度をそのまま再利用できる）。
         """
-        base_fingerprints = self._scale_fingerprints(query_fingerprints, 1.0, freq_scale)
-        return self.database.search_fingerprints(base_fingerprints)
+        # 単一検索: 尺度不変ハッシュなので候補集合はこれで完結する
+        all_matches = self.database.search_fingerprints(query_fingerprints)
 
-    @staticmethod
-    def _apply_time_scale_to_pairs(base_pairs: List[Tuple[float, float]],
-                                   time_scale: float) -> List[Tuple[float, float]]:
-        """等倍基準のマッチペアに time_scale を適用してメモリ上で再構成する
-
-        query_time を time_scale 倍する。極端なスケール（≤0.6 または ≥1.8）では
-        量子化境界対策として ±20ms のオフセット版も追加し、
-        _scale_fingerprints 経由でDB検索した場合と等価なペア集合を得る。
-        """
-        scaled_pairs: List[Tuple[float, float]] = []
-        extreme = time_scale <= 0.6 or time_scale >= 1.8
-        for q_time, db_time in base_pairs:
-            st = q_time * time_scale
-            scaled_pairs.append((st, db_time))
-            if extreme:
-                scaled_pairs.append((st - 0.02, db_time))
-                scaled_pairs.append((st + 0.02, db_time))
-        return scaled_pairs
-
-    def _find_matches_hybrid(self, query_fingerprints: List[Fingerprint], min_matches: int, top_k: int) -> List[Dict[str, Any]]:
-        """
-        高速化版hybrid: 1段階目で全スケール・ピッチのマッチペアを集約し、2段階目はDBアクセスせずグルーピング＆スコア計算のみ
-        """
-        import time
-        t_all = time.perf_counter()
-        # 1段階目: freq_scaleごとに1回だけDB検索し、time_scaleはメモリ上で展開
-        t0 = time.perf_counter()
-        all_match_info = {}  # song_id -> List[(query_time, db_time, time_scale, freq_scale)]
-        db_query_count = 0
-        for freq_scale in self.freq_scale_factors:
-            t_db0 = time.perf_counter()
-            base_matches = self._search_candidates_by_freq(query_fingerprints, freq_scale)
-            t_db1 = time.perf_counter()
-            db_query_count += 1
-            self.logger.debug(f"[BENCHMARK-HYBRID-NEW] DB search (freq={freq_scale}): {t_db1-t_db0:.4f}s, base matches: {sum(len(p) for p in base_matches.values())}")
-            for time_scale in self.hybrid_fast_scales:
-                for song_id, base_pairs in base_matches.items():
-                    scaled_pairs = self._apply_time_scale_to_pairs(base_pairs, time_scale)
-                    if song_id not in all_match_info:
-                        all_match_info[song_id] = []
-                    # 各マッチペアにスケール情報を付与
-                    for q_time, db_time in scaled_pairs:
-                        all_match_info[song_id].append((q_time, db_time, time_scale, freq_scale))
-        t1 = time.perf_counter()
-        self.logger.debug(f"[BENCHMARK-HYBRID-NEW] 1st stage (all DB search): {t1-t0:.4f}s, total DB queries: {db_query_count}")
-
-        # 2段階目: song_idごとにスケール・ピッチでグループ化し、最良スコアを採用
-        t2 = time.perf_counter()
-        best_results = {}
-        for song_id, match_info_list in all_match_info.items():
-            # スケール・ピッチごとにグループ化
-            group_dict = {}
-            for q_time, db_time, t_scale, f_scale in match_info_list:
-                key = (t_scale, f_scale)
-                group_dict.setdefault(key, []).append((q_time, db_time))
-            # 各グループでスコア計算し、最良のものを採用
-            best_group = None
-            best_conf = 0.0
-            best_group_info = None
-            for (t_scale, f_scale), pairs in group_dict.items():
-                if len(pairs) < min_matches:
-                    continue
-                t_score0 = time.perf_counter()
-                conf = self._calculate_confidence_score_with_scaling(pairs, t_scale, f_scale)
-                t_score1 = time.perf_counter()
-                self.logger.debug(f"[BENCHMARK-HYBRID-NEW] Score calc (song={song_id}, scale={t_scale}, freq={f_scale}, n={len(pairs)}): {t_score1-t_score0:.4f}s")
-                if conf > best_conf:
-                    best_conf = conf
-                    best_group = pairs
-                    best_group_info = (t_scale, f_scale)
-            if best_group and best_conf >= self.min_confidence and best_group_info:
-                time_offset = self._calculate_time_offset(best_group)
-                alignment_ratio = self._calculate_alignment_ratio(best_group)
-                match_density = self._calculate_match_density(best_group)
-                best_results[song_id] = {
-                    'song_id': song_id,
-                    'confidence': best_conf,
-                    'match_count': len(best_group),
-                    'match_pairs': best_group,
-                    'time_offset': time_offset,
-                    'time_scale': best_group_info[0],
-                    'freq_scale': best_group_info[1],
-                    'alignment_ratio': alignment_ratio,
-                    'match_density': match_density
-                }
-        t3 = time.perf_counter()
-        self.logger.debug(f"[BENCHMARK-HYBRID-NEW] 2nd stage (grouping & scoring): {t3-t2:.4f}s")
-        results = self._sort_and_limit_results(best_results)[:top_k]
-        t_all2 = time.perf_counter()
-        self.logger.debug(f"[BENCHMARK-HYBRID-NEW] total: {t_all2-t_all:.4f}s")
-        return results
-    
-
-    def _find_matches_histogram(self, query_fingerprints: List[Fingerprint], 
-                              min_matches: int, top_k: int = 10) -> List[Dict[str, Any]]:
-        """ヒストグラム方式のみ（スケール対応版）- 複数速度でDB検索"""
-        
-        # 複数のスケールでクエリフィンガープリントを検索
-        all_results = {}
-        
-        # ヒストグラム方式は freq_scale=1.0 固定のため、候補集合は1回のDB検索で取得し、
-        # time_scale 仮説はメモリ上で評価する（③の重複問い合わせ回避）。
-        base_matches = self._search_candidates_by_freq(query_fingerprints, 1.0)
-        for time_scale in self.histogram_scales:
-            self._process_scale_for_histogram(
-                base_matches, time_scale, min_matches, all_results
-            )
-            
-        self.logger.debug(f"Histogram method: found {len(all_results)} candidates")
-        
-        # 信頼度フィルタリング
-        filtered_results = {k: v for k, v in all_results.items() 
-                           if v['confidence'] >= self.min_confidence}
-        
-        self.logger.debug(f"Histogram method: {len(filtered_results)} items after confidence filter")
-        
-        # マルチクライテリアソートを適用
-        return self._sort_and_limit_results(filtered_results)[:top_k]
-    
-    def _process_scale_for_histogram(self, base_matches: Dict[str, List[Tuple[float, float]]],
-                                   time_scale: float, min_matches: int,
-                                   all_results: Dict[str, Dict[str, Any]]) -> None:
-        """ヒストグラム方式で特定のスケールを処理
-
-        base_matches は freq_scale=1.0・等倍(time_scale=1.0)基準の候補集合。
-        time_scale はメモリ上でペアに適用する（DB再検索しない）。
-        """
-        
-        matches = {
-            song_id: self._apply_time_scale_to_pairs(base_pairs, time_scale)
-            for song_id, base_pairs in base_matches.items()
-        }
-        
-        self.logger.debug(f"Scale {time_scale}: {len(matches)} songs found, "
-                         f"total matches: {sum(len(pairs) for pairs in matches.values())}")
-        
-        for song_id, match_pairs in matches.items():
-            if len(match_pairs) < min_matches:
+        best_results: Dict[str, Dict[str, Any]] = {}
+        for song_id, pairs in all_matches.items():
+            if len(pairs) < min_matches:
                 continue
-            
-            self.logger.debug(f"Processing song {song_id} with {len(match_pairs)} matches at scale {time_scale}")
-            
-            self._process_histogram_for_song(
-                match_pairs, time_scale, all_results, song_id
-            )
-    
-    def _process_histogram_for_song(self, match_pairs: List[Tuple[float, float]],
-                                      time_scale: float, all_results: Dict[str, Dict[str, Any]],
-                                      song_id: str) -> None:
-        """ヒストグラム信頼度を計算して結果を更新"""
-        
-        # 時間差を計算（スケール調整済み）
-        offsets = [(db_time - query_time)/time_scale for query_time, db_time in match_pairs]
-        
-        if len(offsets) < 5:  # ヒストグラム方式の最小閾値
-            self.logger.debug(f"Song {song_id}: {len(offsets)} offsets < 5, skipping")
-            return
-        
-        offsets = np.array(offsets)
-        
-        # ヒストグラム方式: 動的なビン幅計算（Freedman-Diaconis rule）
-        q75, q25 = np.percentile(offsets, [75, 25])
-        iqr = q75 - q25
-        bin_width = 2 * iqr / (len(offsets) ** (1/3)) if iqr > 0 else 0.1
-        bin_width = max(0.05, min(bin_width, 1.0))  # 0.05-1.0秒の範囲で制限
-        
-        # 適応的レンジ設定
-        offset_range = max(10.0, float(np.std(offsets)) * 4)
-        offset_mean = np.mean(offsets)
-        
-        bins = int((2 * offset_range) / bin_width)
-        bins = max(20, min(bins, 200))  # ビン数を制限
-        
-        hist, bin_edges = np.histogram(offsets, 
-                                     bins=bins, 
-                                     range=(float(offset_mean - offset_range), 
-                                           float(offset_mean + offset_range)))
-        
-        # ピーク検出とノイズ除去
-        max_count = int(np.max(hist))
-        max_bin_idx = int(np.argmax(hist))
-        
-        # ヒストグラム方式: 統計的有意性検査
-        if max_count < 3:
-            return
-            
-        # 周辺ビンとの比較でピークの明確さを評価
-        peak_prominence = self._calculate_peak_prominence(hist, max_bin_idx)
-        
-        # 最適なオフセット計算（ピーク周辺の重心）
-        offset = self._calculate_weighted_offset(hist, bin_edges, max_bin_idx)
-        
-        # ヒストグラム信頼度計算
-        confidence = self._calculate_histogram_confidence(
-            max_count, len(offsets), peak_prominence, time_scale
-        )
-        
-        self.logger.debug(f"Song {song_id}: confidence={confidence:.3f}, max_count={max_count}, "
-                         f"prominence={peak_prominence:.2f}, scale={time_scale}, offset={offset:.2f}")
-        
-        # より良いスコアの場合のみ更新
-        if song_id not in all_results or confidence > all_results[song_id]['confidence']:
-            # 拡張指標を計算
-            alignment_ratio = self._calculate_alignment_ratio(match_pairs)
-            match_density = self._calculate_match_density(match_pairs)
-            
-            all_results[song_id] = {
-                'song_id': song_id,
-                'confidence': confidence,
-                'match_count': len(match_pairs),     # 実際のマッチ数を使用
-                'histogram_peak': max_count,         # ヒストグラムピーク値は別途保存
-                'match_pairs': match_pairs,          # ソート時に使用
-                'time_offset': offset,
-                'time_scale': time_scale,
-                'freq_scale': 1.0,
-                'alignment_ratio': alignment_ratio,  # 新指標
-                'match_density': match_density,      # 新指標
-                'peak_prominence': peak_prominence
-            }
-            self.logger.debug(f"Song {song_id}: Updated as best result")
-    
-    def _find_matches_detailed(self, query_fingerprints: List[Fingerprint], 
-                             min_matches: int, top_k: int = 10) -> List[Dict[str, Any]]:
-        """多面的スコアリングのみ（従来方式）"""
-        best_results = self._find_scaled_matches(query_fingerprints, min_matches)
-        return self._sort_and_limit_results(best_results)[:top_k]
-    
-    def _find_scaled_matches(self, query_fingerprints: List[Fingerprint], 
-                           min_matches: int, song_id: Optional[str] = None) -> Dict[str, Dict[str, Any]]:
-        """異なるスケールでマッチを検索
 
-        候補集合は freq_scale ごとに1回だけDB検索し、time_scale 仮説はメモリ上で
-        評価する（③の重複問い合わせ回避）。song_id指定時はその曲のみ対象にする。
-        """
-        best_results = {}
-        
-        for freq_scale in self.freq_scale_factors:
-            base_matches = self._search_candidates_by_freq(query_fingerprints, freq_scale)
-            for time_scale in self.time_scale_factors:
-                self._process_scale_combination(
-                    base_matches, time_scale, freq_scale, 
-                    min_matches, best_results, song_id
-                )
-        
-        return best_results
-    
-    def _process_scale_combination(self, base_matches: Dict[str, List[Tuple[float, float]]],
-                                 time_scale: float, freq_scale: float,
-                                 min_matches: int, best_results: Dict[str, Dict[str, Any]], song_id: Optional[str] = None):
-        """
-        特定のスケール組み合わせを処理
+            # (query_time, db_time) の支配的な直線 db≈slope·query+offset を
+            # ハフ投票（傾きの最頻値→オフセットの最頻値）で頑健に推定する。
+            # 尺度不変ハッシュは粗量子化で偶発衝突が増えるため、外れ値が過半でも
+            # 壊れない最頻値ベースを用いる（中央値だと汚染される）。
+            slope, offset, inlier_pairs = self._fit_scale_offset(pairs)
+            aligned = len(inlier_pairs)
+            if aligned < min_matches:
+                continue
 
-        base_matches は指定 freq_scale・等倍(time_scale=1.0)基準の候補集合。
-        time_scale はメモリ上でペアに適用する（DB再検索しない）。
-        song_idを指定した場合、その曲のみを対象にする
-        """
-        for sid, base_pairs in base_matches.items():
-            if song_id is not None and sid != song_id:
+            confidence = self._confidence_from_inliers(aligned, len(pairs))
+            if confidence < self.min_confidence:
                 continue
-            match_pairs = self._apply_time_scale_to_pairs(base_pairs, time_scale)
-            if len(match_pairs) < min_matches:
-                continue
-            confidence = self._calculate_confidence_score_with_scaling(
-                match_pairs, time_scale, freq_scale
-            )
-            if confidence >= self.min_confidence:
-                self._update_best_result(
-                    best_results, sid, match_pairs, 
-                    confidence, time_scale, freq_scale
-                )
-    
-    def _update_best_result(self, best_results: Dict[str, Dict[str, Any]], 
-                          song_id: str, match_pairs: List[Tuple[float, float]],
-                          confidence: float, time_scale: float, freq_scale: float):
-        """最良の結果を更新（拡張指標付き）"""
-        if song_id not in best_results or confidence > best_results[song_id]['confidence']:
-            time_offset = self._calculate_time_offset(match_pairs)
-            
-            # アライメント比率を計算（時間的整列の品質指標）
-            alignment_ratio = self._calculate_alignment_ratio(match_pairs)
-            
-            # マッチ密度を計算（マッチ数 / 時間範囲）
-            match_density = self._calculate_match_density(match_pairs)
-            
+
             best_results[song_id] = {
                 'song_id': song_id,
                 'confidence': confidence,
-                'match_count': len(match_pairs),
-                'match_pairs': match_pairs,  # ソート時に使用
-                'time_offset': time_offset,
-                'time_scale': time_scale,
-                'freq_scale': freq_scale,
-                'alignment_ratio': alignment_ratio,  # 新指標
-                'match_density': match_density       # 新指標
+                'match_count': aligned,
+                'match_pairs': inlier_pairs,
+                # 支配直線の切片（速度補正後のオフセット）
+                'time_offset': offset,
+                'time_scale': slope,
+                # ピッチ不変はハッシュ側で吸収済みのため freq_scale は常に 1.0
+                'freq_scale': 1.0,
+                'alignment_ratio': aligned / len(pairs) if pairs else 0.0,
+                'match_density': self._calculate_match_density(inlier_pairs),
             }
-    
+
+        return self._sort_and_limit_results(best_results)[:top_k]
+
+    # 後方互換: scoring_method は挙動を変えず、いずれも尺度不変の単一検索経路へ委譲する。
+    def _find_matches_hybrid(self, query_fingerprints: List[Fingerprint],
+                             min_matches: int, top_k: int) -> List[Dict[str, Any]]:
+        return self._find_matches_scale_invariant(query_fingerprints, min_matches, top_k)
+
+    def _find_matches_histogram(self, query_fingerprints: List[Fingerprint],
+                                min_matches: int, top_k: int = 10) -> List[Dict[str, Any]]:
+        return self._find_matches_scale_invariant(query_fingerprints, min_matches, top_k)
+
+    def _find_matches_detailed(self, query_fingerprints: List[Fingerprint],
+                               min_matches: int, top_k: int = 10) -> List[Dict[str, Any]]:
+        return self._find_matches_scale_invariant(query_fingerprints, min_matches, top_k)
+
+    def _estimate_slope(self, pairs: List[Tuple[float, float]]) -> float:
+        """支配的な傾き（=time_scale）をハフ投票（log2傾きの最頻ビン）で推定する
+
+        ペア間傾き (dj-di)/(qj-qi) を log2 空間でヒストグラム投票し、最頻ビン内の
+        傾きの中央値を採る。時間量子化の影響を抑えるため、query側の時間差が
+        十分大きいペアのみを使う。外れ値が過半でも最頻ビンは真の傾きに立つ。
+        """
+        n = len(pairs)
+        if n < 2:
+            return 1.0
+
+        # O(K^2) に制限するための等間隔サンプリング（決定的）
+        k = self.line_fit_sample_size
+        if n > k:
+            stride = n / k
+            sample = [pairs[int(i * stride)] for i in range(k)]
+        else:
+            sample = pairs
+
+        lo, hi = self.slope_range
+        log_lo, log_hi = math.log2(lo), math.log2(hi)
+        bin_w = self.slope_log2_bin
+        # 傾き精度確保のため query 時間差がこの秒数以上のペアを優先採用する
+        min_dq = self.slope_min_dq
+
+        def collect(min_gap: float) -> List[float]:
+            out = []
+            m = len(sample)
+            for i in range(m):
+                qi, di = sample[i]
+                for j in range(i + 1, m):
+                    qj, dj = sample[j]
+                    dq = qj - qi
+                    if abs(dq) < min_gap:
+                        continue
+                    s = (dj - di) / dq
+                    if lo <= s <= hi:
+                        out.append(s)
+            return out
+
+        slopes = collect(min_dq)
+        if not slopes:  # 短いクエリ等でペアが集まらない場合は制約を緩める
+            slopes = collect(1e-6)
+        if not slopes:
+            return 1.0
+
+        # log2 空間でヒストグラム投票し最頻ビンを取る
+        votes: Dict[int, List[float]] = {}
+        for s in slopes:
+            b = int((math.log2(s) - log_lo) / bin_w)
+            votes.setdefault(b, []).append(s)
+        best_bin = max(votes.values(), key=len)
+        return float(np.median(best_bin))
+
+    def _fit_scale_offset(self, pairs: List[Tuple[float, float]]
+                          ) -> Tuple[float, float, List[Tuple[float, float]]]:
+        """支配直線 db≈slope·query+offset を推定し、整合するインライアを返す
+
+        1. _estimate_slope で傾き（=time_scale）をハフ投票で求める。
+        2. 各ペアのオフセット db-slope·query をヒストグラム化し、最頻ビン近傍
+           （±time_tolerance）を代表オフセットとしてインライアを抽出する。
+
+        Returns:
+            (slope, offset, inlier_pairs)
+        """
+        if not pairs:
+            return 1.0, 0.0, []
+
+        slope = self._estimate_slope(pairs)
+        lo, hi = self.slope_range
+        slope = min(max(slope, lo), hi)
+
+        offsets = [db_time - slope * q_time for q_time, db_time in pairs]
+        tol = self.time_tolerance
+        # オフセットを tol 幅でビン化し、最頻ビンを求める
+        offset_votes: Dict[int, List[float]] = {}
+        for off in offsets:
+            b = int(round(off / tol))
+            offset_votes.setdefault(b, []).append(off)
+        best_offsets = max(offset_votes.values(), key=len)
+        offset = float(np.median(best_offsets))
+
+        inliers = [
+            pair for pair, off in zip(pairs, offsets)
+            if abs(off - offset) <= tol
+        ]
+        return slope, offset, inliers
+
+    @staticmethod
+    def _confidence_from_inliers(aligned: int, total: int) -> float:
+        """支配直線に整合したインライア数と割合から信頼度[0,1]を算出する
+
+        真の一致は「割合が高く」かつ「絶対数も多い」。無関係曲は偶発衝突が
+        散在し、支配直線に乗る割合・数がともに低いため区別できる。
+        """
+        if total <= 0 or aligned < 2:
+            return 0.0
+        ratio = aligned / total
+        strength = min(1.0, aligned / 15.0)  # 15件整合で満点
+        return min(ratio * (0.5 + 0.5 * strength), 1.0)
     def _sort_and_limit_results(self, best_results: Dict[str, Dict[str, Any]]) -> List[Dict[str, Any]]:
         """
         結果を多面的にソートして制限
@@ -777,114 +627,6 @@ class FingerprintMatcher:
             base_confidence += secondary_bonus
         
         return min(base_confidence, 1.0)  # 1.0でキャップ
-    
-    def _scale_fingerprints(self, fingerprints: List[Fingerprint], 
-                           time_scale: float, freq_scale: float) -> List[Fingerprint]:
-        """
-        速度/ピッチ変化テスト用のフィンガープリントをスケール変更（0.5倍-2倍速度範囲に最適化）
-        
-        Args:
-            fingerprints: 元のフィンガープリント
-            time_scale: 時間スケール係数（0.5-2.0範囲）
-            freq_scale: 周波数スケール係数（0.9-1.1範囲）。ピッチ変化に対応するため、
-                ハッシュの周波数ビンを再スケールして実際にハッシュ値を作り直す。
-            
-        Returns:
-            スケール変更されたフィンガープリントのリスト
-        """
-        scaled_fingerprints = []
-
-        # 極端な速度に対して改良された精度で時間スケーリングを適用
-        for fp in fingerprints:
-            try:
-                # ピッチ変化対応: 周波数ビンを freq_scale で再スケールして
-                # 実ハッシュを作り直す（time_offsetだけ変えても候補集合は不変のため）
-                scaled_hash = HashGenerator.rescale_hash_frequency(
-                    fp.hash_value, freq_scale
-                )
-
-                # 0.5倍-2倍範囲に対してより高い精度で時間オフセットをスケーリング
-                scaled_time = fp.time_offset * time_scale
-                
-                # 量子化境界をカバーするため複数のスケール版を作成
-                scaled_fp = Fingerprint(
-                    hash_value=scaled_hash,
-                    time_offset=scaled_time,
-                    song_id=fp.song_id
-                )
-                scaled_fingerprints.append(scaled_fp)
-                
-                # 極端なスケーリング（0.5倍または2倍）の場合オフセット版を追加
-                if time_scale <= 0.6 or time_scale >= 1.8:
-                    # 境界交差を改善するため時間オフセットを追加
-                    for offset in [-0.02, 0.02]:  # ±20msオフセット
-                        offset_fp = Fingerprint(
-                            hash_value=scaled_hash,
-                            time_offset=scaled_time + offset,
-                            song_id=fp.song_id
-                        )
-                        scaled_fingerprints.append(offset_fp)
-                        
-            except Exception:
-                # スケーリングが失敗した場合、元のものを使用
-                scaled_fingerprints.append(fp)
-        
-        return scaled_fingerprints
-    
-    def _calculate_confidence_score_with_scaling(self, match_pairs: List[Tuple[float, float]], 
-                                               time_scale: float, freq_scale: float) -> float:
-        """
-        スケーリング係数を考慮した信頼度スコアを計算（0.5倍-2倍速度範囲に最適化）
-
-        Args:
-            match_pairs: (query_time_offset, db_time_offset)タプルのリスト
-            time_scale: 使用された時間スケール係数
-            freq_scale: 使用された周波数スケール係数
-
-        スコア計算の詳細:
-        - ベースは _calculate_confidence_score の結果
-        - 時間スケール(time_scale)が大きく逸脱（0.5倍～0.7倍や1.5倍～2倍）していればペナルティ（*0.8や*0.85）
-        - 中程度の速度変化も緩やかにペナルティ（1.0 - |time_scale-1.0|*0.2）
-        - ピッチスケール(freq_scale)も逸脱が大きいとペナルティ（1.0 - |freq_scale-1.0|*0.3）
-        - 極端なスケーリングで一致数が多ければボーナス（20件以上:*1.15, 10件以上:*1.1）
-        - 最終スコアは1.0でクリップ
-
-        例: 2倍速や0.5倍速でも十分な一致があれば高スコア、
-        速度・ピッチが大きく異なる場合はスコアが下がる。
-
-        Returns:
-            0と1の間の信頼度スコア
-        """
-        if len(match_pairs) < 2:
-            return 0.0
-        
-        # ベース信頼度計算
-        base_confidence = self._calculate_confidence_score(match_pairs)
-        
-        # 非標準スケーリングに対するペナルティを適用 - 0.5倍-2倍範囲に調整
-        scale_penalty = 1.0
-        
-        # より緩やかな極端速度のカーブを持つ時間スケールペナルティ
-        time_deviation = abs(time_scale - 1.0)
-        if time_scale <= 0.7:  # 非常に遅い（0.5倍-0.7倍）
-            scale_penalty *= 0.8  # 非常に遅い再生に対する中程度のペナルティ
-        elif time_scale >= 1.5:  # 非常に速い（1.5倍-2倍）
-            scale_penalty *= 0.85  # 非常に速い再生に対する中程度のペナルティ
-        elif time_deviation > 0.1:  # 中程度の速度変化
-            scale_penalty *= (1.0 - time_deviation * 0.2)  # より緩やかなペナルティ
-        
-        # 周波数スケールペナルティ - より控えめ
-        freq_deviation = abs(freq_scale - 1.0)
-        if freq_deviation > 0.03:
-            scale_penalty *= (1.0 - freq_deviation * 0.3)
-        
-        # 極端なスケーリングで多くの一致がある場合にボーナスを適用
-        if len(match_pairs) >= 20 and (time_scale <= 0.7 or time_scale >= 1.5):
-            base_confidence *= 1.15  # 極端な速度で多数の一致があるボーナス
-        elif len(match_pairs) >= 10 and (abs(time_scale - 1.0) > 0.01 or abs(freq_scale - 1.0) > 0.01):
-            base_confidence *= 1.1
-        
-        return min(base_confidence * scale_penalty, 1.0)
     
     def _find_time_aligned_matches(self, match_pairs: List[Tuple[float, float]], 
                                   tolerance: float = 0.2) -> List[List[Tuple[float, float]]]:
