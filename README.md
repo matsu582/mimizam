@@ -183,8 +183,10 @@ mimizam/
 │   ├── mimizam_demo.py               # Audio API demo
 │   ├── movie_fingerprinter.py        # Combined audio + video registration CLI
 │   ├── movie_search.py               # Combined audio + video search CLI
-│   ├── audio_from_video_fingerprinter.py        # Extract audio from video and create audio fingerprints
-│   └── audio_from_video_search.py               # Video audio search
+│   ├── audio_from_video_fingerprinter.py        # Extract audio from video and register audio fingerprints
+│   ├── audio_from_video_search.py               # Search by audio extracted from video
+│   ├── visual_from_video_fingerprinter.py       # Register video (visual) fingerprints from video
+│   └── visual_from_video_search.py              # Search by video (visual) fingerprints
 ├── model/                            # Pretrained codebook model
 ├── test_media/                       # Demo audio files
 ├── tests/                           # Test suite
