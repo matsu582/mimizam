@@ -349,5 +349,63 @@ class TestMoviePositionDivergence(unittest.TestCase):
         )
 
 
+class TestWeakVisualNotDualMatch(unittest.TestCase):
+    """統合検索: ノイズ水準の弱い映像を偽の二重一致に持ち上げない
+
+    共通OP/ED音声は多数の動画に正しく100%一致する。このとき別映像でも映像類似度が
+    ノイズ水準(≈0.3)で偶発ヒットするが、下限しきい値未満は映像一致に数えず音声単独
+    評価にする（√ブーストや映像ラベルを付けない）。
+    """
+
+    def _mimizam(self):
+        from mimizam import create_mimizam_sqlite
+        return create_mimizam_sqlite(':memory:')
+
+    def _audio(self, conf=1.0):
+        return {
+            "song": Song(id="v1", title="ep", artist="", file_path="/e.mp4"),
+            "confidence": conf, "match_count": 100,
+            "time_offset": 300.0, "time_scale": 1.0,
+        }
+
+    def _visual(self, sim):
+        return {
+            "video_id": "v1", "similarity": sim, "video": None,
+            "match_details": {"query_duration": 60.0, "regions": [
+                {"db_start": 300.0, "db_end": 360.0, "frame_count": 5}
+            ]},
+        }
+
+    def test_weak_visual_treated_as_audio_only(self):
+        m = self._mimizam()
+        try:
+            merged = m._merge_movie_results(
+                [self._audio(1.0)], [self._visual(0.30)],
+                divergence_tolerance=30.0, visual_match_min=0.45,
+            )
+        finally:
+            m.close()
+        entry = merged[0]
+        # 弱い映像は一致に数えない（映像ラベル用フィールドを付けない）
+        self.assertNotIn("visual_similarity", entry)
+        self.assertFalse(entry["position_diverged"])
+        # 音声単独評価: max(音声, 0) × 0.8
+        self.assertAlmostEqual(entry["combined_score"], 0.8, places=6)
+
+    def test_strong_visual_is_dual_match(self):
+        m = self._mimizam()
+        try:
+            merged = m._merge_movie_results(
+                [self._audio(1.0)], [self._visual(0.60)],
+                divergence_tolerance=30.0, visual_match_min=0.45,
+            )
+        finally:
+            m.close()
+        entry = merged[0]
+        # 十分な映像類似度は二重一致として幾何平均で評価する
+        self.assertIn("visual_similarity", entry)
+        self.assertAlmostEqual(entry["combined_score"], (1.0 * 0.60) ** 0.5, places=6)
+
+
 if __name__ == "__main__":
     unittest.main()

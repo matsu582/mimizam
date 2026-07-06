@@ -836,12 +836,18 @@ class Mimizam:
         audio_results: List[Dict[str, Any]],
         visual_results: List[Dict[str, Any]],
         divergence_tolerance: float,
+        visual_match_min: float = 0.45,
     ) -> List[Dict[str, Any]]:
         """音声検索と映像検索の結果をIDで結合し統合スコアを算出する
 
         同一UUIDで登録されている場合、song_id と video_id が一致する。
         両方一致（かつ位置が乖離しない）なら幾何平均で持ち上げ、片方のみ
         または位置乖離ありなら高い方のモダリティを 0.8 掛けで評価する。
+
+        映像類似度が visual_match_min 未満のものは、実一致(≈0.6)に対しノイズ水準
+        (≈0.3)であり、共通OP/ED等で音声だけが多数の動画に一致する場合に別映像を
+        偽の二重一致へ持ち上げてしまう。そのため下限未満の映像は「映像一致なし」と
+        みなし、音声単独として評価する（√ブーストや映像ラベルを付けない）。
 
         統合スコアの式:
             両モダリティ一致・非乖離: √(音声信頼度 × 実効映像スコア)
@@ -872,13 +878,24 @@ class Mimizam:
                 entry["audio_confidence"] = a_score
                 entry["audio_match"] = audio
 
+            # 映像は下限しきい値以上のときのみ「映像一致」として扱う。
+            visual_is_match = False
             if visual:
-                v_score = visual.get("similarity", 0.0)
-                entry["visual_similarity"] = v_score
-                entry["visual_match"] = visual
+                raw_sim = visual.get("similarity", 0.0)
+                if raw_sim >= visual_match_min:
+                    visual_is_match = True
+                    v_score = raw_sim
+                    entry["visual_similarity"] = raw_sim
+                    entry["visual_match"] = visual
+                else:
+                    # ノイズ水準の弱い映像。参考値としてのみ残し一致には数えない。
+                    entry["visual_similarity_weak"] = raw_sim
 
-            diverged = self._movie_position_diverges(
-                audio, visual, divergence_tolerance
+            diverged = (
+                visual_is_match
+                and self._movie_position_diverges(
+                    audio, visual, divergence_tolerance
+                )
             )
             entry["position_diverged"] = diverged
 
@@ -914,6 +931,7 @@ class Mimizam:
         skip_visual: bool = False,
         divergence_tolerance: float = 30.0,
         min_combined_score: float = 0.0,
+        visual_match_min: float = 0.45,
     ) -> List[Dict[str, Any]]:
         """動画を音声指紋と映像指紋の両方で検索し、結果を統合する
 
@@ -933,6 +951,8 @@ class Mimizam:
             skip_visual: 映像検索をスキップする
             divergence_tolerance: 音声DB区間と映像DB区間の乖離許容（秒）
             min_combined_score: これ未満の統合スコアを除外する閾値
+            visual_match_min: 映像一致とみなす最低類似度。未満はノイズ水準として
+                映像一致に数えず音声単独評価にする（共通OP/ED音声の偽二重一致対策）
 
         Returns:
             統合検索結果のリスト（combined_score 降順）。各要素は id / title /
@@ -983,7 +1003,8 @@ class Mimizam:
                 self.logger.warning(f"Video search error during movie search: {exc}")
 
         merged = self._merge_movie_results(
-            audio_results, visual_results, divergence_tolerance
+            audio_results, visual_results, divergence_tolerance,
+            visual_match_min,
         )
         if min_combined_score > 0.0:
             merged = [
