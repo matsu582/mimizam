@@ -143,14 +143,14 @@ def _print_match_location(match_details: dict) -> None:
     q_dur = match_details.get("query_duration", 0)
     db_dur = match_details.get("db_duration", 0)
 
-    print(f"     \U0001f3af \u6620\u50cf\u30de\u30c3\u30c1\u5206\u6790:")
+    print(f"     🎯 映像マッチ分析:")
     print(
-        f"        \u4e00\u81f4\u30d5\u30ec\u30fc\u30e0: {matched}/{total} "
+        f"        一致フレーム: {matched}/{total} "
         f"({ratio * 100:.1f}%)"
     )
 
     if not regions:
-        print("        \u4e00\u81f4\u533a\u9593\u306a\u3057")
+        print("        一致区間なし")
         return
 
     for j, reg in enumerate(regions, 1):
@@ -163,15 +163,15 @@ def _print_match_location(match_details: dict) -> None:
         fc = reg.get("frame_count", 0)
         avg = reg.get("avg_similarity", 0)
         print(
-            f"        \u533a\u9593{j}: \u30af\u30a8\u30ea {qs} - {qe} "
-            f"({q_len:.1f}s) \u2192 DB {ds} - {de} ({d_len:.1f}s) "
-            f"[{fc}\u30d5\u30ec\u30fc\u30e0, \u985e\u4f3c\u5ea6{avg:.3f}]"
+            f"        区間{j}: クエリ {qs} - {qe} "
+            f"({q_len:.1f}s) → DB {ds} - {de} ({d_len:.1f}s) "
+            f"[{fc}フレーム, 類似度{avg:.3f}]"
         )
 
     # クエリ映像のバー可視化
     if q_dur > 0:
         print(
-            f"     \u30af\u30a8\u30ea\u6620\u50cf ({_format_duration(q_dur)}):"
+            f"     クエリ映像 ({_format_duration(q_dur)}):"
         )
         bar = _render_bar(q_dur, regions, key="query")
         print(f"      {bar}")
@@ -183,7 +183,7 @@ def _print_match_location(match_details: dict) -> None:
     # DB映像のバー可視化
     if db_dur > 0:
         print(
-            f"     DB\u6620\u50cf ({_format_duration(db_dur)}):"
+            f"     DB映像 ({_format_duration(db_dur)}):"
         )
         bar = _render_bar(db_dur, regions, key="db")
         print(f"      {bar}")
@@ -193,8 +193,8 @@ def _print_match_location(match_details: dict) -> None:
         )
 
     print(
-        "     \U0001f4cd \u51e1\u4f8b: "
-        "\u2588 = \u4e00\u81f4\u533a\u9593, - = \u975e\u4e00\u81f4"
+        "     📍 凡例: "
+        "█ = 一致区間, - = 非一致"
     )
 
 
