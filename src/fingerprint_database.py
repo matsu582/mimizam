@@ -14,6 +14,7 @@ from .database_backends import (
     DatabaseBackend, DatabaseConfig, Song, 
     create_database_backend
 )
+from .audio_fingerprinter import HashGenerator
 
 
 class FingerprintDatabase:
@@ -112,7 +113,18 @@ class FingerprintDatabase:
             見つかった場合は楽曲オブジェクト、そうでなければNone
         """
         return self.backend.get_song(song_id)
-    
+
+    def get_songs(self, song_ids: List[str]) -> Dict[str, Optional[Song]]:
+        """複数の楽曲情報をまとめて取得（バックエンドの一括取得へ委譲）
+
+        Args:
+            song_ids: 取得する楽曲IDのリスト
+
+        Returns:
+            song_id -> Song(見つからない場合None) のマッピング辞書
+        """
+        return self.backend.get_songs(song_ids)
+
     def list_songs(self) -> List[Song]:
         """
         データベース内の全楽曲をリスト表示
@@ -244,43 +256,82 @@ class FingerprintMatcher:
         
         # song_info と詳細情報を追加
         if results:
+            # 楽曲情報はまとめて取得（結果ごとの個別取得によるN+1を回避）
+            song_ids = [result['song_id'] for result in results]
+            song_map = self._get_songs_batch(song_ids)
             for result in results:
                 song_id = result['song_id']
+                song = song_map.get(song_id)
                 
-                # song_info を追加
-                song_info = self.get_song_info(song_id)
-                result['song_info'] = song_info
+                # song（Songオブジェクト）と song_info（辞書）を追加。
+                # 呼び出し側が再取得しないよう、Songオブジェクトも保持する。
+                result['song'] = song
+                result['song_info'] = (
+                    self._song_to_info(song) if song else self._empty_song_info(song_id)
+                )
                 
-                # 詳細情報を追加
+                # 詳細情報を追加（1段階目で取得済みの match_pairs から算出。DB再検索しない）
                 if include_details:
-                    detailed_info = self.get_detailed_match_info(query_fingerprints, song_id)
-                    result['detailed_info'] = detailed_info
+                    result['detailed_info'] = self._build_detailed_match_info(
+                        result.get('match_pairs', [])
+                    )
         
         return results
     
+    def _search_candidates_by_freq(self, query_fingerprints: List[Fingerprint],
+                                    freq_scale: float) -> Dict[str, List[Tuple[float, float]]]:
+        """指定 freq_scale の候補集合を1回のDB検索で取得する
+
+        DB検索はハッシュ完全一致で候補を引くため、time_scaleを変えても
+        候補行は変わらない（ハッシュはfreq_scaleにのみ依存）。よって候補取得は
+        freq_scaleごとに1回で済ませ、time_scale仮説はメモリ上で評価する（③の重複問い合わせ回避）。
+        戻り値の query_time は time_scale=1.0（等倍）基準の値。
+        """
+        base_fingerprints = self._scale_fingerprints(query_fingerprints, 1.0, freq_scale)
+        return self.database.search_fingerprints(base_fingerprints)
+
+    @staticmethod
+    def _apply_time_scale_to_pairs(base_pairs: List[Tuple[float, float]],
+                                   time_scale: float) -> List[Tuple[float, float]]:
+        """等倍基準のマッチペアに time_scale を適用してメモリ上で再構成する
+
+        query_time を time_scale 倍する。極端なスケール（≤0.6 または ≥1.8）では
+        量子化境界対策として ±20ms のオフセット版も追加し、
+        _scale_fingerprints 経由でDB検索した場合と等価なペア集合を得る。
+        """
+        scaled_pairs: List[Tuple[float, float]] = []
+        extreme = time_scale <= 0.6 or time_scale >= 1.8
+        for q_time, db_time in base_pairs:
+            st = q_time * time_scale
+            scaled_pairs.append((st, db_time))
+            if extreme:
+                scaled_pairs.append((st - 0.02, db_time))
+                scaled_pairs.append((st + 0.02, db_time))
+        return scaled_pairs
+
     def _find_matches_hybrid(self, query_fingerprints: List[Fingerprint], min_matches: int, top_k: int) -> List[Dict[str, Any]]:
         """
         高速化版hybrid: 1段階目で全スケール・ピッチのマッチペアを集約し、2段階目はDBアクセスせずグルーピング＆スコア計算のみ
         """
         import time
         t_all = time.perf_counter()
-        # 1段階目: 全スケール・ピッチでfingerprintを生成し、DB検索
+        # 1段階目: freq_scaleごとに1回だけDB検索し、time_scaleはメモリ上で展開
         t0 = time.perf_counter()
         all_match_info = {}  # song_id -> List[(query_time, db_time, time_scale, freq_scale)]
         db_query_count = 0
-        for time_scale in self.hybrid_fast_scales:
-            for freq_scale in self.freq_scale_factors:
-                t_db0 = time.perf_counter()
-                scaled_fingerprints = self._scale_fingerprints(query_fingerprints, time_scale, freq_scale)
-                matches = self.database.search_fingerprints(scaled_fingerprints)
-                t_db1 = time.perf_counter()
-                db_query_count += 1
-                self.logger.debug(f"[BENCHMARK-HYBRID-NEW] DB search (scale={time_scale}, freq={freq_scale}): {t_db1-t_db0:.4f}s, matches: {sum(len(p) for p in matches.values())}")
-                for song_id, match_pairs in matches.items():
+        for freq_scale in self.freq_scale_factors:
+            t_db0 = time.perf_counter()
+            base_matches = self._search_candidates_by_freq(query_fingerprints, freq_scale)
+            t_db1 = time.perf_counter()
+            db_query_count += 1
+            self.logger.debug(f"[BENCHMARK-HYBRID-NEW] DB search (freq={freq_scale}): {t_db1-t_db0:.4f}s, base matches: {sum(len(p) for p in base_matches.values())}")
+            for time_scale in self.hybrid_fast_scales:
+                for song_id, base_pairs in base_matches.items():
+                    scaled_pairs = self._apply_time_scale_to_pairs(base_pairs, time_scale)
                     if song_id not in all_match_info:
                         all_match_info[song_id] = []
                     # 各マッチペアにスケール情報を付与
-                    for q_time, db_time in match_pairs:
+                    for q_time, db_time in scaled_pairs:
                         all_match_info[song_id].append((q_time, db_time, time_scale, freq_scale))
         t1 = time.perf_counter()
         self.logger.debug(f"[BENCHMARK-HYBRID-NEW] 1st stage (all DB search): {t1-t0:.4f}s, total DB queries: {db_query_count}")
@@ -339,9 +390,12 @@ class FingerprintMatcher:
         # 複数のスケールでクエリフィンガープリントを検索
         all_results = {}
         
+        # ヒストグラム方式は freq_scale=1.0 固定のため、候補集合は1回のDB検索で取得し、
+        # time_scale 仮説はメモリ上で評価する（③の重複問い合わせ回避）。
+        base_matches = self._search_candidates_by_freq(query_fingerprints, 1.0)
         for time_scale in self.histogram_scales:
             self._process_scale_for_histogram(
-                query_fingerprints, time_scale, min_matches, all_results
+                base_matches, time_scale, min_matches, all_results
             )
             
         self.logger.debug(f"Histogram method: found {len(all_results)} candidates")
@@ -355,13 +409,19 @@ class FingerprintMatcher:
         # マルチクライテリアソートを適用
         return self._sort_and_limit_results(filtered_results)[:top_k]
     
-    def _process_scale_for_histogram(self, query_fingerprints: List[Fingerprint],
+    def _process_scale_for_histogram(self, base_matches: Dict[str, List[Tuple[float, float]]],
                                    time_scale: float, min_matches: int,
                                    all_results: Dict[str, Dict[str, Any]]) -> None:
-        """ヒストグラム方式で特定のスケールを処理"""
+        """ヒストグラム方式で特定のスケールを処理
+
+        base_matches は freq_scale=1.0・等倍(time_scale=1.0)基準の候補集合。
+        time_scale はメモリ上でペアに適用する（DB再検索しない）。
+        """
         
-        scaled_fingerprints = self._scale_fingerprints(query_fingerprints, time_scale, 1.0)
-        matches = self.database.search_fingerprints(scaled_fingerprints)
+        matches = {
+            song_id: self._apply_time_scale_to_pairs(base_pairs, time_scale)
+            for song_id, base_pairs in base_matches.items()
+        }
         
         self.logger.debug(f"Scale {time_scale}: {len(matches)} songs found, "
                          f"total matches: {sum(len(pairs) for pairs in matches.values())}")
@@ -458,37 +518,38 @@ class FingerprintMatcher:
         return self._sort_and_limit_results(best_results)[:top_k]
     
     def _find_scaled_matches(self, query_fingerprints: List[Fingerprint], 
-                           min_matches: int) -> Dict[str, Dict[str, Any]]:
-        """異なるスケールでマッチを検索"""
+                           min_matches: int, song_id: Optional[str] = None) -> Dict[str, Dict[str, Any]]:
+        """異なるスケールでマッチを検索
+
+        候補集合は freq_scale ごとに1回だけDB検索し、time_scale 仮説はメモリ上で
+        評価する（③の重複問い合わせ回避）。song_id指定時はその曲のみ対象にする。
+        """
         best_results = {}
         
-        for time_scale in self.time_scale_factors:
-            for freq_scale in self.freq_scale_factors:
+        for freq_scale in self.freq_scale_factors:
+            base_matches = self._search_candidates_by_freq(query_fingerprints, freq_scale)
+            for time_scale in self.time_scale_factors:
                 self._process_scale_combination(
-                    query_fingerprints, time_scale, freq_scale, 
-                    min_matches, best_results
+                    base_matches, time_scale, freq_scale, 
+                    min_matches, best_results, song_id
                 )
         
         return best_results
     
-    def _process_scale_combination(self, query_fingerprints: List[Fingerprint],
+    def _process_scale_combination(self, base_matches: Dict[str, List[Tuple[float, float]]],
                                  time_scale: float, freq_scale: float,
                                  min_matches: int, best_results: Dict[str, Dict[str, Any]], song_id: Optional[str] = None):
         """
         特定のスケール組み合わせを処理
-        
+
+        base_matches は指定 freq_scale・等倍(time_scale=1.0)基準の候補集合。
+        time_scale はメモリ上でペアに適用する（DB再検索しない）。
         song_idを指定した場合、その曲のみを対象にする
         """
-        if song_id is not None:
-            song_ids = [song_id]
-        else:
-            song_ids = [song.id for song in self.database.list_songs()]
-        scaled_fingerprints = self._scale_fingerprints(query_fingerprints, time_scale, freq_scale)
-        matches = self.database.search_fingerprints(scaled_fingerprints)
-        for sid in song_ids:
-            if sid not in matches:
+        for sid, base_pairs in base_matches.items():
+            if song_id is not None and sid != song_id:
                 continue
-            match_pairs = matches[sid]
+            match_pairs = self._apply_time_scale_to_pairs(base_pairs, time_scale)
             if len(match_pairs) < min_matches:
                 continue
             confidence = self._calculate_confidence_score_with_scaling(
@@ -559,18 +620,46 @@ class FingerprintMatcher:
         """
         song = self.database.get_song(song_id)
         if song:
-            return {
-                'id': song.id,
-                'title': song.title,
-                'artist': song.artist,
-                'file_path': song.file_path
-            }
+            return self._song_to_info(song)
+        return self._empty_song_info(song_id)
+
+    @staticmethod
+    def _song_to_info(song: Song) -> Dict[str, str]:
+        """Songオブジェクトをinfo辞書へ変換"""
+        return {
+            'id': song.id,
+            'title': song.title,
+            'artist': song.artist,
+            'file_path': song.file_path
+        }
+
+    @staticmethod
+    def _empty_song_info(song_id: str) -> Dict[str, str]:
+        """楽曲が見つからない場合のプレースホルダ情報"""
         return {
             'id': song_id,
             'title': '不明',
             'artist': '不明',
             'file_path': '不明'
         }
+
+    def _get_songs_batch(self, song_ids: List[str]) -> Dict[str, Optional[Song]]:
+        """複数楽曲をまとめて取得する
+
+        バックエンドの ``get_songs``（IN/ANY/_mget による真の一括取得）へ委譲し、
+        結果ごとの個別取得によるN+1を1回の問い合わせに集約する。
+        ``FingerprintDatabase.get_songs`` が無い場合は get_song ループへフォールバック。
+        """
+        if not song_ids:
+            return {}
+        get_songs = getattr(self.database, 'get_songs', None)
+        if callable(get_songs):
+            return get_songs(song_ids)
+        # フォールバック（後方互換）
+        song_map: Dict[str, Optional[Song]] = {}
+        for song_id in dict.fromkeys(song_ids):  # 重複排除・順序保持
+            song_map[song_id] = self.database.get_song(song_id)
+        return song_map
     
     def _calculate_time_offset(self, match_pairs: List[Tuple[float, float]]) -> float:
         """
@@ -621,7 +710,8 @@ class FingerprintMatcher:
         # 最良の一致を取得
         best_match = matches[0]
         if best_match['confidence'] >= confidence_threshold:
-            song = self.database.get_song(best_match['song_id'])
+            # find_matches が付与した Song を再利用し、再取得を避ける
+            song = best_match.get('song') or self.database.get_song(best_match['song_id'])
             if song:
                 return song, best_match['confidence']
         
@@ -696,25 +786,29 @@ class FingerprintMatcher:
         Args:
             fingerprints: 元のフィンガープリント
             time_scale: 時間スケール係数（0.5-2.0範囲）
-            freq_scale: 周波数スケール係数（0.9-1.1範囲） - 将来の使用のために予約
+            freq_scale: 周波数スケール係数（0.9-1.1範囲）。ピッチ変化に対応するため、
+                ハッシュの周波数ビンを再スケールして実際にハッシュ値を作り直す。
             
         Returns:
             スケール変更されたフィンガープリントのリスト
         """
         scaled_fingerprints = []
-        
-        # freq_scaleは将来の周波数領域スケーリング用に予約
-        _ = freq_scale
-        
+
         # 極端な速度に対して改良された精度で時間スケーリングを適用
         for fp in fingerprints:
             try:
+                # ピッチ変化対応: 周波数ビンを freq_scale で再スケールして
+                # 実ハッシュを作り直す（time_offsetだけ変えても候補集合は不変のため）
+                scaled_hash = HashGenerator.rescale_hash_frequency(
+                    fp.hash_value, freq_scale
+                )
+
                 # 0.5倍-2倍範囲に対してより高い精度で時間オフセットをスケーリング
                 scaled_time = fp.time_offset * time_scale
                 
                 # 量子化境界をカバーするため複数のスケール版を作成
                 scaled_fp = Fingerprint(
-                    hash_value=fp.hash_value,
+                    hash_value=scaled_hash,
                     time_offset=scaled_time,
                     song_id=fp.song_id
                 )
@@ -725,7 +819,7 @@ class FingerprintMatcher:
                     # 境界交差を改善するため時間オフセットを追加
                     for offset in [-0.02, 0.02]:  # ±20msオフセット
                         offset_fp = Fingerprint(
-                            hash_value=fp.hash_value,
+                            hash_value=scaled_hash,
                             time_offset=scaled_time + offset,
                             song_id=fp.song_id
                         )
@@ -849,14 +943,15 @@ class FingerprintMatcher:
         if not match_pairs:
             return 0.0
         
-        # 時間差を計算
-        time_diffs = [abs(query_time - db_time) for query_time, db_time in match_pairs]
+        # 時間差は符号付きで計算する。abs()で符号を捨てると +3s と -3s が
+        # 同一視され、鏡像的なズレでも「整列している」と誤評価するため。
+        time_diffs = [query_time - db_time for query_time, db_time in match_pairs]
         median_offset = np.median(time_diffs)
         
         # 0.5秒以内の許容範囲
         tolerance = 0.5
         
-        # 許容範囲内のマッチ数を計算
+        # 符号付きオフセットの中央値からの偏差が許容範囲内のマッチ数を計算
         aligned_matches = sum(1 for diff in time_diffs if abs(diff - median_offset) <= tolerance)
         
         return aligned_matches / len(match_pairs)
@@ -885,17 +980,25 @@ class FingerprintMatcher:
         return len(match_pairs) / time_span
 
     def get_detailed_match_info(self, query_fingerprints: List[Fingerprint], 
-                               song_id: str) -> Dict[str, Any]:
+                               song_id: str,
+                               match_pairs: Optional[List[Tuple[float, float]]] = None) -> Dict[str, Any]:
         """
         特定の楽曲の詳細なマッチ情報を取得
         
         Args:
             query_fingerprints: クエリフィンガープリントのリスト
             song_id: 詳細を取得する楽曲識別子
+            match_pairs: 取得済みの (query_time, db_time) ペア。指定された場合は
+                DB再検索を行わずこれを使う（find_matches 経路のN+1回避と同様に、
+                呼び出し側が既にペアを持っているときの再検索を避けるため）。
             
         Returns:
             詳細なマッチ情報を含む辞書
         """
+        # 取得済みペアがあれば再検索せずそのまま使う
+        if match_pairs is not None:
+            return self._build_detailed_match_info(match_pairs)
+
         # この楽曲のすべての一致を取得
         all_matches = self.database.search_fingerprints(query_fingerprints)
         
@@ -913,7 +1016,27 @@ class FingerprintMatcher:
             }
         
         match_pairs = all_matches[song_id]
-        
+        return self._build_detailed_match_info(match_pairs)
+
+    def _build_detailed_match_info(self, match_pairs: List[Tuple[float, float]]) -> Dict[str, Any]:
+        """マッチペアから詳細なマッチ情報を構築する
+
+        1段階目で取得済みの match_pairs をそのまま使い、DB再検索を行わない
+        （④のN+1クエリ回避）。
+        """
+        if not match_pairs:
+            return {
+                'match_positions': [],
+                'statistics': {
+                    'total_matches': 0,
+                    'aligned_matches': 0,
+                    'alignment_ratio': 0.0,
+                    'best_offset': 0.0,
+                    'query_time_range': (0.0, 0.0),
+                    'db_time_range': (0.0, 0.0)
+                }
+            }
+
         # 詳細なマッチ位置を作成
         match_positions = []
         for query_time, db_time in match_pairs:
@@ -922,34 +1045,23 @@ class FingerprintMatcher:
                 'db_time': db_time,
                 'time_diff': query_time - db_time
             })
-        
-        # 統計を計算
-        if match_pairs:
-            # 時間アライメントされたグループを検索
-            aligned_groups = self._find_time_aligned_matches(match_pairs, self.time_tolerance)
-            largest_group = max(aligned_groups, key=len) if aligned_groups else []
-            
-            query_times = [pos['query_time'] for pos in match_positions]
-            db_times = [pos['db_time'] for pos in match_positions]
-            
-            statistics = {
-                'total_matches': len(match_pairs),
-                'aligned_matches': len(largest_group),
-                'alignment_ratio': len(largest_group) / len(match_pairs) if match_pairs else 0.0,
-                'best_offset': self._calculate_time_offset(match_pairs),
-                'query_time_range': (min(query_times), max(query_times)) if query_times else (0.0, 0.0),
-                'db_time_range': (min(db_times), max(db_times)) if db_times else (0.0, 0.0)
-            }
-        else:
-            statistics = {
-                'total_matches': 0,
-                'aligned_matches': 0,
-                'alignment_ratio': 0.0,
-                'best_offset': 0.0,
-                'query_time_range': (0.0, 0.0),
-                'db_time_range': (0.0, 0.0)
-            }
-        
+
+        # 時間アライメントされたグループを検索
+        aligned_groups = self._find_time_aligned_matches(match_pairs, self.time_tolerance)
+        largest_group = max(aligned_groups, key=len) if aligned_groups else []
+
+        query_times = [pos['query_time'] for pos in match_positions]
+        db_times = [pos['db_time'] for pos in match_positions]
+
+        statistics = {
+            'total_matches': len(match_pairs),
+            'aligned_matches': len(largest_group),
+            'alignment_ratio': len(largest_group) / len(match_pairs),
+            'best_offset': self._calculate_time_offset(match_pairs),
+            'query_time_range': (min(query_times), max(query_times)) if query_times else (0.0, 0.0),
+            'db_time_range': (min(db_times), max(db_times)) if db_times else (0.0, 0.0)
+        }
+
         return {
             'match_positions': match_positions,
             'statistics': statistics

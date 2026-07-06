@@ -20,6 +20,7 @@ import json
 from .audio_fingerprinter import AudioFingerprinter
 from .fingerprint_database import FingerprintDatabase, FingerprintMatcher
 from .database_base import DatabaseConfig, Song, Fingerprint, Video
+from .exceptions import MimizamError, DatabaseError, AudioProcessingError
 
 
 class Mimizam:
@@ -96,11 +97,12 @@ class Mimizam:
             meta_json: 追加のメタ情報（JSON文字列、任意）
             
         Returns:
-            Optional[str]: 追加に成功した場合は楽曲ID、失敗した場合はNone
+            str: 追加に成功した場合は楽曲ID
             
         Raises:
             FileNotFoundError: 指定されたファイルが存在しない場合
-            ValueError: 音声ファイルの読み込みに失敗した場合
+            AudioProcessingError: 指紋生成に失敗、または予期しない処理失敗の場合
+            DatabaseError: 楽曲・指紋の永続化に失敗した場合
         """
         try:
             # ファイルの存在確認
@@ -118,8 +120,12 @@ class Mimizam:
             fingerprints = self.fingerprinter.fingerprint_file(file_path)
             
             if not fingerprints:
-                self.logger.warning(f"No fingerprints generated: {file_path}")
-                return None
+                # 指紋が1件も生成できないのは「登録対象なし」ではなく処理失敗。
+                # 呼び出し側が原因を判別できるよう例外で通知する。
+                raise AudioProcessingError(
+                    "No fingerprints could be generated from audio",
+                    context={'file_path': file_path},
+                )
             
             self.logger.info(f"Generated {len(fingerprints)} fingerprints")
             
@@ -140,25 +146,31 @@ class Mimizam:
             
             # データベースに楽曲を追加
             if not self.database.add_song(song):
-                self.logger.error(f"Failed to add song: {song_id}")
-                return None
+                raise DatabaseError(
+                    "Failed to persist song", context={'song_id': song_id},
+                )
             
             # フィンガープリントをデータベースに追加
             if not self.database.add_fingerprints(song_id, fingerprints):
-                self.logger.error(f"Failed to add fingerprints: {song_id}")
                 # 楽曲も削除
                 self.database.delete_song(song_id)
-                return None
+                raise DatabaseError(
+                    "Failed to persist fingerprints", context={'song_id': song_id},
+                )
             
             self.logger.info(f"Song successfully added: {song_id} - {title} by {artist}")
             return song_id
             
-        except FileNotFoundError:
-            self.logger.error(f"File not found: {file_path}")
+        except (FileNotFoundError, MimizamError):
+            # ファイル不在・既知のドメイン例外はそのまま送出（原因を握り潰さない）
             raise
         except Exception as e:
+            # 予期しない失敗は握り潰さずドメイン例外として通知する
             self.logger.error(f"Error occurred while adding song: {e}")
-            return None
+            raise AudioProcessingError(
+                "Unexpected error while adding song", original_error=e,
+                context={'file_path': file_path},
+            ) from e
     
     def search_song(self, query_file_path: str, 
                     min_confidence: float = 0.1,
@@ -183,7 +195,7 @@ class Mimizam:
                 
         Raises:
             FileNotFoundError: 指定されたファイルが存在しない場合
-            ValueError: 音声ファイルの読み込みに失敗した場合
+            MimizamError: 検索処理が予期せず失敗した場合（「一致なし」は空リストで返す）
         """
         try:
             # ファイルの存在確認
@@ -197,8 +209,12 @@ class Mimizam:
             query_fingerprints = self.fingerprinter.fingerprint_file(query_file_path)
             
             if not query_fingerprints:
-                self.logger.warning(f"No fingerprints generated from query file: {query_file_path}")
-                return []
+                # クエリから指紋を1件も生成できないのは「一致なし」ではなく音声処理失敗。
+                # 空リスト（=一致なし）に潰さず例外で通知し、両者を区別できるようにする。
+                raise AudioProcessingError(
+                    "No fingerprints could be generated from query audio",
+                    context={'query_file_path': query_file_path},
+                )
             
             self.logger.info(f"Generated {len(query_fingerprints)} query fingerprints")
             
@@ -216,29 +232,31 @@ class Mimizam:
             )
             
             # 結果を整形
+            # find_matches が付与した Song オブジェクトを再利用し、再取得（N+1）を避ける
             results = []
             for match in matches:
-                song_id = match.get('song_id')
-                if song_id:
-                    song = self.database.get_song(song_id)
-                    if song:
-                        result = {
-                            'song': song,
-                            'confidence': match.get('confidence', 0.0),
-                            'match_count': match.get('match_count', 0),
-                            'details': match
-                        }
-                        results.append(result)
+                song = match.get('song')
+                if song:
+                    result = {
+                        'song': song,
+                        'confidence': match.get('confidence', 0.0),
+                        'match_count': match.get('match_count', 0),
+                        'details': match
+                    }
+                    results.append(result)
             
             self.logger.info(f"Retrieved {len(results)} search results")
             return results
             
-        except FileNotFoundError:
-            self.logger.error(f"File not found: {query_file_path}")
+        except (FileNotFoundError, MimizamError):
+            # 「一致なし」は空リストで返し、処理失敗は例外として区別する
             raise
         except Exception as e:
             self.logger.error(f"Error occurred during audio search: {e}")
-            return []
+            raise MimizamError(
+                "Unexpected error during audio search", original_error=e,
+                context={'query_file_path': query_file_path},
+            ) from e
     
     def identify_audio(self, query_file_path: str, 
                       min_confidence: float = 0.3) -> Optional[Tuple[Song, float]]:
@@ -437,7 +455,11 @@ class Mimizam:
             video_db_path: 映像DBファイルパス
 
         Returns:
-            追加に成功した場合は映像ID、失敗した場合はNone
+            追加に成功した場合は映像ID
+
+        Raises:
+            FileNotFoundError: 指定されたファイルが存在しない場合
+            MimizamError: 映像指紋の生成失敗など処理が実行できない場合
         """
         try:
             if not os.path.exists(file_path):
@@ -460,10 +482,11 @@ class Mimizam:
 
             fp = vfp.fingerprint_video(file_path)
             if fp is None:
-                self.logger.error(
-                    f"Failed to generate video fingerprint: {file_path}"
+                # 映像指紋の生成失敗を None に潰さず処理失敗として通知する
+                raise MimizamError(
+                    "Failed to generate video fingerprint",
+                    context={'file_path': file_path},
                 )
-                return None
 
             # DBに保存
             import cv2
@@ -494,11 +517,14 @@ class Mimizam:
             )
             return video_id
 
-        except FileNotFoundError:
+        except (FileNotFoundError, MimizamError):
             raise
         except Exception as exc:
             self.logger.error(f"Error occurred while adding video: {exc}")
-            return None
+            raise MimizamError(
+                "Unexpected error while adding video", original_error=exc,
+                context={'file_path': file_path},
+            ) from exc
 
     @staticmethod
     def _effective_video_score(
@@ -550,7 +576,11 @@ class Mimizam:
             video_db_path: 映像DBファイルパス
 
         Returns:
-            検索結果のリスト
+            検索結果のリスト（「一致なし」は空リスト）
+
+        Raises:
+            FileNotFoundError: 指定されたファイルが存在しない場合
+            MimizamError: 未学習・映像指紋生成失敗など処理が実行できない場合
         """
         try:
             if not os.path.exists(query_file_path):
@@ -562,15 +592,19 @@ class Mimizam:
             vdb = self._get_video_db(video_db_path)
 
             if not vfp.is_trained:
-                self.logger.warning(
-                    "Model is not trained. "
-                    "Register a video with add_video() first"
+                # 未学習は「一致なし」ではなく前提条件未充足。空リストに潰さず例外化する
+                raise MimizamError(
+                    "Video model is not trained. Register a video with add_video() first",
+                    context={'query_file_path': query_file_path},
                 )
-                return []
 
             fp = vfp.fingerprint_video(query_file_path)
             if fp is None:
-                return []
+                # 映像指紋の生成失敗を「一致なし」に潰さず処理失敗として通知する
+                raise MimizamError(
+                    "Failed to generate video fingerprint for query",
+                    context={'query_file_path': query_file_path},
+                )
 
             # Step 1: フレーム指紋のANN近傍投票で候補絞り込み
             candidates = vdb.search_frame_candidates(
@@ -632,11 +666,14 @@ class Mimizam:
 
             return results
 
-        except FileNotFoundError:
+        except (FileNotFoundError, MimizamError):
             raise
         except Exception as exc:
             self.logger.error(f"Error occurred during video search: {exc}")
-            return []
+            raise MimizamError(
+                "Unexpected error during video search", original_error=exc,
+                context={'query_file_path': query_file_path},
+            ) from exc
 
     def add_movie(
         self,

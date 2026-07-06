@@ -313,7 +313,14 @@ class SpectrogramAnalyzer:
 
 class HashGenerator:
     """スペクトルピークからハッシュベースのフィンガープリントを作成"""
-    
+
+    # ハッシュのビットパックレイアウト: [f1ビン:11bit][f2ビン:11bit][Δtビン:10bit]
+    FREQ_BIN_HZ = 30          # 周波数量子化ビン幅（Hz）
+    _F1_SHIFT = 21
+    _F2_SHIFT = 10
+    _FREQ_MASK = 0x7FF        # 11bit
+    _DT_MASK = 0x3FF          # 10bit
+
     def __init__(self, 
                  target_zone_size: int = 5,  # 8から5に削減
                  time_delta_range: Tuple[float, float] = (0.1, 2.0),  # 範囲を狭める
@@ -490,20 +497,49 @@ class HashGenerator:
         通常入力では飽和が発生しないため衝突しない。
         """
         # 周波数量子化（0.5x-2x速度変化対応のため30Hzビン）
-        f1_bin = int(anchor.frequency // 30)
-        f2_bin = int(target.frequency // 30)
+        f1_bin = int(anchor.frequency // self.FREQ_BIN_HZ)
+        f2_bin = int(target.frequency // self.FREQ_BIN_HZ)
 
         # 時間差の量子化（50msビン: 1/20秒刻み）
         time_delta_raw = target.time - anchor.time
         dt_bin = int(time_delta_raw * 20) if time_delta_raw > 0 else 0
 
         # フィールド幅への飽和クランプ（範囲外は端に丸める＝決定的）
-        f1_bin = min(max(f1_bin, 0), 0x7FF)   # 11bit
-        f2_bin = min(max(f2_bin, 0), 0x7FF)   # 11bit
-        dt_bin = min(max(dt_bin, 0), 0x3FF)   # 10bit
+        f1_bin = min(max(f1_bin, 0), self._FREQ_MASK)   # 11bit
+        f2_bin = min(max(f2_bin, 0), self._FREQ_MASK)   # 11bit
+        dt_bin = min(max(dt_bin, 0), self._DT_MASK)     # 10bit
 
         # 可逆ビットパック（32bit符号なし整数）
-        return (f1_bin << 21) | (f2_bin << 10) | dt_bin
+        return (f1_bin << self._F1_SHIFT) | (f2_bin << self._F2_SHIFT) | dt_bin
+
+    @classmethod
+    def rescale_hash_frequency(cls, hash_value: int, freq_scale: float) -> int:
+        """ハッシュの周波数ビン(f1, f2)を freq_scale 倍して再パックする
+
+        ピッチ変化した音源に対応するためのヘルパ。ハッシュは
+        ``[f1ビン:11bit][f2ビン:11bit][Δtビン:10bit]`` の可逆ビットパックなので、
+        周波数側のビンだけを freq_scale で再スケールし、Δtビンは保持したまま
+        32bit整数へ詰め直す。これにより「周波数ビンを変換した実ハッシュ」を生成でき、
+        DB側の候補集合（ハッシュ完全一致で引く）にピッチシフト音源がヒットする。
+
+        Args:
+            hash_value: 元のハッシュ値（32bit符号なし整数）
+            freq_scale: 周波数スケール係数（1.0は恒等変換）
+
+        Returns:
+            周波数ビンを再スケールした新しいハッシュ値
+        """
+        if freq_scale == 1.0:
+            return hash_value
+
+        f1_bin = (hash_value >> cls._F1_SHIFT) & cls._FREQ_MASK
+        f2_bin = (hash_value >> cls._F2_SHIFT) & cls._FREQ_MASK
+        dt_bin = hash_value & cls._DT_MASK
+
+        f1_bin = min(max(int(round(f1_bin * freq_scale)), 0), cls._FREQ_MASK)
+        f2_bin = min(max(int(round(f2_bin * freq_scale)), 0), cls._FREQ_MASK)
+
+        return (f1_bin << cls._F1_SHIFT) | (f2_bin << cls._F2_SHIFT) | dt_bin
     
     def _filter_peaks_by_density(self, peaks: List[Peak], debug: bool = False) -> List[Peak]:
         """

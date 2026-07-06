@@ -14,7 +14,6 @@
 - `scipy`: 科学計算
 - `matplotlib`: 可視化
 - `numba`: 高速化
-- `hashlib`: ハッシュ生成（標準ライブラリ）
 
 ### オプション依存関係（データベース別）
 - **MySQL**: `mysql-connector-python`
