@@ -191,14 +191,26 @@ class FingerprintMatcher:
         # 頑健直線回帰の同一経路へ委譲する（名称は後方互換のため保持）。
         self.scoring_method = "hybrid"  # "hybrid", "histogram", "detailed"
 
-        # 整列許容度（秒）。頑健直線回帰で速度変化を吸収した後の残差許容に用いる。
-        self.time_tolerance = 0.3
+        # 整列許容度（秒）。傾きで速度変化を吸収した後のオフセット残差の許容幅。
+        # 大きすぎると無関係曲の偶発整列が増えるため、ピーク時間分解能(約23ms)に
+        # 見合う狭さにする。
+        self.time_tolerance = 0.05
+
+        # 信頼度算出の飽和パラメータ。整列インライアが confidence_full_matches 件
+        # かつ整列割合が confidence_full_ratio に達したら信頼度1.0とみなす。
+        # 無関係曲は整列"数"が桁違いに少ないため、数と割合の積で明確に分離できる。
+        self.confidence_full_matches = 80
+        self.confidence_full_ratio = 0.12
+        # 純度項の下限。整列割合がこの値を超えた分だけ純度信頼度に寄与する。
+        # 無関係曲の整列割合（概ね0.1〜0.2）では0となり、クリーン一致でのみ効く。
+        self.confidence_purity_floor = 0.5
 
         # 頑健直線回帰（ハフ投票）の傾き（＝time_scale）の妥当域と各種パラメータ。
         self.slope_range = (0.25, 4.0)
         self.line_fit_sample_size = 150      # ペア傾き算出のサンプル点上限（O(K^2)抑制）
         self.slope_log2_bin = 0.03           # 傾きヒストグラムのビン幅（log2空間）
         self.slope_min_dq = 1.0              # 傾き算出に使う query 時間差の下限（秒）
+        self.slope_top_candidates = 5        # インライア評価に回す傾き候補ビン数
     
     def set_scoring_method(self, method: str) -> None:
         """
@@ -336,16 +348,18 @@ class FingerprintMatcher:
                                min_matches: int, top_k: int = 10) -> List[Dict[str, Any]]:
         return self._find_matches_scale_invariant(query_fingerprints, min_matches, top_k)
 
-    def _estimate_slope(self, pairs: List[Tuple[float, float]]) -> float:
-        """支配的な傾き（=time_scale）をハフ投票（log2傾きの最頻ビン）で推定する
+    def _estimate_slope_candidates(self, pairs: List[Tuple[float, float]]) -> List[float]:
+        """支配傾き（=time_scale）の候補を投票数上位順に返す（ハフ投票）
 
-        ペア間傾き (dj-di)/(qj-qi) を log2 空間でヒストグラム投票し、最頻ビン内の
-        傾きの中央値を採る。時間量子化の影響を抑えるため、query側の時間差が
-        十分大きいペアのみを使う。外れ値が過半でも最頻ビンは真の傾きに立つ。
+        ペア間傾き (dj-di)/(qj-qi) を log2 空間でヒストグラム投票し、得票の多い
+        ビンの傾き中央値を候補として複数返す。時間量子化の影響を抑えるため
+        query 側の時間差が十分大きいペアのみを使う。単一の最頻ビンだと、粗量子化で
+        偶発的に別倍率のビンが競り勝つ場合に取り違えるため、上位複数を後段の
+        インライア評価に渡して真の倍率を選び直せるようにする。
         """
         n = len(pairs)
         if n < 2:
-            return 1.0
+            return [1.0]
 
         # O(K^2) に制限するための等間隔サンプリング（決定的）
         k = self.line_fit_sample_size
@@ -356,7 +370,7 @@ class FingerprintMatcher:
             sample = pairs
 
         lo, hi = self.slope_range
-        log_lo, log_hi = math.log2(lo), math.log2(hi)
+        log_lo = math.log2(lo)
         bin_w = self.slope_log2_bin
         # 傾き精度確保のため query 時間差がこの秒数以上のペアを優先採用する
         min_dq = self.slope_min_dq
@@ -380,23 +394,45 @@ class FingerprintMatcher:
         if not slopes:  # 短いクエリ等でペアが集まらない場合は制約を緩める
             slopes = collect(1e-6)
         if not slopes:
-            return 1.0
+            return [1.0]
 
-        # log2 空間でヒストグラム投票し最頻ビンを取る
+        # log2 空間でヒストグラム投票。得票上位ビンの中央値を候補にする。
         votes: Dict[int, List[float]] = {}
         for s in slopes:
             b = int((math.log2(s) - log_lo) / bin_w)
             votes.setdefault(b, []).append(s)
-        best_bin = max(votes.values(), key=len)
-        return float(np.median(best_bin))
+        ranked = sorted(votes.values(), key=len, reverse=True)
+        candidates = [float(np.median(v)) for v in ranked[: self.slope_top_candidates]]
+        # 恒等倍率(1.0)は変換なしの基準として常に評価対象へ含める
+        if all(abs(c - 1.0) > bin_w for c in candidates):
+            candidates.append(1.0)
+        return candidates
+
+    def _inliers_for_slope(self, pairs: List[Tuple[float, float]], slope: float
+                           ) -> Tuple[float, List[Tuple[float, float]]]:
+        """与えた傾きに対しオフセット最頻ビンを求め、整合インライアを返す"""
+        offsets = [db_time - slope * q_time for q_time, db_time in pairs]
+        tol = self.time_tolerance
+        offset_votes: Dict[int, List[float]] = {}
+        for off in offsets:
+            b = int(round(off / tol))
+            offset_votes.setdefault(b, []).append(off)
+        best_offsets = max(offset_votes.values(), key=len)
+        offset = float(np.median(best_offsets))
+        inliers = [
+            pair for pair, off in zip(pairs, offsets)
+            if abs(off - offset) <= tol
+        ]
+        return offset, inliers
 
     def _fit_scale_offset(self, pairs: List[Tuple[float, float]]
                           ) -> Tuple[float, float, List[Tuple[float, float]]]:
         """支配直線 db≈slope·query+offset を推定し、整合するインライアを返す
 
-        1. _estimate_slope で傾き（=time_scale）をハフ投票で求める。
-        2. 各ペアのオフセット db-slope·query をヒストグラム化し、最頻ビン近傍
-           （±time_tolerance）を代表オフセットとしてインライアを抽出する。
+        1. _estimate_slope_candidates で傾き候補（=time_scale）を得票上位から複数得る。
+        2. 各候補についてオフセット最頻ビン近傍（±time_tolerance）のインライアを数え、
+           インライアが最大になる傾きを採用する。粗量子化で偶発的に別倍率のビンが
+           競り勝っても、真の倍率が最も整合するため取り違えを是正できる。
 
         Returns:
             (slope, offset, inlier_pairs)
@@ -404,38 +440,39 @@ class FingerprintMatcher:
         if not pairs:
             return 1.0, 0.0, []
 
-        slope = self._estimate_slope(pairs)
         lo, hi = self.slope_range
-        slope = min(max(slope, lo), hi)
+        best = (1.0, 0.0, [])
+        for cand in self._estimate_slope_candidates(pairs):
+            slope = min(max(cand, lo), hi)
+            offset, inliers = self._inliers_for_slope(pairs, slope)
+            if len(inliers) > len(best[2]):
+                best = (slope, offset, inliers)
+        return best
 
-        offsets = [db_time - slope * q_time for q_time, db_time in pairs]
-        tol = self.time_tolerance
-        # オフセットを tol 幅でビン化し、最頻ビンを求める
-        offset_votes: Dict[int, List[float]] = {}
-        for off in offsets:
-            b = int(round(off / tol))
-            offset_votes.setdefault(b, []).append(off)
-        best_offsets = max(offset_votes.values(), key=len)
-        offset = float(np.median(best_offsets))
-
-        inliers = [
-            pair for pair, off in zip(pairs, offsets)
-            if abs(off - offset) <= tol
-        ]
-        return slope, offset, inliers
-
-    @staticmethod
-    def _confidence_from_inliers(aligned: int, total: int) -> float:
+    def _confidence_from_inliers(self, aligned: int, total: int) -> float:
         """支配直線に整合したインライア数と割合から信頼度[0,1]を算出する
 
-        真の一致は「割合が高く」かつ「絶対数も多い」。無関係曲は偶発衝突が
-        散在し、支配直線に乗る割合・数がともに低いため区別できる。
+        速度・ピッチ変化した実音源では、候補ペアに偶発衝突が多く混じるため整列
+        "割合"は低くなる（数%）。一方 無関係曲も割合が同程度に低いので、両者は主に
+        整列"絶対数"で分離する（真の一致は数十〜数千、無関係曲は数件）。よって
+        数の飽和×割合の飽和を基本信頼度とする（どちらか一方が低いだけで抑制）。
+
+        ただしノイズの少ないクリーンな一致では整列割合が1.0近くまで上がる。この
+        「ほぼ全ペアが単一直線に乗る」純度は無関係曲では起こらないため、高純度時は
+        絶対数が少なくても高信頼度とみなす純度項を併用し、両者の大きい方を採る。
         """
         if total <= 0 or aligned < 2:
             return 0.0
         ratio = aligned / total
-        strength = min(1.0, aligned / 15.0)  # 15件整合で満点
-        return min(ratio * (0.5 + 0.5 * strength), 1.0)
+        count_term = min(1.0, aligned / self.confidence_full_matches)
+        ratio_term = min(1.0, ratio / self.confidence_full_ratio)
+        count_conf = count_term * ratio_term
+        # 純度項: 整列割合が purity_floor を超えた分を [0,1] に線形写像する。
+        # 無関係曲の割合（〜0.1）では0、クリーン一致（〜1.0）で1に近づく。
+        purity_conf = max(0.0, (ratio - self.confidence_purity_floor)
+                          / (1.0 - self.confidence_purity_floor))
+        return min(max(count_conf, purity_conf), 1.0)
+
     def _sort_and_limit_results(self, best_results: Dict[str, Dict[str, Any]]) -> List[Dict[str, Any]]:
         """
         結果を多面的にソートして制限

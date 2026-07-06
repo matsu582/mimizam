@@ -15,10 +15,13 @@ import tempfile
 import unittest
 from unittest.mock import Mock
 
+import numpy as np
+
 from mimizam import (
     FingerprintDatabase, FingerprintMatcher, Fingerprint, Song,
     HashGenerator, create_sqlite_config,
 )
+from mimizam.src.audio_fingerprinter import Peak
 from mimizam.src.database_base import group_query_times
 
 
@@ -160,60 +163,72 @@ class TestErrorVsNoMatch(unittest.TestCase):
                 os.unlink(tmp.name)
 
 
-class TestFreqScaleRescale(unittest.TestCase):
-    """② freq_scale（ピッチ変化）で実際にハッシュを再計算する"""
+class TestScaleInvariantHash(unittest.TestCase):
+    """② 尺度不変ハッシュ：ピッチ変化・速度変化でハッシュが不変になる
+
+    旧方式（探索時に freq_scale でハッシュを再計算する brute-force）は完全置換され、
+    ハッシュ自体が「三つ組の時間比・周波数比」で構成され尺度不変になった。よって
+    「変換時に再計算する」のではなく「変換しても同じハッシュが出る」ことを検証する。
+    """
 
     @staticmethod
-    def _unpack(hash_value):
-        f1 = (hash_value >> HashGenerator._F1_SHIFT) & HashGenerator._FREQ_MASK
-        f2 = (hash_value >> HashGenerator._F2_SHIFT) & HashGenerator._FREQ_MASK
-        dt = hash_value & HashGenerator._DT_MASK
-        return f1, f2, dt
+    def _peak(t, f, a=1.0):
+        return Peak(time=np.float64(t), frequency=np.float64(f), amplitude=np.float64(a))
 
-    def _pack(self, f1, f2, dt):
-        return (f1 << HashGenerator._F1_SHIFT) | (f2 << HashGenerator._F2_SHIFT) | dt
+    def test_pitch_shift_preserves_hash(self):
+        """全周波数を定数倍（ピッチシフト）してもハッシュ集合が不変"""
+        hg = HashGenerator()
+        anchor = self._peak(1.0, 200.0)
+        t1 = self._peak(1.5, 400.0)
+        t2 = self._peak(2.5, 300.0)
+        base = set(hg._create_triplet_hashes(anchor, t1, t2))
+        p = 2 ** (3 / 12.0)  # 3半音上げ
+        shifted = set(hg._create_triplet_hashes(
+            self._peak(1.0, 200.0 * p),
+            self._peak(1.5, 400.0 * p),
+            self._peak(2.5, 300.0 * p),
+        ))
+        # 周波数比 log2(f/fa) は定数倍で不変 → 共通ハッシュが存在する
+        self.assertTrue(base & shifted)
 
-    def test_identity_when_scale_is_one(self):
-        """freq_scale=1.0 は恒等変換"""
-        h = self._pack(100, 50, 10)
-        self.assertEqual(HashGenerator.rescale_hash_frequency(h, 1.0), h)
+    def test_speed_change_preserves_hash(self):
+        """全時刻を定数倍（速度変化）してもハッシュ集合が不変"""
+        hg = HashGenerator()
+        anchor = self._peak(1.0, 200.0)
+        t1 = self._peak(1.5, 400.0)
+        t2 = self._peak(2.5, 300.0)
+        base = set(hg._create_triplet_hashes(anchor, t1, t2))
+        s = 1.2  # 20%遅く（時間伸長）
+        stretched = set(hg._create_triplet_hashes(
+            self._peak(1.0 * s, 200.0),
+            self._peak(1.5 * s, 400.0),
+            self._peak(2.5 * s, 300.0),
+        ))
+        # 時間比 (t1-ta)/(t2-ta) は定数倍で不変 → 共通ハッシュが存在する
+        self.assertTrue(base & stretched)
 
-    def test_frequency_bins_scaled_time_bin_preserved(self):
-        """周波数ビンのみ freq_scale 倍され、Δtビンは保持される"""
-        h = self._pack(100, 50, 10)
-        rescaled = HashGenerator.rescale_hash_frequency(h, 1.1)
-        f1, f2, dt = self._unpack(rescaled)
-        self.assertEqual(f1, round(100 * 1.1))
-        self.assertEqual(f2, round(50 * 1.1))
-        self.assertEqual(dt, 10)
-        # 実際にハッシュ値が変わっていること（機能が無効でない）
-        self.assertNotEqual(rescaled, h)
-
-    def test_scale_fingerprints_changes_hash_for_pitch(self):
-        """_scale_fingerprints は freq_scale!=1.0 でハッシュ値を作り直す"""
-        matcher = FingerprintMatcher(Mock())
-        h = self._pack(100, 50, 10)
-        fps = [Fingerprint(hash_value=h, time_offset=1.0, song_id="")]
-
-        same = matcher._scale_fingerprints(fps, 1.0, 1.0)
-        self.assertEqual(same[0].hash_value, h)
-
-        pitched = matcher._scale_fingerprints(fps, 1.0, 1.1)
-        self.assertNotEqual(pitched[0].hash_value, h)
-        self.assertEqual(
-            pitched[0].hash_value,
-            HashGenerator.rescale_hash_frequency(h, 1.1),
+    def test_hash_fits_32bit(self):
+        """生成ハッシュは32bitに収まる（DBスキーマ非互換化しない）"""
+        hg = HashGenerator()
+        hashes = hg._create_triplet_hashes(
+            self._peak(1.0, 200.0), self._peak(1.5, 800.0), self._peak(2.5, 150.0)
         )
+        self.assertTrue(hashes)
+        for h in hashes:
+            self.assertGreaterEqual(h, 0)
+            self.assertLess(h, 1 << 32)
 
 
-class TestScaleSearchQueryCount(unittest.TestCase):
-    """③ スケール探索でのDB問い合わせ回数が想定範囲内に収まる"""
+class TestSingleSearchQueryCount(unittest.TestCase):
+    """③ 尺度不変化により、スケール探索ループが撤廃されDB検索は1回のみになる"""
 
     def setUp(self):
         self.mock_db = Mock()
-        # どの検索でも同じ候補集合を返す（time_scaleでは候補が変わらない前提）
         self.mock_db.search_fingerprints.return_value = {
             "s1": [(float(i), float(i)) for i in range(10)]
+        }
+        self.mock_db.get_songs.return_value = {
+            "s1": Song(id="s1", title="t", artist="a", file_path="/x.wav")
         }
         self.mock_db.get_song.return_value = Song(
             id="s1", title="t", artist="a", file_path="/x.wav"
@@ -221,27 +236,25 @@ class TestScaleSearchQueryCount(unittest.TestCase):
         self.matcher = FingerprintMatcher(self.mock_db)
         self.query = [Fingerprint(hash_value=i, time_offset=0.0, song_id="") for i in range(5)]
 
-    def test_hybrid_queries_once_per_freq_scale(self):
+    def test_no_scale_factor_loops(self):
+        """旧 brute-force のスケール係数ループ属性は撤去されている"""
+        self.assertFalse(hasattr(self.matcher, "freq_scale_factors"))
+        self.assertFalse(hasattr(self.matcher, "time_scale_factors"))
+        self.assertFalse(hasattr(self.matcher, "_scale_fingerprints"))
+
+    def test_hybrid_searches_once(self):
         self.matcher.set_scoring_method("hybrid")
         self.matcher.find_matches(self.query, min_matches=1, include_details=True)
-        # freq_scaleごとに1回のみ（time_scaleはメモリ評価）
-        self.assertEqual(
-            self.mock_db.search_fingerprints.call_count,
-            len(self.matcher.freq_scale_factors),
-        )
+        self.assertEqual(self.mock_db.search_fingerprints.call_count, 1)
 
-    def test_detailed_queries_once_per_freq_scale(self):
+    def test_detailed_searches_once(self):
         self.matcher.set_scoring_method("detailed")
         self.matcher.find_matches(self.query, min_matches=1, include_details=True)
-        self.assertEqual(
-            self.mock_db.search_fingerprints.call_count,
-            len(self.matcher.freq_scale_factors),
-        )
+        self.assertEqual(self.mock_db.search_fingerprints.call_count, 1)
 
-    def test_histogram_queries_once(self):
+    def test_histogram_searches_once(self):
         self.matcher.set_scoring_method("histogram")
         self.matcher.find_matches(self.query, min_matches=1, include_details=True)
-        # ヒストグラム方式は freq_scale=1.0 固定のため1回
         self.assertEqual(self.mock_db.search_fingerprints.call_count, 1)
 
 

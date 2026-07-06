@@ -219,10 +219,13 @@ class SpectrogramAnalyzer:
             magnitude, mask, peak_neighborhood_size
         )
 
+        n_freq = magnitude.shape[0]
         peaks = [
             Peak(
                 time=np.float64(times[t_idx]),
-                frequency=np.float64(frequencies[f_idx]),
+                frequency=self._interpolate_peak_frequency(
+                    magnitude, frequencies, f_idx, t_idx, n_freq
+                ),
                 amplitude=np.float64(magnitude[f_idx, t_idx])
             )
             for f_idx, t_idx in zip(peak_f_indices, peak_t_indices)
@@ -235,6 +238,33 @@ class SpectrogramAnalyzer:
                 logger.info(f"Peak amplitude range: {np.min(amplitudes):.2f} to {np.max(amplitudes):.2f} dB")
         return peaks
     
+    @staticmethod
+    def _interpolate_peak_frequency(magnitude: np.ndarray, frequencies: np.ndarray,
+                                    f_idx: int, t_idx: int, n_freq: int) -> np.float64:
+        """放物線補間でピーク周波数をサブビン精度に補正する
+
+        線形周波数グリッド(約10.8Hz刻み)ではピークの真の周波数がビン中央から
+        ずれ、尺度不変ハッシュの周波数比が量子化境界で跨りやすい。隣接3点の
+        dB値で放物線を当て、サブビンのずれ delta∈[-0.5,0.5] を推定して補正する。
+        端(0/n-1)は補間不能なのでビン中央を返す。
+        """
+        if f_idx <= 0 or f_idx >= n_freq - 1:
+            return np.float64(frequencies[f_idx])
+        a = float(magnitude[f_idx - 1, t_idx])
+        b = float(magnitude[f_idx, t_idx])
+        c = float(magnitude[f_idx + 1, t_idx])
+        denom = a - 2.0 * b + c
+        if abs(denom) < 1e-12:
+            return np.float64(frequencies[f_idx])
+        delta = 0.5 * (a - c) / denom
+        # 数値誤差でサブビン範囲を超える場合はクランプ
+        if delta > 0.5:
+            delta = 0.5
+        elif delta < -0.5:
+            delta = -0.5
+        bin_width = float(frequencies[f_idx + 1] - frequencies[f_idx])
+        return np.float64(frequencies[f_idx] + delta * bin_width)
+
     def detect_peaks(self, 
                     magnitude: np.ndarray, 
                     frequencies: np.ndarray, 
@@ -338,23 +368,26 @@ class HashGenerator:
     _FR_CENTER = 0x800       # 12bit中央（符号付き比の0点）
 
     def __init__(self, 
-                 target_zone_size: int = 5,  # 8から5に削減
-                 time_delta_range: Tuple[float, float] = (0.1, 2.0),  # 範囲を狭める
-                 max_peaks_per_second: int = 15,  # 新規: 1秒あたりの最大ピーク数
-                 min_peak_separation: float = 0.02):  # 新規: ピーク間の最小時間間隔
+                 target_zone_size: int = 5,
+                 time_delta_range: Tuple[float, float] = (0.1, 2.0),
+                 max_peaks_per_second: int = 30,  # 1秒あたりの最大ピーク数（密度制御）
+                 min_peak_separation: float = 0.02,  # 後方互換のため受理（現方式では未使用）
+                 density_time_window: float = 0.1):  # 定数マップの時間窓（秒）
         """
         ハッシュジェネレータを初期化
         
         Args:
             target_zone_size: 各アンカーに対して考慮するターゲットピーク数
-            time_delta_range: 考慮する時間差の範囲（秒）
+            time_delta_range: 考慮する時間差の範囲（秒、現方式では選択は件数ベース）
             max_peaks_per_second: 1秒あたりの最大ピーク数（密度制御）
-            min_peak_separation: ピーク間の最小時間間隔（秒）
+            min_peak_separation: 後方互換用（旧・時間方向潰し込みは廃止）
+            density_time_window: 定数マップ密度制御の時間窓幅（秒）
         """
         self.target_zone_size = target_zone_size
         self.time_delta_range = time_delta_range
         self.max_peaks_per_second = max_peaks_per_second
         self.min_peak_separation = min_peak_separation
+        self.density_time_window = density_time_window
     
     def generate_hashes(self, peaks: List[Peak], debug: bool = False) -> List[Fingerprint]:
         """
@@ -455,14 +488,13 @@ class HashGenerator:
                 if dt2 <= dt1:
                     continue
 
-                hash_value = self._create_triplet_hash(anchor_peak, t1, t2)
-
-                if hash_value not in seen_hashes:
-                    seen_hashes.add(hash_value)
-                    fingerprints.append(Fingerprint(
-                        hash_value=hash_value,
-                        time_offset=anchor_peak.time
-                    ))
+                for hash_value in self._create_triplet_hashes(anchor_peak, t1, t2):
+                    if hash_value not in seen_hashes:
+                        seen_hashes.add(hash_value)
+                        fingerprints.append(Fingerprint(
+                            hash_value=hash_value,
+                            time_offset=anchor_peak.time
+                        ))
 
         return fingerprints
     
@@ -518,24 +550,32 @@ class HashGenerator:
         return min(max(idx, 0), cls._RT_MASK)
 
     @classmethod
-    def _quantize_freq_ratio(cls, f_target: float, f_anchor: float) -> int:
-        """周波数比 log2(f_target/f_anchor) を粗く量子化する
+    def _freq_ratio_bins(cls, f_target: float, f_anchor: float) -> List[int]:
+        """周波数比 log2(f_target/f_anchor) を近傍2ビンへソフト量子化する
 
-        乗法的ピッチ変化 f→p·f では log2 比が不変になる。STFT周波数分解能
-        (約10.8Hz)に起因するピーク周波数のブレを吸収するため、_FR_STEP_OCT
-        オクターブ刻みで量子化し、中央値 _FR_CENTER を0点として詰める。
+        乗法的ピッチ変化 f→p·f では log2 比が不変になる。ピーク周波数の微小な
+        ブレや量子化境界跨ぎに強くするため、連続位置を挟む下側/上側の2ビンを
+        両方返す（両者の真値が1ビン以内なら少なくとも一方のビンが一致する）。
+        _FR_STEP_OCT オクターブ刻み、中央値 _FR_CENTER を0点として詰める。
         """
         ratio = math.log2(f_target / f_anchor)
         ratio = min(max(ratio, -cls._FR_MAX_OCT), cls._FR_MAX_OCT)
-        idx = int(round(ratio / cls._FR_STEP_OCT)) + cls._FR_CENTER
-        return min(max(idx, 0), cls._FR_MASK)
+        pos = ratio / cls._FR_STEP_OCT + cls._FR_CENTER
+        lo = int(math.floor(pos))
+        bins = []
+        for b in (lo, lo + 1):
+            b = min(max(b, 0), cls._FR_MASK)
+            if b not in bins:
+                bins.append(b)
+        return bins
 
-    def _create_triplet_hash(self, anchor: Peak, t1: Peak, t2: Peak) -> int:
-        """アンカー＋2ターゲットの三つ組から尺度不変ハッシュを作成する
+    def _create_triplet_hashes(self, anchor: Peak, t1: Peak, t2: Peak) -> List[int]:
+        """アンカー＋2ターゲットの三つ組から尺度不変ハッシュ群を作成する
 
         時間比（速度変化に不変）と2つの周波数比（ピッチ変化に不変）を量子化して
         32bitにビットパックする。ハッシュ自体が速度・ピッチに不変なため、照合側で
-        time_scale/freq_scale を列挙する必要がない。
+        time_scale/freq_scale を列挙する必要がない。周波数比は近傍2ビンへソフト
+        量子化するため、1三つ組あたり最大4個のハッシュを返す（境界跨ぎに頑健）。
 
         Args:
             anchor: アンカーピーク（三つ組の基準、時間最小）
@@ -543,7 +583,7 @@ class HashGenerator:
             t2: 後方ターゲット（t1 < t2）
 
         Returns:
-            32bit符号なし整数のハッシュ値
+            32bit符号なし整数のハッシュ値リスト
 
         レイアウト: [時間比:8bit][周波数比1:12bit][周波数比2:12bit]
         """
@@ -556,80 +596,69 @@ class HashGenerator:
         f1 = float(t1.frequency)
         f2 = float(t2.frequency)
         # 周波数が非正の場合は比が定義できないため 0 ビンへ丸める（決定的）
-        if fa > 0 and f1 > 0:
-            fr1_bin = self._quantize_freq_ratio(f1, fa)
-        else:
-            fr1_bin = 0
-        if fa > 0 and f2 > 0:
-            fr2_bin = self._quantize_freq_ratio(f2, fa)
-        else:
-            fr2_bin = 0
+        fr1_bins = self._freq_ratio_bins(f1, fa) if (fa > 0 and f1 > 0) else [0]
+        fr2_bins = self._freq_ratio_bins(f2, fa) if (fa > 0 and f2 > 0) else [0]
 
         rt_bin = self._quantize_time_ratio(r_t)
 
-        return (
-            (rt_bin << self._RT_SHIFT)
-            | (fr1_bin << self._FR1_SHIFT)
-            | (fr2_bin << self._FR2_SHIFT)
-        )
+        hashes = []
+        for b1 in fr1_bins:
+            for b2 in fr2_bins:
+                hashes.append(
+                    (rt_bin << self._RT_SHIFT)
+                    | (b1 << self._FR1_SHIFT)
+                    | (b2 << self._FR2_SHIFT)
+                )
+        return hashes
     
     def _filter_peaks_by_density(self, peaks: List[Peak], debug: bool = False) -> List[Peak]:
-        """
-        ピーク密度に基づいてピークをフィルタリング
-        
+        """周波数を考慮した定数マップ方式でピーク密度を制御する
+
+        尺度不変ハッシュでは「時間方向のみで1ピークに潰す」旧方式が致命的だった。
+        速度・ピッチ変化で"生き残るピーク"が変わり三つ組が対応しなくなるためである
+        （同時刻の複数周波数ピークを潰すと、変化後に別の周波数が選ばれてしまう）。
+
+        そこで時間窓ごとに振幅上位K件を"周波数をまたいで"保持する定数マップ方式に
+        する。窓内の強いピークは尺度変化しても概ね強いまま残るため、選択が安定し、
+        変換版でも同じ三つ組が再現されやすい。1秒あたりのピーク数は
+        max_peaks_per_second で概ね一定に保つ（K = 窓幅 × max_peaks_per_second）。
+
         Args:
             peaks: 検出されたスペクトルピークのリスト
             debug: デバッグログを有効にする
-            
+
         Returns:
             フィルタリングされたピークのリスト
         """
         logger = logging.getLogger(__name__)
-        
+
         if len(peaks) == 0:
             return peaks
-        
+
         if debug:
             logger.info(f"Peak count before density filtering: {len(peaks)}")
-        
-        # ピークを時間順にソート
-        sorted_peaks = sorted(peaks, key=lambda p: float(p.time))
-        
-        # 最小間隔に基づくフィルタリング
-        filtered_peaks = []
-        last_time = -float('inf')
-        
-        for peak in sorted_peaks:
-            if peak.time - last_time >= self.min_peak_separation:
-                filtered_peaks.append(peak)
-                last_time = peak.time
-        
-        if debug:
-            logger.info(f"After minimum interval filtering: {len(filtered_peaks)} peaks")
-        
-        # 1秒あたりの最大ピーク数制限
-        if len(filtered_peaks) == 0:
-            return filtered_peaks
-        
-        duration = filtered_peaks[-1].time - filtered_peaks[0].time
-        if duration > 0:
-            current_density = len(filtered_peaks) / duration
-            
-            if current_density > self.max_peaks_per_second:
-                # 振幅の高いピークを優先して選択
-                target_count = int(duration * self.max_peaks_per_second)
-                filtered_peaks.sort(key=lambda p: p.amplitude, reverse=True)
-                filtered_peaks = filtered_peaks[:target_count]
-                
-                # 再度時間順にソート
-                filtered_peaks.sort(key=lambda p: p.time)
-                
-                if debug:
-                    logger.info(f"After density limit: {len(filtered_peaks)} peaks")
-        
+
+        window = self.density_time_window
+        peaks_per_window = max(1, int(round(self.max_peaks_per_second * window)))
+
+        # 時間窓ごとに振幅上位K件を保持（周波数をまたいで選択）
+        buckets: dict = {}
+        for peak in peaks:
+            b = int(float(peak.time) / window)
+            buckets.setdefault(b, []).append(peak)
+
+        filtered_peaks: List[Peak] = []
+        for bucket_peaks in buckets.values():
+            if len(bucket_peaks) > peaks_per_window:
+                bucket_peaks.sort(key=lambda p: p.amplitude, reverse=True)
+                bucket_peaks = bucket_peaks[:peaks_per_window]
+            filtered_peaks.extend(bucket_peaks)
+
+        filtered_peaks.sort(key=lambda p: float(p.time))
+
         if debug:
             logger.info(f"Final filtered peak count: {len(filtered_peaks)}")
-        
+
         return filtered_peaks
 
 
