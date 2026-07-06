@@ -558,14 +558,19 @@ class Mimizam:
 
         frame_similarity（最良フレームのピーク類似度）だけでは、ごく僅かな
         フレームが偶発的に高一致した候補（例: 4/84フレーム）が高評価に
-        なってしまう。クエリのどれだけが一致したかを表す被覆率(match_ratio)と
-        ANN得票率を反映し、薄い偶発一致を減点する。
+        なってしまう。逆にフレーム数の割合(match_ratio)だけだと、疎なキーフレーム
+        でも長く連続一致している真の一致が過小評価される。そこで支配整列が
+        クエリ時間軸を連続的にどれだけ覆うか（coverage）とANN得票率を反映する。
+        coverage は _compute_match_regions が支配直線インライアの連続被覆から算出
+        する（無い場合は従来の match_ratio で代替）。
 
-        strength = 0.5 * 被覆率 + 0.5 * 得票率  (いずれも0..1に正規化)
+        strength = 0.5 * 連続被覆率 + 0.5 * 得票率  (いずれも0..1に正規化)
         実効スコア = frame_similarity * (floor + (1 - floor) * strength)
         """
         total = match_details.get("total_frames", 0) or 0
-        coverage = match_details.get("match_ratio", 0.0) or 0.0
+        coverage = match_details.get("coverage")
+        if coverage is None:
+            coverage = match_details.get("match_ratio", 0.0) or 0.0
         vote_ratio = min(1.0, votes / total) if total > 0 else 0.0
         strength = 0.5 * coverage + 0.5 * vote_ratio
         return frame_similarity * (floor + (1.0 - floor) * strength)

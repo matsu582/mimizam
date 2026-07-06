@@ -8,6 +8,7 @@
 """
 
 import logging
+import math
 from typing import List, Optional, Dict, Tuple
 
 import numpy as np
@@ -322,17 +323,17 @@ class VideoFingerprintDatabase:
 
             max_sim = float(np.max(best_per_query))
             if max_sim >= threshold:
+                q_timestamps = [q_ts for _, q_ts, _ in query_frame_fps]
+                query_duration = max(q_timestamps) if q_timestamps else 0.0
                 match_details = self._compute_match_regions(
-                    frame_matches, threshold=0.4
+                    frame_matches, threshold=0.4,
+                    query_duration=query_duration,
                 )
                 db_timestamps = [d_ts for _, d_ts, _ in db_frame_vecs]
                 match_details["db_duration"] = (
                     max(db_timestamps) if db_timestamps else 0.0
                 )
-                q_timestamps = [q_ts for _, q_ts, _ in query_frame_fps]
-                match_details["query_duration"] = (
-                    max(q_timestamps) if q_timestamps else 0.0
-                )
+                match_details["query_duration"] = query_duration
 
                 # 時間的一貫性のある区間がなければ偶然の類似として除外
                 if not match_details.get("regions"):
@@ -349,23 +350,114 @@ class VideoFingerprintDatabase:
         return results
 
     @staticmethod
+    def _fit_dominant_alignment(
+        pairs: List[Tuple[float, float]],
+        residual_tolerance: float,
+        slope_range: Tuple[float, float],
+        min_query_gap: float,
+    ) -> Tuple[float, float, List[int]]:
+        """支配直線 db≈slope·query+offset を頑健推定しインライア添字を返す
+
+        音声側の頑健直線フィットと同型の考え方を映像フレームに適用する（Java実装
+        等の外部コードは参照せず独自実装）。ペア間の傾きをlog2空間で投票して
+        傾き候補を得て、各候補についてオフセット最頻ビン近傍のインライアを数え、
+        インライアが最大の傾きを採用する。これにより同一整列が僅かな速度差や
+        タイムスタンプ量子化でオフセットにばらついても1本の直線に統合でき、
+        別箇所の偶発一致は外れ値として除外される。
+
+        Args:
+            pairs: (query_ts, db_ts) の並び
+            residual_tolerance: 直線からの残差をインライアとみなす許容（秒）
+            slope_range: 妥当な傾き（=time_scale）の範囲
+            min_query_gap: 傾き算出に使うペアの最小 query 時間差（秒）
+
+        Returns:
+            (slope, offset, inlier_indices)
+        """
+        n = len(pairs)
+        if n == 0:
+            return 1.0, 0.0, []
+        if n == 1:
+            return 1.0, pairs[0][1] - pairs[0][0], [0]
+
+        lo, hi = slope_range
+
+        # ペア間傾きをlog2空間で投票し傾き候補を得る
+        slopes: List[float] = []
+        for i in range(n):
+            qi, di = pairs[i]
+            for j in range(i + 1, n):
+                qj, dj = pairs[j]
+                dq = qj - qi
+                if abs(dq) < min_query_gap:
+                    continue
+                s = (dj - di) / dq
+                if lo <= s <= hi:
+                    slopes.append(s)
+
+        candidates: List[float] = [1.0]  # 恒等倍率は常に評価対象
+        if slopes:
+            bin_w = 0.05  # log2空間のビン幅
+            log_lo = math.log2(lo)
+            votes: Dict[int, List[float]] = {}
+            for s in slopes:
+                b = int((math.log2(s) - log_lo) / bin_w)
+                votes.setdefault(b, []).append(s)
+            ranked = sorted(votes.values(), key=len, reverse=True)
+            for v in ranked[:3]:
+                candidates.append(float(np.median(v)))
+
+        def inliers_for(slope: float) -> Tuple[float, List[int]]:
+            offs = [d - slope * q for q, d in pairs]
+            tol = residual_tolerance
+            off_votes: Dict[int, List[float]] = {}
+            for off in offs:
+                off_votes.setdefault(int(round(off / tol)), []).append(off)
+            best_bin = max(off_votes.values(), key=len)
+            offset = float(np.median(best_bin))
+            idx = [
+                k for k, off in enumerate(offs)
+                if abs(off - offset) <= tol
+            ]
+            return offset, idx
+
+        best = (1.0, 0.0, [])
+        for cand in candidates:
+            slope = min(max(cand, lo), hi)
+            offset, idx = inliers_for(slope)
+            if len(idx) > len(best[2]):
+                best = (slope, offset, idx)
+        return best
+
+    @staticmethod
     def _compute_match_regions(
         frame_matches: List[Dict],
         threshold: float = 0.4,
-        offset_tolerance: float = 5.0,
+        residual_tolerance: float = 3.0,
         min_region_frames: int = 3,
+        slope_range: Tuple[float, float] = (0.5, 2.0),
+        min_query_gap: float = 2.0,
+        query_gap_merge: float = 8.0,
+        query_duration: float = 0.0,
     ) -> Dict:
-        """
-        フレームマッチ情報から一致区間を計算
+        """フレームマッチ情報から支配整列に乗る一致区間を計算する
 
-        時間オフセット（db_ts - query_ts）の一貫性で一致区間を判定する。
-        同じオフセットを持つフレーム群＝同じ部分を見ている。
+        従来はオフセット差の貪欲クラスタリングで区間を切っていたため、真に連続する
+        一致でも僅かな速度差・タイムスタンプ量子化でオフセットがドリフトすると別区間
+        に割れ、別箇所の偶発一致も被覆率へ混ざっていた。ここでは支配直線
+        db≈slope·query+offset を頑健推定し、その直線に整合するインライアだけを一致
+        とみなす。連続するインライアは1区間に統合され、直線から外れる偶発一致は除外
+        される。被覆率はクエリ時間軸で連続的にどれだけ覆うか（span/クエリ長）で測る。
 
         Args:
             frame_matches: フレーム単位のマッチ情報リスト
             threshold: 一致とみなす最低類似度
-            offset_tolerance: 同一区間とみなすオフセット差の許容範囲（秒）
-            min_region_frames: 区間として認定する最小フレーム数
+            residual_tolerance: 支配直線からの残差の許容（秒）
+            min_region_frames: 支配整列として認定する最小インライア数
+            slope_range: 妥当な傾き（=time_scale）の範囲
+            min_query_gap: 傾き算出に使うペアの最小 query 時間差（秒）
+            query_gap_merge: 連続区間とみなすクエリ時間の最大空き（秒）
+            query_duration: クエリ全体の長さ（被覆率算出に使用、0なら整列範囲で代替）
 
         Returns:
             一致区間と統計情報
@@ -373,56 +465,83 @@ class VideoFingerprintDatabase:
         good = [
             m for m in frame_matches if m["similarity"] >= threshold
         ]
-        if not good:
-            return {
-                "matched_frames": 0,
-                "total_frames": len(frame_matches),
-                "regions": [],
-            }
+        total = len(frame_matches)
+        empty = {
+            "matched_frames": 0,
+            "aligned_frames": 0,
+            "total_frames": total,
+            "match_ratio": 0.0,
+            "coverage": 0.0,
+            "time_scale": 1.0,
+            "time_offset": 0.0,
+            "median_similarity": 0.0,
+            "regions": [],
+        }
+        if len(good) < min_region_frames:
+            return empty
 
-        # 時間オフセットでクラスタリング
-        for m in good:
-            m["offset"] = m["db_ts"] - m["query_ts"]
+        pairs = [(m["query_ts"], m["db_ts"]) for m in good]
+        slope, offset, inlier_idx = VideoFingerprintDatabase._fit_dominant_alignment(
+            pairs, residual_tolerance, slope_range, min_query_gap
+        )
+        if len(inlier_idx) < min_region_frames:
+            # 支配直線に整合するフレームが足りない＝時間的に一貫しない偶発一致
+            return empty
 
-        good.sort(key=lambda m: m["offset"])
+        inliers = sorted(
+            (good[k] for k in inlier_idx), key=lambda m: m["query_ts"]
+        )
 
-        clusters: List[List[Dict]] = []
-        cur_cluster = [good[0]]
-
-        for m in good[1:]:
-            if m["offset"] - cur_cluster[-1]["offset"] <= offset_tolerance:
-                cur_cluster.append(m)
-            else:
-                clusters.append(cur_cluster)
-                cur_cluster = [m]
-        clusters.append(cur_cluster)
-
-        # 各クラスタから区間情報を生成
+        # 支配直線上のインライアをクエリ時間の空きで連続区間に分割する
         regions = []
-        for cluster in clusters:
-            if len(cluster) < min_region_frames:
-                continue
+        cur = [inliers[0]]
+        for m in inliers[1:]:
+            if m["query_ts"] - cur[-1]["query_ts"] <= query_gap_merge:
+                cur.append(m)
+            else:
+                regions.append(cur)
+                cur = [m]
+        regions.append(cur)
 
+        region_infos = []
+        covered = 0.0
+        for cluster in regions:
             q_times = [m["query_ts"] for m in cluster]
             d_times = [m["db_ts"] for m in cluster]
             avg_sim = sum(m["similarity"] for m in cluster) / len(cluster)
-
-            regions.append({
-                "query_start": min(q_times),
-                "query_end": max(q_times),
+            q_start, q_end = min(q_times), max(q_times)
+            covered += q_end - q_start
+            region_infos.append({
+                "query_start": q_start,
+                "query_end": q_end,
                 "db_start": min(d_times),
                 "db_end": max(d_times),
                 "frame_count": len(cluster),
                 "avg_similarity": round(avg_sim, 3),
             })
+        region_infos.sort(key=lambda r: r["query_start"])
 
-        regions.sort(key=lambda r: r["query_start"])
+        # 被覆率: 整列がクエリ時間軸を連続的にどれだけ覆うか
+        span = query_duration if query_duration > 0 else (
+            max(m["query_ts"] for m in inliers)
+            - min(m["query_ts"] for m in inliers)
+        )
+        coverage = min(1.0, covered / span) if span > 0 else 0.0
+        median_sim = float(np.median([m["similarity"] for m in inliers]))
 
         return {
-            "matched_frames": len(good),
-            "total_frames": len(frame_matches),
-            "match_ratio": len(good) / len(frame_matches),
-            "regions": regions,
+            # 支配整列に乗ったインライア数（従来のmatched_framesを置換）
+            "matched_frames": len(inliers),
+            "aligned_frames": len(inliers),
+            "total_frames": total,
+            # 従来互換: 全フレームに対するインライアの割合
+            "match_ratio": len(inliers) / total if total else 0.0,
+            # 連続被覆率（スコアの主指標）
+            "coverage": coverage,
+            "time_scale": slope,
+            "time_offset": offset,
+            "median_similarity": median_sim,
+            "regions": region_infos,
         }
 
     # ===== 統計 =====
