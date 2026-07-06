@@ -150,7 +150,7 @@ PiP画像背景（`pip_center_*_image`）では、別の映像の最初のフレ
 
 ## train_pretrained_model.py
 
-AKAZE + VLAD + PCA の事前学習済みモデルを構築する。大規模画像/動画データセットから AKAZE 記述子を抽出し、K-Means codebook + PCA 変換器を学習して `.pkl` ファイルとして保存する。
+AKAZE + VLAD + PCA の事前学習済みモデルを構築する。大規模画像/動画データセットから AKAZE 記述子を抽出し、K-Means codebook + PCA 変換器を学習して `.npz` ファイルとして保存する。
 
 出力モデルは `examples/visual_from_video_fingerprinter.py` と `examples/visual_from_video_search.py` の `--model` オプションで使用する。
 
@@ -174,25 +174,25 @@ pip install opencv-python numpy scikit-learn
 # COCO val2017 のみで学習（小規模・高速）
 python scripts/train_pretrained_model.py \
     --coco-dir /path/to/coco/val2017 \
-    -o models/akaze_vlad_pca_pretrained.pkl
+    -o models/akaze_vlad_pca_pretrained.npz
 
 # COCO + UCF-101 で学習（推奨・最も汎用的）
 python scripts/train_pretrained_model.py \
     --coco-dir /path/to/coco/train2017 \
     --ucf-dir /path/to/UCF-101 \
-    -o models/akaze_vlad_pca_pretrained.pkl
+    -o models/akaze_vlad_pca_pretrained.npz
 
 # PCA次元数を変更
 python scripts/train_pretrained_model.py \
     --coco-dir /path/to/coco/val2017 \
     --pca-dim 256 \
-    -o models/model_pca256.pkl
+    -o models/model_pca256.npz
 
 # 任意の画像/動画ディレクトリを使用
 python scripts/train_pretrained_model.py \
     --image-dir /path/to/images \
     --video-dir /path/to/videos \
-    -o models/custom_model.pkl
+    -o models/custom_model.npz
 ```
 
 ### オプション
@@ -203,7 +203,7 @@ python scripts/train_pretrained_model.py \
 | `--ucf-dir` | UCF-101動画ディレクトリ | - |
 | `--image-dir` | 追加画像ディレクトリ（複数指定可） | - |
 | `--video-dir` | 追加動画ディレクトリ（複数指定可） | - |
-| `-o`, `--output` | 出力モデルファイルパス | `models/akaze_vlad_pca_pretrained.pkl` |
+| `-o`, `--output` | 出力モデルファイルパス | `models/akaze_vlad_pca_pretrained.npz` |
 | `-K`, `--codebook-size` | K-Meansクラスタ数 | 64 |
 | `--pca-dim` | PCA出力次元数 | 512 |
 | `--max-images` | 処理する画像の最大数 | 50000 |
@@ -224,9 +224,9 @@ python scripts/train_pretrained_model.py \
 ```bash
 # 映像の登録
 python examples/visual_from_video_fingerprinter.py /path/to/videos \
-    --model models/akaze_vlad_pca_pretrained.pkl
+    --model models/akaze_vlad_pca_pretrained.npz
 
 # 映像の検索
 python examples/visual_from_video_search.py /path/to/query.mp4 \
-    --model models/akaze_vlad_pca_pretrained.pkl --details
+    --model models/akaze_vlad_pca_pretrained.npz --details
 ```

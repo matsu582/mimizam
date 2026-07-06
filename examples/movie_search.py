@@ -577,15 +577,15 @@ def main() -> int:
 使用例:
   # 音声+映像の両方で検索
   python movie_search.py /path/to/query.mp4 \\
-      --model model.pki --details
+      --model model.npz --details
 
   # 映像のみで検索（音声スキップ）
   python movie_search.py /path/to/query.mp4 \\
-      --model model.pki --skip-audio --details
+      --model model.npz --skip-audio --details
 
   # PiP検出付きで検索
   python movie_search.py /path/to/query.mp4 \\
-      --model model.pki --detect-pip --details
+      --model model.npz --detect-pip --details
 """,
     )
 

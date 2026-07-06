@@ -71,7 +71,7 @@ with create_mimizam_sqlite("my_media.db") as mimizam:
     mimizam.configure_video(scene_eval_fps=4.0, profile_frames=False)
 
     # Load the pre-trained codebook/PCA model (recommended)
-    mimizam.load_video_model("model/codebook_model.pki")
+    mimizam.load_video_model("model/codebook_model.npz")
 
     # Register a video
     # (If no model is loaded, the first added video trains the model on itself,
@@ -85,14 +85,14 @@ with create_mimizam_sqlite("my_media.db") as mimizam:
         print(result)
 ```
 
-CLI tools that use the pretrained codebook model (`model/codebook_model.pki`) are also bundled.
+CLI tools that use the pretrained codebook model (`model/codebook_model.npz`) are also bundled.
 
 ```bash
 # Register a video (registers combined audio + video fingerprints)
 python examples/movie_fingerprinter.py path/to/video.mp4 --database ./media.db
 
 # Combined search by video (audio + video)
-python examples/movie_search.py -D -k 10 -m ./model/codebook_model.pki \
+python examples/movie_search.py -D -k 10 -m ./model/codebook_model.npz \
     path/to/clip.mp4 --database ./media.db
 ```
 

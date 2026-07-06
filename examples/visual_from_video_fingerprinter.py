@@ -175,16 +175,16 @@ def main() -> int:
         epilog="""\
 使用例:
   # 事前学習済みモデルを使って動画を登録
-  python visual_from_video_fingerprinter.py /path/to/videos --model models/akaze_vlad_pca_pretrained.pkl
+  python visual_from_video_fingerprinter.py /path/to/videos --model models/akaze_vlad_pca_pretrained.npz
 
   # 単一ファイルを登録
-  python visual_from_video_fingerprinter.py /path/to/video.mp4 --model models/akaze_vlad_pca_pretrained.pkl
+  python visual_from_video_fingerprinter.py /path/to/video.mp4 --model models/akaze_vlad_pca_pretrained.npz
 
   # モデルの事前学習は scripts/train_pretrained_model.py で実行:
   #   python scripts/train_pretrained_model.py --coco-dir /path/to/coco/val2017
 
   # MySQLバックエンドを使用
-  python visual_from_video_fingerprinter.py /path/to/videos --model model.pkl --db-type mysql \\
+  python visual_from_video_fingerprinter.py /path/to/videos --model model.npz --db-type mysql \\
       --db-host localhost --db-name mimizam --db-user user --db-password pass
 """,
     )
@@ -208,7 +208,7 @@ def main() -> int:
     parser.add_argument(
         "--model", "-m",
         required=True,
-        help="VLAD/PCAモデルファイルのパス（.pkl、必須）。"
+        help="VLAD/PCAモデルファイルのパス（.npz、必須）。"
              "scripts/train_pretrained_model.py で事前学習したモデルを指定。"
              "検索時にvisual_from_video_search.pyで同じモデルを指定する必要あり",
     )

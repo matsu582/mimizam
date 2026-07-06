@@ -176,19 +176,19 @@ def main() -> int:
         epilog="""\
 使用例:
   # 音声+映像の両方の指紋を登録
-  python movie_fingerprinter.py /path/to/videos --model model.pki
+  python movie_fingerprinter.py /path/to/videos --model model.npz
 
   # 映像指紋のみ登録（音声スキップ）
-  python movie_fingerprinter.py /path/to/videos --model model.pki --skip-audio
+  python movie_fingerprinter.py /path/to/videos --model model.npz --skip-audio
 
   # 音声指紋のみ登録（映像スキップ）
-  python movie_fingerprinter.py /path/to/videos --model model.pki --skip-visual
+  python movie_fingerprinter.py /path/to/videos --model model.npz --skip-visual
 
   # フレーム選定の処理内訳を計測しながら登録
-  python movie_fingerprinter.py /path/to/videos --model model.pki --profile
+  python movie_fingerprinter.py /path/to/videos --model model.npz --profile
 
   # シーン検出の評価fpsを4に下げて登録（retrieve回数を削減し高速化）
-  python movie_fingerprinter.py /path/to/videos --model model.pki \\
+  python movie_fingerprinter.py /path/to/videos --model model.npz \\
       --scene-eval-fps 4 --profile
 """,
     )

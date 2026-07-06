@@ -3,7 +3,7 @@
 AKAZE + VLAD + PCA 事前学習済みモデルの構築スクリプト
 
 大規模画像/動画データセットからAKAZE記述子を抽出し、
-K-Means codebook + PCA変換器を学習して .pkl ファイルとして保存する。
+K-Means codebook + PCA変換器を学習して .npz ファイルとして保存する。
 出力モデルは VLADEncoder.load_model() で読み込み可能。
 
 フロー:
@@ -11,7 +11,7 @@ K-Means codebook + PCA変換器を学習して .pkl ファイルとして保存�
   2. 全記述子で K-Means codebook を学習
   3. 画像/フレームごとに VLAD ベクトルを計算
   4. VLAD ベクトル群に PCA を学習
-  5. codebook + PCA を .pkl として保存
+  5. codebook + PCA を .npz として保存
 
 依存パッケージ:
   pip install opencv-python numpy scikit-learn
@@ -20,25 +20,25 @@ K-Means codebook + PCA変換器を学習して .pkl ファイルとして保存�
   # COCO val2017 で学習
   python scripts/train_pretrained_model.py \\
       --coco-dir /path/to/coco/val2017 \\
-      -o models/akaze_vlad_pca_pretrained.pkl
+      -o models/akaze_vlad_pca_pretrained.npz
 
   # COCO + UCF-101 で学習（推奨）
   python scripts/train_pretrained_model.py \\
       --coco-dir /path/to/coco/train2017 \\
       --ucf-dir /path/to/UCF-101 \\
-      -o models/akaze_vlad_pca_pretrained.pkl
+      -o models/akaze_vlad_pca_pretrained.npz
 
   # PCA次元数を変更
   python scripts/train_pretrained_model.py \\
       --coco-dir /path/to/coco/val2017 \\
       --pca-dim 256 \\
-      -o models/model_pca256.pkl
+      -o models/model_pca256.npz
 
   # 既存モデルに追加データで追加学習
   python scripts/train_pretrained_model.py \\
-      --resume models/akaze_vlad_pca_pretrained.pkl \\
+      --resume models/akaze_vlad_pca_pretrained.npz \\
       --video-dir /path/to/new_videos \\
-      -o models/akaze_vlad_pca_v2.pkl
+      -o models/akaze_vlad_pca_v2.npz
 """
 
 import argparse
@@ -109,8 +109,8 @@ PCA次元数の目安:
     )
     parser.add_argument(
         "-o", "--output",
-        default="models/akaze_vlad_pca_pretrained.pkl",
-        help="出力モデルファイルパス（デフォルト: models/akaze_vlad_pca_pretrained.pkl）",
+        default="models/akaze_vlad_pca_pretrained.npz",
+        help="出力モデルファイルパス（デフォルト: models/akaze_vlad_pca_pretrained.npz）",
     )
     parser.add_argument(
         "--codebook-size", "-K",
