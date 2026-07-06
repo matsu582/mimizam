@@ -13,6 +13,7 @@ from typing import List, Dict, Tuple
 import numpy as np
 
 from .mysql_backend import MySQLBackend, MySQLError
+from ..exceptions import DatabaseError
 
 
 class MariaDBBackend(MySQLBackend):
@@ -155,7 +156,10 @@ class MariaDBBackend(MySQLBackend):
             return True
         except MySQLError as e:
             self.logger.error(f"MariaDB frame fingerprint save error: {e}")
-            return False
+            raise DatabaseError(
+                "Failed to add frame fingerprints", original_error=e,
+                context={'video_id': video_id, 'count': len(frames)},
+            ) from e
 
     def search_frame_candidates(
         self, query_fps: List[bytes], dimensions: int,

@@ -112,6 +112,29 @@ class TestDetailedMatchInfoNoResearch(unittest.TestCase):
         mock_db.search_fingerprints.assert_not_called()
         self.assertEqual(info['statistics']['total_matches'], 3)
 
+    def test_detailed_info_handles_time_scale(self):
+        """速度変化一致（time_scale≠1）で整列とオフセットを誤らない
+
+        query_time - db_time が一定という前提のままだと、db≈s·query の速度変化一致で
+        差分が一定にならず aligned_matches が崩れる。傾きで正規化した残差
+        query - db/s で集計するため、time_scale未指定でも自動推定して正しく整列する。
+        """
+        mock_db = Mock()
+        matcher = FingerprintMatcher(mock_db)
+        # 傾き1.2・オフセット0.5の完全一致ペア10件
+        pairs = [(float(q), 1.2 * q + 0.5) for q in range(1, 11)]
+        # 自動推定（time_scale未指定）でも全件整列する
+        auto = matcher.detailed_match_info(pairs)
+        self.assertEqual(auto['statistics']['aligned_matches'], 10)
+        # 明示指定でも同じ
+        given = matcher.detailed_match_info(pairs, time_scale=1.2)
+        self.assertEqual(given['statistics']['aligned_matches'], 10)
+        # 後方互換: 恒等倍率(time_scale=1.0)では従来どおり query-db を用いる
+        idp = [(1.0, 1.5), (2.0, 2.5), (3.0, 3.5)]
+        self.assertAlmostEqual(
+            matcher._calculate_time_offset(idp, 1.0), -0.5, places=6
+        )
+
 
 class TestErrorVsNoMatch(unittest.TestCase):
     """② 高レベルAPIは「一致なし」と「処理失敗」を区別する"""

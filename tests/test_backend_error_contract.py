@@ -98,6 +98,32 @@ class TestSQLiteBackendRaisesOnFailure(unittest.TestCase):
         self.assertTrue(self.backend.delete_song("s1"))
 
 
+class TestMariaDBBackendRaisesOnFailure(unittest.TestCase):
+    """MariaDBBackend も他バックエンドと同契約: 失敗時 DatabaseError を送出する
+
+    同型実装の取りこぼし（add_frame_fingerprints だけ False 返却）を回帰として固定。
+    ドライバ非導入環境でも動くよう、接続はモックで置き換えて失敗を注入する。
+    """
+
+    def _make_backend(self):
+        from mimizam.src.backends.mariadb_backend import MariaDBBackend, MySQLError
+        backend = MariaDBBackend(create_sqlite_config(':memory:'))
+        backend._mariadb_vector_available = True
+        # ベクトル表準備は成功させ、書き込みだけを失敗させる
+        backend._ensure_frame_vector_table = lambda dims: True
+        cursor = Mock()
+        cursor.executemany.side_effect = MySQLError("boom")
+        backend.connection = Mock()
+        backend.connection.cursor.return_value = cursor
+        return backend
+
+    def test_add_frame_fingerprints_raises_on_failure(self):
+        backend = self._make_backend()
+        # 4バイト=float32 1次元のダミー埋め込み
+        with self.assertRaises(DatabaseError):
+            backend.add_frame_fingerprints("v1", [(0, 0.0, b"\x00\x00\x80\x3f")])
+
+
 class TestLifecyclePredicatesReturnBool(unittest.TestCase):
     """connect / create_tables は起動述語として bool を返し例外化しない"""
 

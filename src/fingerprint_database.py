@@ -282,7 +282,8 @@ class FingerprintMatcher:
                 # 詳細情報を追加（1段階目で取得済みの match_pairs から算出。DB再検索しない）
                 if include_details:
                     result['detailed_info'] = self._build_detailed_match_info(
-                        result.get('match_pairs', [])
+                        result.get('match_pairs', []),
+                        result.get('time_scale', 1.0)
                     )
         
         return results
@@ -548,12 +549,17 @@ class FingerprintMatcher:
             song_map[song_id] = self.database.get_song(song_id)
         return song_map
     
-    def _calculate_time_offset(self, match_pairs: List[Tuple[float, float]]) -> float:
+    def _calculate_time_offset(self, match_pairs: List[Tuple[float, float]],
+                               time_scale: float = 1.0) -> float:
         """
         クエリとデータベース音声間の最も可能性の高い時間オフセットを計算
         
         Args:
             match_pairs: (query_time_offset, db_time_offset)タプルのリスト
+            time_scale: 速度変化倍率（db≈time_scale·query）。速度変化した一致では
+                query_time - db_time は一定にならないため、傾きで正規化した残差
+                query_time - db_time/time_scale を一定量として集計する。既定1.0で
+                従来の query_time - db_time と一致する（後方互換）。
             
         Returns:
             時間オフセット（秒）
@@ -565,12 +571,12 @@ class FingerprintMatcher:
         # 偶発一致（ノイズ）に引かれて誤位置を示す。時間的に一貫した最大
         # クラスタ（最大整列グループ）の中央値を代表オフセットとして採る。
         aligned_groups = self._find_time_aligned_matches(
-            match_pairs, self.time_tolerance
+            match_pairs, self.time_tolerance, time_scale
         )
         target = max(aligned_groups, key=len) if aligned_groups else match_pairs
 
         time_diffs = sorted(
-            query_time - db_time for query_time, db_time in target
+            query_time - db_time / time_scale for query_time, db_time in target
         )
         n = len(time_diffs)
         if n % 2 == 0:
@@ -666,13 +672,17 @@ class FingerprintMatcher:
         return min(base_confidence, 1.0)  # 1.0でキャップ
     
     def _find_time_aligned_matches(self, match_pairs: List[Tuple[float, float]], 
-                                  tolerance: float = 0.2) -> List[List[Tuple[float, float]]]:
+                                  tolerance: float = 0.2,
+                                  time_scale: float = 1.0) -> List[List[Tuple[float, float]]]:
         """
         指定された許容度で時間アライメントによる一致をグループ化
         
         Args:
             match_pairs: (query_time_offset, db_time_offset)タプルのリスト
             tolerance: 時間許容度（秒）
+            time_scale: 速度変化倍率（db≈time_scale·query）。速度変化した一致では
+                query_time - db_time は一定にならないため、傾きで正規化した残差
+                query_time - db_time/time_scale でグループ化する。既定1.0で従来と一致。
             
         Returns:
             時間アライメントされた一致を含む各グループのリスト
@@ -680,8 +690,8 @@ class FingerprintMatcher:
         if not match_pairs:
             return []
         
-        # 各一致の時間差を計算
-        time_diffs = [(query_time - db_time, (query_time, db_time)) 
+        # 各一致の時間差（速度補正後の残差）を計算
+        time_diffs = [(query_time - db_time / time_scale, (query_time, db_time)) 
                      for query_time, db_time in match_pairs]
         
         # 時間差でソート
@@ -759,7 +769,8 @@ class FingerprintMatcher:
         return len(match_pairs) / time_span
 
     def detailed_match_info(self,
-                            match_pairs: List[Tuple[float, float]]) -> Dict[str, Any]:
+                            match_pairs: List[Tuple[float, float]],
+                            time_scale: Optional[float] = None) -> Dict[str, Any]:
         """マッチペアから詳細なマッチ情報を取得する（match_pairs主導の公開API）
 
         find_matches / search_fingerprints で既に取得済みの
@@ -769,11 +780,19 @@ class FingerprintMatcher:
 
         Args:
             match_pairs: (query_time, db_time) ペアのリスト
+            time_scale: 速度変化倍率（db≈time_scale·query）。未指定(None)のときは
+                ペアから頑健直線回帰で自動推定する。速度変化した一致では
+                query_time - db_time が一定にならないため、傾きで正規化してから
+                整列・オフセットを算出する（未指定でも正しく集計できる）。
 
         Returns:
             詳細なマッチ情報を含む辞書
         """
-        return self._build_detailed_match_info(match_pairs or [])
+        pairs = match_pairs or []
+        if time_scale is None:
+            # 呼び出し側が倍率を渡さなくても速度変化一致を正しく扱えるよう自動推定する
+            time_scale = self._fit_scale_offset(pairs)[0] if pairs else 1.0
+        return self._build_detailed_match_info(pairs, time_scale)
 
     def get_detailed_match_info(self, query_fingerprints: List[Fingerprint], 
                                song_id: str,
@@ -809,11 +828,14 @@ class FingerprintMatcher:
         all_matches = self.database.search_fingerprints(query_fingerprints)
         return self.detailed_match_info(all_matches.get(song_id, []))
 
-    def _build_detailed_match_info(self, match_pairs: List[Tuple[float, float]]) -> Dict[str, Any]:
+    def _build_detailed_match_info(self, match_pairs: List[Tuple[float, float]],
+                                   time_scale: float = 1.0) -> Dict[str, Any]:
         """マッチペアから詳細なマッチ情報を構築する
 
         1段階目で取得済みの match_pairs をそのまま使い、DB再検索を行わない
-        （④のN+1クエリ回避）。
+        （④のN+1クエリ回避）。time_scale は速度変化倍率で、query_time-db_time が
+        一定にならない速度変化一致でも、傾きで正規化した残差で整列・オフセットを
+        正しく集計するために用いる（既定1.0で従来挙動）。
         """
         if not match_pairs:
             return {
@@ -828,17 +850,19 @@ class FingerprintMatcher:
                 }
             }
 
-        # 詳細なマッチ位置を作成
+        # 詳細なマッチ位置を作成（time_diff は速度補正後の残差 query - db/time_scale）
         match_positions = []
         for query_time, db_time in match_pairs:
             match_positions.append({
                 'query_time': query_time,
                 'db_time': db_time,
-                'time_diff': query_time - db_time
+                'time_diff': query_time - db_time / time_scale
             })
 
-        # 時間アライメントされたグループを検索
-        aligned_groups = self._find_time_aligned_matches(match_pairs, self.time_tolerance)
+        # 時間アライメントされたグループを検索（傾きで正規化して集計）
+        aligned_groups = self._find_time_aligned_matches(
+            match_pairs, self.time_tolerance, time_scale
+        )
         largest_group = max(aligned_groups, key=len) if aligned_groups else []
 
         query_times = [pos['query_time'] for pos in match_positions]
@@ -848,7 +872,7 @@ class FingerprintMatcher:
             'total_matches': len(match_pairs),
             'aligned_matches': len(largest_group),
             'alignment_ratio': len(largest_group) / len(match_pairs),
-            'best_offset': self._calculate_time_offset(match_pairs),
+            'best_offset': self._calculate_time_offset(match_pairs, time_scale),
             'query_time_range': (min(query_times), max(query_times)) if query_times else (0.0, 0.0),
             'db_time_range': (min(db_times), max(db_times)) if db_times else (0.0, 0.0)
         }
