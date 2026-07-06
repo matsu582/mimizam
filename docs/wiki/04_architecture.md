@@ -376,26 +376,24 @@ final_config = merge_configs(DEFAULT_CONFIG, PROFILE_CONFIGS['balanced'], USER_C
 
 mimizamは音声指紋生成とマッチング処理において、以下の実装された機能を提供します：
 
-### Numba JIT機能（実験的機能）
+### Numba JIT機能
 
-**注意: この機能は現在デフォルトで無効化されています**
+**`enable_numba_optimization` は処理速度のみを制御し、検出結果には影響しません。**
 
-mimizamにはNumba JIT機能が実装されていますが、ベンチマーク結果で処理速度の優位性が確認できず、ピークオーバーフロー問題が発生するため、現在はデフォルトで無効化されています。
+ピーク検出はNumbaの有無に関わらず同一の関数（`_numba_optimized_peak_detection`）を使用します。Numbaが未導入の場合は `njit` がno-opデコレータとなり、同じ関数が純Pythonで実行されるため、生成される指紋は環境に依存せず一致します（**DB整合性は常に保証**）。フラグはJITコンパイルを行うか（=高速化するか）だけを切り替えます。
 
 ```python
 from mimizam import AudioFingerprinter
 
-# デフォルトでは無効（enable_numba_optimization=False）
-fingerprinter = AudioFingerprinter()
-
-# 実験的に有効化する場合（現在は無効化されています）
-# fingerprinter = AudioFingerprinter(enable_numba_optimization=True)
+# 検出結果は同一。フラグは速度のみに影響する
+fingerprinter = AudioFingerprinter()  # 既定でJIT有効（速度向上）
+fingerprinter = AudioFingerprinter(enable_numba_optimization=False)  # JIT無効でも指紋は同一
 ```
 
-**技術的制限:**
-- ベンチマークで性能向上が確認されていない
-- ピークオーバーフロー問題により最大ピーク数が制限される
-- `SpectrogramAnalyzer`ではデフォルトで`enable_numba_optimization=False`に設定済み
+**補足:**
+- Numba有効時と無効時で採用ピーク・生成ハッシュは完全に一致する
+- Numbaは必須依存だが、未導入環境でも純Pythonで動作する（速度が低下するのみ）
+- 最大ピーク数の上限（`rows*cols//4`）は共通の検出関数に実装されており、経路に依存しない
 
 ### 適応的パラメータ調整
 
