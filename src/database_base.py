@@ -100,8 +100,12 @@ class DatabaseBackend(ABC):
     データベースバックエンドの抽象基底クラス
     
     エラーハンドリング契約:
-    - CRUD操作メソッド (connect, create_tables, add_song, add_fingerprints, delete_song): 
-      成功時True、失敗時False を返す。例外は投げない。
+    - 起動時のライフサイクル述語 (connect, create_tables):
+      成功可否を bool で返す。例外は投げない。
+    - データ変更メソッド (add_song, add_fingerprints, delete_song,
+      add_video, add_frame_fingerprints, delete_video):
+      成功時は True を返し、失敗時は DatabaseError を送出する（bool返却で
+      失敗を潰さない。読み取り経路と同じ「失敗＝例外」に統一）。
     - クエリメソッド (search_fingerprints, get_song, list_songs, get_database_stats, get_fingerprints_by_song):
       成功時は適切なデータを返す。致命的エラー時は例外を投げる可能性がある。
     """
@@ -142,7 +146,10 @@ class DatabaseBackend(ABC):
         楽曲を追加
         
         Returns:
-            成功時True、失敗時False。例外は投げない。
+            成功時True。
+
+        Raises:
+            DatabaseError: 追加に失敗した場合。
         """
         pass
     
@@ -152,7 +159,10 @@ class DatabaseBackend(ABC):
         フィンガープリントを追加
         
         Returns:
-            成功時True、失敗時False。例外は投げない。
+            成功時True。
+
+        Raises:
+            DatabaseError: 追加に失敗した場合。
         """
         pass
     
@@ -162,7 +172,10 @@ class DatabaseBackend(ABC):
         楽曲を削除
         
         Returns:
-            成功時True、失敗時False。例外は投げない。
+            成功時True。
+
+        Raises:
+            DatabaseError: 削除に失敗した場合。
         """
         pass
     

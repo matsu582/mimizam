@@ -171,15 +171,20 @@ class Mimizam:
             meta=meta_dict if meta_dict else None,
         )
 
-        if not self.database.add_song(song):
-            raise DatabaseError(
-                "Failed to persist song", context={'song_id': song_id},
-            )
-        if not self.database.add_fingerprints(song_id, fingerprints):
-            self.database.delete_song(song_id)
-            raise DatabaseError(
-                "Failed to persist fingerprints", context={'song_id': song_id},
-            )
+        # backend層はデータ操作失敗時に DatabaseError を送出する契約。
+        # add_song は失敗時に例外を送出するためそのまま伝播させる。
+        self.database.add_song(song)
+        try:
+            self.database.add_fingerprints(song_id, fingerprints)
+        except DatabaseError:
+            # 指紋保存に失敗したら、宙に浮いた楽曲行をロールバックしてから再送出
+            try:
+                self.database.delete_song(song_id)
+            except DatabaseError:
+                self.logger.warning(
+                    f"Rollback delete_song failed after fingerprint error: {song_id}"
+                )
+            raise
 
         self.logger.info(f"Song successfully added: {song_id} - {title} by {artist}")
         return song_id

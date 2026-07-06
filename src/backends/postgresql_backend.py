@@ -5,7 +5,7 @@ from ..database_base import (
     DatabaseBackend, DatabaseConfig, Song, Video, Fingerprint,
     group_query_times as _group_query_times,
 )
-from ..exceptions import ConnectionError, QueryError
+from ..exceptions import ConnectionError, QueryError, DatabaseError
 import json
 
 try:
@@ -180,7 +180,10 @@ class PostgreSQLBackend(DatabaseBackend):
             return True
         except PostgresError as e:
             self.logger.error(f"PostgreSQL song addition error: {e} | Context: {{'song_id': song.id}}")
-            return False
+            raise DatabaseError(
+                "Failed to add song", original_error=e,
+                context={'song_id': song.id},
+            ) from e
     
     def add_fingerprints(self, song_id: str, fingerprints: List[Fingerprint]) -> bool:
         """PostgreSQLにフィンガープリントを追加"""
@@ -204,7 +207,10 @@ class PostgreSQLBackend(DatabaseBackend):
             return True
         except PostgresError as e:
             self.logger.error(f"PostgreSQL fingerprint addition error: {e} | Context: {{'song_id': song_id, 'count': len(fingerprints)}}")
-            return False
+            raise DatabaseError(
+                "Failed to add fingerprints", original_error=e,
+                context={'song_id': song_id, 'count': len(fingerprints)},
+            ) from e
     
     def search_fingerprints(self, query_fingerprints: List[Fingerprint]) -> Dict[str, List[Tuple[float, float]]]:
         """PostgreSQLでフィンガープリントを検索"""
@@ -350,7 +356,10 @@ class PostgreSQLBackend(DatabaseBackend):
             return True
         except PostgresError as e:
             self.logger.error(f"PostgreSQL song deletion error: {e} | Context: {{'song_id': song_id}}")
-            return False
+            raise DatabaseError(
+                "Failed to delete song", original_error=e,
+                context={'song_id': song_id},
+            ) from e
 
     def get_fingerprints_by_song(self, song_id: str) -> List[Fingerprint]:
         """指定した楽曲のフィンガープリントを取得"""
@@ -524,7 +533,10 @@ class PostgreSQLBackend(DatabaseBackend):
             return True
         except PostgresError as e:
             self.logger.error(f"PostgreSQL video addition error: {e}")
-            return False
+            raise DatabaseError(
+                "Failed to add video", original_error=e,
+                context={'video_id': video.id},
+            ) from e
 
     def add_frame_fingerprints(
         self, video_id: str,
@@ -561,7 +573,10 @@ class PostgreSQLBackend(DatabaseBackend):
             return True
         except PostgresError as e:
             self.logger.error(f"PostgreSQL frame fingerprint save error: {e}")
-            return False
+            raise DatabaseError(
+                "Failed to add frame fingerprints", original_error=e,
+                context={'video_id': video_id, 'count': len(frames)},
+            ) from e
 
     def get_frame_fingerprints(
         self, video_id: str,
@@ -666,7 +681,10 @@ class PostgreSQLBackend(DatabaseBackend):
             return True
         except PostgresError as e:
             self.logger.error(f"PostgreSQL video deletion error: {e}")
-            return False
+            raise DatabaseError(
+                "Failed to delete video", original_error=e,
+                context={'video_id': video_id},
+            ) from e
 
     def get_video_stats(self) -> Dict[str, int]:
         """PostgreSQLの映像指紋統計を取得"""

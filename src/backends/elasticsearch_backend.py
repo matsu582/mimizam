@@ -25,7 +25,7 @@ from ..database_base import (
     DatabaseBackend, DatabaseConfig, Song, Video, Fingerprint,
     group_query_times as _group_query_times,
 )
-from ..exceptions import ConnectionError, QueryError
+from ..exceptions import ConnectionError, QueryError, DatabaseError
 
 try:
     from elasticsearch import Elasticsearch
@@ -260,13 +260,16 @@ class ElasticsearchBackend(DatabaseBackend):
             # レスポンスの確認
             if response.get('result') in ['created', 'updated']:
                 return True
-            else:
-                self.logger.warning(f"Song addition response has unexpected value: {response}")
-                return False
-                
+            raise DatabaseError(
+                "Failed to add song (unexpected Elasticsearch response)",
+                context={'song_id': song.id, 'result': response.get('result')},
+            )
         except ElasticsearchException as e:
             self.logger.error(f"Elasticsearch song addition error: {e} | Context: {{'song_id': song.id}}")
-            return False
+            raise DatabaseError(
+                "Failed to add song", original_error=e,
+                context={'song_id': song.id},
+            ) from e
     
     def add_fingerprints(self, song_id: str, fingerprints: List[Fingerprint]) -> bool:
         """Elasticsearchにフィンガープリントを追加"""
@@ -307,12 +310,20 @@ class ElasticsearchBackend(DatabaseBackend):
                 
                 if failed:
                     self.logger.error(f"Bulk index failed: {len(failed)} items")
-                    return False
+                    raise DatabaseError(
+                        "Failed to add fingerprints (bulk index failure)",
+                        context={'song_id': song_id, 'failed': len(failed)},
+                    )
             
             return True
+        except DatabaseError:
+            raise
         except Exception as e:
             self.logger.error(f"Elasticsearch fingerprint addition error: {e} | Context: {{'song_id': song_id, 'count': len(fingerprints)}}")
-            return False
+            raise DatabaseError(
+                "Failed to add fingerprints", original_error=e,
+                context={'song_id': song_id, 'count': len(fingerprints)},
+            ) from e
 
     def _maybe_refresh_for_search(self, *indices: str) -> None:
         """検索時refreshが有効な場合のみ、指定インデックスをrefreshする
@@ -528,7 +539,10 @@ class ElasticsearchBackend(DatabaseBackend):
             return True
         except ElasticsearchException as e:
             self.logger.error(f"Elasticsearch song deletion error: {e} | Context: {{'song_id': song_id}}")
-            return False
+            raise DatabaseError(
+                "Failed to delete song", original_error=e,
+                context={'song_id': song_id},
+            ) from e
 
     def get_fingerprints_by_song(self, song_id: str) -> List[Fingerprint]:
         """指定した楽曲のフィンガープリントを取得"""
@@ -690,10 +704,18 @@ class ElasticsearchBackend(DatabaseBackend):
                 index=self._videos_index, id=video.id,
                 body=doc, refresh=self.config.es_refresh_on_write, timeout="60s",
             )
-            return resp.get("result") in ("created", "updated")
+            if resp.get("result") in ("created", "updated"):
+                return True
+            raise DatabaseError(
+                "Failed to add video (unexpected Elasticsearch response)",
+                context={'video_id': video.id, 'result': resp.get('result')},
+            )
         except ElasticsearchException as e:
             self.logger.error(f"Elasticsearch video addition error: {e}")
-            return False
+            raise DatabaseError(
+                "Failed to add video", original_error=e,
+                context={'video_id': video.id},
+            ) from e
 
     def add_frame_fingerprints(
         self, video_id: str,
@@ -732,13 +754,21 @@ class ElasticsearchBackend(DatabaseBackend):
                         f"Bulk frame fingerprint index failed: "
                         f"{len(failed)} items"
                     )
-                    return False
+                    raise DatabaseError(
+                        "Failed to add frame fingerprints (bulk index failure)",
+                        context={'video_id': video_id, 'failed': len(failed)},
+                    )
             return True
+        except DatabaseError:
+            raise
         except Exception as e:
             self.logger.error(
                 f"Elasticsearch frame fingerprint save error: {e}"
             )
-            return False
+            raise DatabaseError(
+                "Failed to add frame fingerprints", original_error=e,
+                context={'video_id': video_id, 'count': len(frames)},
+            ) from e
 
     def search_frame_candidates(
         self, query_fps: List[bytes], dimensions: int,
@@ -931,7 +961,10 @@ class ElasticsearchBackend(DatabaseBackend):
             self.logger.error(
                 f"Elasticsearch video deletion error: {e}"
             )
-            return False
+            raise DatabaseError(
+                "Failed to delete video", original_error=e,
+                context={'video_id': video_id},
+            ) from e
 
     def get_video_stats(self) -> Dict[str, int]:
         """Elasticsearchの映像指紋統計を取得"""
