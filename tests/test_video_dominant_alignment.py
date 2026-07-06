@@ -67,6 +67,29 @@ class TestDominantAlignment(unittest.TestCase):
         self.assertEqual(md["regions"], [])
         self.assertEqual(md["aligned_frames"], 0)
 
+    def test_secondary_candidate_on_line_is_recovered(self):
+        """最類似候補が直線外でも、整列側の次点候補があれば取りこぼさない"""
+        # 支配整列 offset=300。半数のフレームは「別箇所の偶発一致(sim0.55)」が
+        # 最類似だが、整列側(sim0.50)を次点候補として持つ。
+        matches = []
+        for i, q in enumerate(range(0, 60, 6)):
+            aligned = (q + 300.0, 0.50)
+            if i % 2 == 0:
+                # 最類似は別箇所の偶発一致、整列側は次点
+                spurious = (900.0 + i, 0.55)
+                cands = [spurious, aligned]
+            else:
+                cands = [aligned]
+            matches.append({"query_ts": float(q), "candidates": cands})
+        md = VDB._compute_match_regions(matches, threshold=0.4,
+                                        query_duration=100.0)
+        # 全10フレームが整列側候補で支配直線に乗る
+        self.assertEqual(md["aligned_frames"], 10)
+        self.assertAlmostEqual(md["time_offset"], 300.0, delta=3.0)
+        # 偶発一致(900s台)はインライアに採用されない
+        for r in md["regions"]:
+            self.assertLess(r["db_end"], 400.0)
+
     def test_coverage_reflects_continuous_span(self):
         """被覆率は連続一致のクエリ時間スパン/クエリ長で算出する"""
         # クエリ 0〜100s のうち 0〜60s を連続一致（slope1, offset300）

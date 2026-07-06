@@ -42,6 +42,9 @@ class VideoFingerprintDatabase:
             config = DatabaseConfig(backend="sqlite", file_path=path)
 
         self.config = config
+        # 各クエリフレームで支配整列判定に渡すDB候補数の上限。似た画が反復する
+        # 映像で整列側フレームが僅差の偶発一致に負けて捨てられないよう複数保持する。
+        self._frame_match_top_k = 5
         self.backend: DatabaseBackend = create_database_backend(config)
 
         if not self.backend.connect():
@@ -305,21 +308,38 @@ class VideoFingerprintDatabase:
                 sims = q_mat @ d_mat.T  # (クエリフレーム数, DBフレーム数)
             np.nan_to_num(sims, copy=False, nan=0.0, posinf=0.0, neginf=0.0)
 
-            best_idx = np.argmax(sims, axis=1)
-            best_per_query = sims[np.arange(sims.shape[0]), best_idx]
             db_ts_arr = np.array(
                 [d_ts for _, d_ts, _ in db_frame_vecs], dtype=np.float64
             )
-            best_db_ts_arr = db_ts_arr[best_idx]
+            best_idx = np.argmax(sims, axis=1)
+            best_per_query = sims[np.arange(sims.shape[0]), best_idx]
 
-            frame_matches = [
-                {
+            # 各クエリフレームで「最類似の1件」だけを残すと、似た画が反復する
+            # 映像（OP等）で真に時間整列するDBフレームが僅差の偶発一致に負けて
+            # 捨てられ、整列が散る。上位K件の候補（閾値以上）を保持し、支配直線
+            # フィットが各クエリフレームの候補から直線に乗るものを選べるようにする。
+            top_k_db = min(self._frame_match_top_k, sims.shape[1])
+            if top_k_db > 1:
+                cand_idx = np.argpartition(-sims, top_k_db - 1, axis=1)[
+                    :, :top_k_db
+                ]
+            else:
+                cand_idx = best_idx[:, None]
+
+            frame_matches = []
+            for i, (_, q_ts, _) in enumerate(query_frame_fps):
+                cands = [
+                    (float(db_ts_arr[j]), float(sims[i, j]))
+                    for j in cand_idx[i]
+                ]
+                frame_matches.append({
                     "query_ts": q_ts,
-                    "db_ts": float(best_db_ts_arr[i]),
+                    # 表示・後方互換用の最良1件
+                    "db_ts": float(db_ts_arr[best_idx[i]]),
                     "similarity": float(best_per_query[i]),
-                }
-                for i, (_, q_ts, _) in enumerate(query_frame_fps)
-            ]
+                    # 支配整列用の上位候補
+                    "candidates": cands,
+                })
 
             max_sim = float(np.max(best_per_query))
             if max_sim >= threshold:
@@ -351,43 +371,46 @@ class VideoFingerprintDatabase:
 
     @staticmethod
     def _fit_dominant_alignment(
-        pairs: List[Tuple[float, float]],
+        per_query: List[Tuple[float, List[Tuple[float, float]]]],
         residual_tolerance: float,
         slope_range: Tuple[float, float],
         min_query_gap: float,
-    ) -> Tuple[float, float, List[int]]:
-        """支配直線 db≈slope·query+offset を頑健推定しインライア添字を返す
+    ) -> Tuple[float, float, List[Tuple[float, float, float]]]:
+        """支配直線 db≈slope·query+offset を頑健推定しインライアを返す
 
         音声側の頑健直線フィットと同型の考え方を映像フレームに適用する（Java実装
-        等の外部コードは参照せず独自実装）。ペア間の傾きをlog2空間で投票して
-        傾き候補を得て、各候補についてオフセット最頻ビン近傍のインライアを数え、
-        インライアが最大の傾きを採用する。これにより同一整列が僅かな速度差や
-        タイムスタンプ量子化でオフセットにばらついても1本の直線に統合でき、
-        別箇所の偶発一致は外れ値として除外される。
+        等の外部コードは参照せず独自実装）。各クエリフレームは複数のDB候補
+        (db_ts, similarity) を持ちうる。ペア間の傾きをlog2空間で投票して傾き候補を
+        得て、各候補についてオフセット最頻ビン近傍のインライアを数え、整列する
+        「クエリフレーム数」が最大の傾きを採用する。1クエリフレームにつき直線に乗る
+        候補のうち最も類似度が高い1件を代表として採用するため、最類似候補が別箇所の
+        偶発一致でも、整列側の次点候補があれば取りこぼさない。
 
         Args:
-            pairs: (query_ts, db_ts) の並び
+            per_query: [(query_ts, [(db_ts, similarity), ...]), ...]
             residual_tolerance: 直線からの残差をインライアとみなす許容（秒）
             slope_range: 妥当な傾き（=time_scale）の範囲
             min_query_gap: 傾き算出に使うペアの最小 query 時間差（秒）
 
         Returns:
-            (slope, offset, inlier_indices)
+            (slope, offset, inliers) inliers=[(query_ts, db_ts, similarity), ...]
         """
-        n = len(pairs)
+        n = len(per_query)
         if n == 0:
             return 1.0, 0.0, []
-        if n == 1:
-            return 1.0, pairs[0][1] - pairs[0][0], [0]
 
         lo, hi = slope_range
 
-        # ペア間傾きをlog2空間で投票し傾き候補を得る
+        # 傾き候補の投票には各クエリの最類似候補を代表点として使う
+        reps = [
+            (q, max(cands, key=lambda c: c[1])[0])
+            for q, cands in per_query
+        ]
         slopes: List[float] = []
         for i in range(n):
-            qi, di = pairs[i]
+            qi, di = reps[i]
             for j in range(i + 1, n):
-                qj, dj = pairs[j]
+                qj, dj = reps[j]
                 dq = qj - qi
                 if abs(dq) < min_query_gap:
                     continue
@@ -407,26 +430,44 @@ class VideoFingerprintDatabase:
             for v in ranked[:3]:
                 candidates.append(float(np.median(v)))
 
-        def inliers_for(slope: float) -> Tuple[float, List[int]]:
-            offs = [d - slope * q for q, d in pairs]
-            tol = residual_tolerance
-            off_votes: Dict[int, List[float]] = {}
-            for off in offs:
-                off_votes.setdefault(int(round(off / tol)), []).append(off)
-            best_bin = max(off_votes.values(), key=len)
-            offset = float(np.median(best_bin))
-            idx = [
-                k for k, off in enumerate(offs)
-                if abs(off - offset) <= tol
-            ]
-            return offset, idx
+        tol = residual_tolerance
 
-        best = (1.0, 0.0, [])
+        def evaluate(slope: float
+                     ) -> Tuple[float, List[Tuple[float, float, float]]]:
+            # 全候補のオフセットを (クエリ添字ごとに) 集計し、
+            # 整列するクエリフレーム数が最大のオフセットビンを選ぶ
+            bin_qs: Dict[int, set] = {}
+            bin_offs: Dict[int, List[float]] = {}
+            for qi, (q, cands) in enumerate(per_query):
+                for d, _s in cands:
+                    off = d - slope * q
+                    b = int(round(off / tol))
+                    bin_qs.setdefault(b, set()).add(qi)
+                    bin_offs.setdefault(b, []).append(off)
+            if not bin_qs:
+                return 0.0, []
+            best_b = max(bin_qs, key=lambda b: len(bin_qs[b]))
+            offset = float(np.median(bin_offs[best_b]))
+            # 各クエリフレームで直線±tolに乗る候補のうち最類似の1件を採用
+            inliers: List[Tuple[float, float, float]] = []
+            for q, cands in per_query:
+                on_line = [
+                    (d, s) for d, s in cands
+                    if abs((d - slope * q) - offset) <= tol
+                ]
+                if on_line:
+                    d, s = max(on_line, key=lambda c: c[1])
+                    inliers.append((q, d, s))
+            return offset, inliers
+
+        best: Tuple[float, float, List[Tuple[float, float, float]]] = (
+            1.0, 0.0, []
+        )
         for cand in candidates:
             slope = min(max(cand, lo), hi)
-            offset, idx = inliers_for(slope)
-            if len(idx) > len(best[2]):
-                best = (slope, offset, idx)
+            offset, inliers = evaluate(slope)
+            if len(inliers) > len(best[2]):
+                best = (slope, offset, inliers)
         return best
 
     @staticmethod
@@ -449,6 +490,10 @@ class VideoFingerprintDatabase:
         とみなす。連続するインライアは1区間に統合され、直線から外れる偶発一致は除外
         される。被覆率はクエリ時間軸で連続的にどれだけ覆うか（span/クエリ長）で測る。
 
+        各フレームマッチは `candidates`=[(db_ts, similarity), ...] を持ちうる（無い
+        場合は単一の (db_ts, similarity) を候補とみなす）。最類似1件だけに潰さず
+        候補を渡すことで、整列側フレームが僅差の偶発一致に負けても取りこぼさない。
+
         Args:
             frame_matches: フレーム単位のマッチ情報リスト
             threshold: 一致とみなす最低類似度
@@ -462,9 +507,18 @@ class VideoFingerprintDatabase:
         Returns:
             一致区間と統計情報
         """
-        good = [
-            m for m in frame_matches if m["similarity"] >= threshold
-        ]
+        # 各クエリフレームを (query_ts, [(db_ts, sim)>=threshold ...]) に正規化
+        per_query: List[Tuple[float, List[Tuple[float, float]]]] = []
+        for m in frame_matches:
+            cands = m.get("candidates")
+            if cands is None:
+                cands = [(m["db_ts"], m["similarity"])]
+            good_c = [
+                (float(d), float(s)) for d, s in cands if s >= threshold
+            ]
+            if good_c:
+                per_query.append((float(m["query_ts"]), good_c))
+
         total = len(frame_matches)
         empty = {
             "matched_frames": 0,
@@ -477,20 +531,20 @@ class VideoFingerprintDatabase:
             "median_similarity": 0.0,
             "regions": [],
         }
-        if len(good) < min_region_frames:
+        if len(per_query) < min_region_frames:
             return empty
 
-        pairs = [(m["query_ts"], m["db_ts"]) for m in good]
-        slope, offset, inlier_idx = VideoFingerprintDatabase._fit_dominant_alignment(
-            pairs, residual_tolerance, slope_range, min_query_gap
+        slope, offset, inlier_pts = VideoFingerprintDatabase._fit_dominant_alignment(
+            per_query, residual_tolerance, slope_range, min_query_gap
         )
-        if len(inlier_idx) < min_region_frames:
+        if len(inlier_pts) < min_region_frames:
             # 支配直線に整合するフレームが足りない＝時間的に一貫しない偶発一致
             return empty
 
-        inliers = sorted(
-            (good[k] for k in inlier_idx), key=lambda m: m["query_ts"]
-        )
+        inliers = [
+            {"query_ts": q, "db_ts": d, "similarity": s}
+            for q, d, s in sorted(inlier_pts, key=lambda t: t[0])
+        ]
 
         # 支配直線上のインライアをクエリ時間の空きで連続区間に分割する
         regions = []
