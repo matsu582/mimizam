@@ -628,6 +628,82 @@ class Mimizam:
             self.logger.error(f"映像検索エラー: {exc}")
             return []
 
+    def add_movie(
+        self,
+        file_path: str,
+        title: Optional[str] = None,
+        artist: str = "Unknown Artist",
+        movie_id: Optional[str] = None,
+        video_db_path: Optional[str] = None,
+        skip_audio: bool = False,
+        skip_visual: bool = False,
+    ) -> Dict[str, Any]:
+        """動画を音声指紋と映像指紋の両方で同一IDで登録する
+
+        search_movie() の登録側。動画から音声を抽出して add_song() で音声
+        指紋を、同じ動画で add_video() を呼んで映像指紋を、いずれも同一の
+        UUID（song_id / video_id）で登録する。これにより統合検索側は同一IDで
+        音声・映像の結果を結合できる。
+
+        Args:
+            file_path: 登録対象の動画ファイルパス
+            title: タイトル（省略時はファイル名の語幹）
+            artist: 音声登録に用いるアーティスト名
+            movie_id: 音声・映像に共通で付与するID（省略時は自動生成）
+            video_db_path: 映像DBファイルパス
+            skip_audio: 音声指紋の登録をスキップする
+            skip_visual: 映像指紋の登録をスキップする
+
+        Returns:
+            {"id": 付与ID, "title": タイトル,
+             "audio_registered": bool, "visual_registered": bool}
+        """
+        if not os.path.exists(file_path):
+            raise FileNotFoundError(
+                f"動画ファイルが見つかりません: {file_path}"
+            )
+        if skip_audio and skip_visual:
+            raise ValueError(
+                "skip_audio と skip_visual を同時に指定できません"
+            )
+
+        movie_id = movie_id or str(uuid.uuid4())
+        title = title or Path(file_path).stem
+        audio_registered = False
+        visual_registered = False
+
+        if not skip_audio:
+            temp_dir = tempfile.mkdtemp(prefix="movie_add_")
+            try:
+                audio_path = self._extract_audio_to_wav(file_path, temp_dir)
+                result_id = self.add_song(
+                    audio_path, title, artist, song_id=movie_id
+                )
+                audio_registered = bool(result_id)
+            except Exception as exc:
+                self.logger.error(f"統合登録の音声指紋エラー: {exc}")
+            finally:
+                shutil.rmtree(temp_dir, ignore_errors=True)
+
+        if not skip_visual:
+            try:
+                result_id = self.add_video(
+                    file_path=file_path,
+                    title=title,
+                    video_id=movie_id,
+                    video_db_path=video_db_path,
+                )
+                visual_registered = bool(result_id)
+            except Exception as exc:
+                self.logger.error(f"統合登録の映像指紋エラー: {exc}")
+
+        return {
+            "id": movie_id,
+            "title": title,
+            "audio_registered": audio_registered,
+            "visual_registered": visual_registered,
+        }
+
     def _extract_audio_to_wav(self, video_path: str, out_dir: str) -> str:
         """ffmpegで動画から音声を22050Hzモノラルwavとして抽出する
 

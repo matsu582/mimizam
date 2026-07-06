@@ -11,11 +11,7 @@ audio_from_video_fingerprinter.py（音声）とvisual_from_video_fingerprinter.
 import argparse
 import logging
 import os
-import shutil
-import subprocess
 import sys
-import tempfile
-import uuid
 from pathlib import Path
 from typing import List, Optional
 
@@ -94,28 +90,6 @@ def create_mimizam_instance(args) -> Mimizam:
     raise ValueError(f"未対応のデータベースタイプ: {args.db_type}")
 
 
-def extract_audio(video_path: str, temp_dir: str) -> str:
-    """ffmpegで動画から音声を抽出する"""
-    video_name = Path(video_path).stem
-    output_path = os.path.join(temp_dir, f"{video_name}.wav")
-
-    cmd = [
-        "ffmpeg",
-        "-i", video_path,
-        "-vn",
-        "-acodec", "pcm_s16le",
-        "-ar", "22050",
-        "-ac", "1",
-        "-y",
-        output_path,
-    ]
-
-    subprocess.run(
-        cmd, capture_output=True, text=True, check=True,
-    )
-    return output_path
-
-
 def find_video_files(folder_path: str) -> List[str]:
     """フォルダ内の動画ファイルを検索する"""
     folder = Path(folder_path)
@@ -155,69 +129,42 @@ def process_video_files(
     """
     logger = logging.getLogger(__name__)
     processed_count = 0
-    temp_dir = tempfile.mkdtemp(prefix="movie_fp_")
 
-    try:
-        for i, video_path in enumerate(video_files, 1):
-            title = Path(video_path).stem
-            shared_id = str(uuid.uuid4())
+    for i, video_path in enumerate(video_files, 1):
+        title = Path(video_path).stem
+        logger.info(f"[{i}/{len(video_files)}] 処理中: {title}")
+
+        # 音声＋映像を同一IDで登録（統合登録はAPI側で実施）
+        result = mimizam.add_movie(
+            file_path=video_path,
+            title=title,
+            video_db_path=video_db_path,
+            skip_audio=skip_audio,
+            skip_visual=skip_visual,
+        )
+
+        audio_ok = result["audio_registered"]
+        visual_ok = result["visual_registered"]
+        shared_id = result["id"]
+
+        if (not skip_audio) and not audio_ok:
+            logger.error("  音声指紋: 登録失敗")
+        if (not skip_visual) and not visual_ok:
+            logger.error("  映像指紋: 登録失敗")
+
+        if audio_ok or visual_ok:
+            processed_count += 1
+            modes = []
+            if audio_ok:
+                modes.append("音声")
+            if visual_ok:
+                modes.append("映像")
             logger.info(
-                f"[{i}/{len(video_files)}] 処理中: {title} "
-                f"(ID: {shared_id})"
+                f"  登録完了: {title} "
+                f"({'+'.join(modes)}, ID: {shared_id})"
             )
-
-            audio_ok = skip_audio
-            visual_ok = skip_visual
-
-            # 音声指紋の登録
-            if not skip_audio:
-                try:
-                    audio_path = extract_audio(video_path, temp_dir)
-                    result_id = mimizam.add_song(
-                        audio_path, title, "Unknown Artist",
-                        song_id=shared_id,
-                    )
-                    if result_id:
-                        logger.info(f"  音声指紋: 登録成功")
-                        audio_ok = True
-                    else:
-                        logger.error(f"  音声指紋: 登録失敗")
-                except Exception as exc:
-                    logger.error(f"  音声指紋エラー: {exc}")
-
-            # 映像指紋の登録
-            if not skip_visual:
-                try:
-                    result_id = mimizam.add_video(
-                        file_path=video_path,
-                        title=title,
-                        video_id=shared_id,
-                        video_db_path=video_db_path,
-                    )
-                    if result_id:
-                        logger.info(f"  映像指紋: 登録成功")
-                        visual_ok = True
-                    else:
-                        logger.error(f"  映像指紋: 登録失敗")
-                except Exception as exc:
-                    logger.error(f"  映像指紋エラー: {exc}")
-
-            if audio_ok or visual_ok:
-                processed_count += 1
-                modes = []
-                if audio_ok and not skip_audio:
-                    modes.append("音声")
-                if visual_ok and not skip_visual:
-                    modes.append("映像")
-                logger.info(
-                    f"  登録完了: {title} "
-                    f"({'+'.join(modes)}, ID: {shared_id})"
-                )
-            else:
-                logger.error(f"  登録失敗: {title}")
-
-    finally:
-        shutil.rmtree(temp_dir, ignore_errors=True)
+        else:
+            logger.error(f"  登録失敗: {title}")
 
     return processed_count
 
