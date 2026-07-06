@@ -204,7 +204,7 @@ def _render_bar(
         i_start = max(0, min(i_start, bar_width - 1))
         i_end = max(i_start + 1, min(i_end, bar_width))
         for i in range(i_start, i_end):
-            bar[i] = "\u2588"
+            bar[i] = "█"
 
     return "|" + "".join(bar) + "|"
 
