@@ -11,6 +11,7 @@ import matplotlib.pyplot as plt
 from scipy.signal import find_peaks
 from typing import List, Tuple, Dict, Optional
 import hashlib
+import zlib
 import sqlite3
 from dataclasses import dataclass
 import pickle
@@ -449,28 +450,43 @@ class HashGenerator:
             
         Returns:
             有効なターゲットピークのリスト
+
+        candidate_peaks は時間昇順であることを前提とする。先に件数で
+        切ると先頭が時間窓(time_delta_range)より手前に密集した場合に
+        有効なターゲットを取りこぼすため、時間窓で絞ってから
+        target_zone_size 件に制限する。
         """
+        min_delta, max_delta = self.time_delta_range
         target_peaks = []
-        
-        for peak in candidate_peaks[:self.target_zone_size]:
+
+        for peak in candidate_peaks:
             time_delta = peak.time - anchor.time
-            
-            # 時間差が許容範囲内かどうかをチェック
-            if self.time_delta_range[0] <= time_delta <= self.time_delta_range[1]:
+
+            # 時間昇順のため、上限を超えたらそれ以降も全て範囲外
+            if time_delta > max_delta:
+                break
+
+            if time_delta >= min_delta:
                 target_peaks.append(peak)
-        
+                if len(target_peaks) >= self.target_zone_size:
+                    break
+
         return target_peaks
     
-    def _create_hash(self, anchor: Peak, target: Peak) -> str:
+    def _create_hash(self, anchor: Peak, target: Peak) -> int:
         """
         広い速度変化に対する改良されたロバスト性を持つアンカー-ターゲットピークペアからハッシュを作成
-        
+
         Args:
             anchor: アンカーピーク
             target: ターゲットピーク
-            
+
         Returns:
-            ハッシュ文字列
+            32bit符号なし整数のハッシュ値
+
+        入力は f1|f2|Δt の低カーディナリティな量子化値であり、
+        64文字のsha256はDB容量・索引効率の無駄が大きいため、
+        crc32で32bit整数に収める（環境非依存で決定的）。
         """
         # より堅牢な周波数量子化 - 広い速度変化対応のため大きなビン
         f1_quantized = int(anchor.frequency // 30) * 30  # 0.5x-2x速度変化対応のため大きなビン
@@ -488,10 +504,9 @@ class HashGenerator:
         
         # 速度変化に対する改良されたロバスト性を持つハッシュを作成
         primary_hash_input = f"{f1_quantized}|{f2_quantized}|{time_delta}"
-        
-        # ハッシュを生成
-        hash_object = hashlib.sha256(primary_hash_input.encode())
-        return hash_object.hexdigest()
+
+        # 32bit整数ハッシュを生成
+        return zlib.crc32(primary_hash_input.encode()) & 0xFFFFFFFF
     
     def _filter_peaks_by_density(self, peaks: List[Peak], debug: bool = False) -> List[Peak]:
         """
@@ -657,16 +672,23 @@ class AudioFingerprinter:
             min_amplitude = adjusted_params['min_amplitude']
             peak_neighborhood_size = adjusted_params['peak_neighborhood_size']
             
-            # HashGeneratorのパラメータも更新
-            self.hash_generator.target_zone_size = adjusted_params['target_zone_size']
-            self.hash_generator.max_peaks_per_second = adjusted_params['max_peaks_per_second']
-            self.hash_generator.min_peak_separation = adjusted_params['min_peak_separation']
+            # 共有インスタンスを書き換えず、この呼び出し専用のHashGeneratorを作成
+            # （同一インスタンスを複数スレッドで使っても競合しないようにするため）
+            hash_generator = HashGenerator(
+                target_zone_size=adjusted_params['target_zone_size'],
+                time_delta_range=self.hash_generator.time_delta_range,
+                max_peaks_per_second=adjusted_params['max_peaks_per_second'],
+                min_peak_separation=adjusted_params['min_peak_separation'],
+            )
         else:
             min_amplitude = self.min_amplitude
             peak_neighborhood_size = self.peak_neighborhood_size
+            hash_generator = self.hash_generator
         
 
-        fingerprints = self._process_audio_sequential(audio, min_amplitude, peak_neighborhood_size, debug)
+        fingerprints = self._process_audio_sequential(
+            audio, min_amplitude, peak_neighborhood_size, hash_generator, debug
+        )
         
         # パフォーマンス監視
         processing_time = time.time() - start_time
@@ -681,7 +703,9 @@ class AudioFingerprinter:
         return fingerprints
     
     def _process_audio_sequential(self, audio: np.ndarray, min_amplitude: float,
-                                peak_neighborhood_size: int, debug: bool) -> List[Fingerprint]:
+                                peak_neighborhood_size: int,
+                                hash_generator: 'HashGenerator',
+                                debug: bool) -> List[Fingerprint]:
         """音声を順次処理"""
         logger = logging.getLogger(__name__)
         
@@ -705,7 +729,7 @@ class AudioFingerprinter:
             self.performance_monitor.record_peak_count(len(peaks))
         
         # ハッシュを生成
-        fingerprints = self.hash_generator.generate_hashes(peaks, debug)
+        fingerprints = hash_generator.generate_hashes(peaks, debug)
         return fingerprints
     
 

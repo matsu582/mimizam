@@ -3,6 +3,7 @@ MySQLコンテナを使用したインテグレーションテスト
 """
 
 import unittest
+import zlib
 import time
 import sys
 import os
@@ -114,9 +115,9 @@ class TestMySQLContainers(TestAudioMixin, unittest.TestCase):
                 
                 # フィンガープリント追加
                 test_fingerprints = [
-                    Fingerprint(hash_value="mysql_hash1", time_offset=0.1),
-                    Fingerprint(hash_value="mysql_hash2", time_offset=0.2),
-                    Fingerprint(hash_value="mysql_hash3", time_offset=0.3),
+                    Fingerprint(hash_value=301, time_offset=0.1),
+                    Fingerprint(hash_value=302, time_offset=0.2),
+                    Fingerprint(hash_value=303, time_offset=0.3),
                 ]
                 
                 success = db.add_fingerprints(test_song.id, test_fingerprints)
@@ -124,8 +125,8 @@ class TestMySQLContainers(TestAudioMixin, unittest.TestCase):
                 
                 # フィンガープリント検索
                 query_fingerprints = [
-                    Fingerprint(hash_value="mysql_hash1", time_offset=0.05),
-                    Fingerprint(hash_value="mysql_hash2", time_offset=0.15),
+                    Fingerprint(hash_value=301, time_offset=0.05),
+                    Fingerprint(hash_value=302, time_offset=0.15),
                 ]
                 
                 matches = db.search_fingerprints(query_fingerprints)
@@ -223,7 +224,7 @@ class TestMySQLContainers(TestAudioMixin, unittest.TestCase):
                 start_time = time.time()
                 for song in test_songs:
                     fingerprints = [
-                        Fingerprint(hash_value=f"mysql_perf_hash_{song.id}_{j}", time_offset=j*0.1)
+                        Fingerprint(hash_value=zlib.crc32(f"mysql_perf_hash_{song.id}_{j}".encode()) & 0xFFFFFFFF, time_offset=j*0.1)
                         for j in range(10)  # 楽曲あたり10個
                     ]
                     db.add_fingerprints(song.id, fingerprints)
@@ -232,7 +233,7 @@ class TestMySQLContainers(TestAudioMixin, unittest.TestCase):
                 # 検索性能
                 start_time = time.time()
                 query_fingerprints = [
-                    Fingerprint(hash_value=f"mysql_perf_hash_{test_songs[0].id}_0", time_offset=0.05)
+                    Fingerprint(hash_value=zlib.crc32(f"mysql_perf_hash_{test_songs[0].id}_0".encode()) & 0xFFFFFFFF, time_offset=0.05)
                 ]
                 matches = db.search_fingerprints(query_fingerprints)
                 search_time = time.time() - start_time
@@ -285,11 +286,11 @@ class TestMySQLContainers(TestAudioMixin, unittest.TestCase):
             )
             
             test_fingerprints = [
-                Fingerprint(hash_value="backend_hash1", time_offset=0.1),
-                Fingerprint(hash_value="backend_hash2", time_offset=0.2),
-                Fingerprint(hash_value="backend_hash3", time_offset=0.3),
-                Fingerprint(hash_value="backend_hash4", time_offset=0.4),
-                Fingerprint(hash_value="backend_hash5", time_offset=0.5),
+                Fingerprint(hash_value=311, time_offset=0.1),
+                Fingerprint(hash_value=312, time_offset=0.2),
+                Fingerprint(hash_value=313, time_offset=0.3),
+                Fingerprint(hash_value=314, time_offset=0.4),
+                Fingerprint(hash_value=315, time_offset=0.5),
             ]
             
             try:
@@ -309,8 +310,8 @@ class TestMySQLContainers(TestAudioMixin, unittest.TestCase):
                 
                 # フィンガープリント検索テスト
                 query_fingerprints = [
-                    Fingerprint(hash_value="backend_hash1", time_offset=0.05),
-                    Fingerprint(hash_value="backend_hash2", time_offset=0.15),
+                    Fingerprint(hash_value=311, time_offset=0.05),
+                    Fingerprint(hash_value=312, time_offset=0.15),
                 ]
                 
                 matches = db.search_fingerprints(query_fingerprints)
@@ -363,7 +364,7 @@ class TestMySQLContainers(TestAudioMixin, unittest.TestCase):
                 fingerprints = []
                 for i in range(100):
                     fingerprints.append(
-                        Fingerprint(hash_value=f"large_mysql_hash_{i}", time_offset=i * 0.1)
+                        Fingerprint(hash_value=10000 + i, time_offset=i * 0.1)
                     )
                 
                 success = db.add_fingerprints("large_mysql_song_0", fingerprints)

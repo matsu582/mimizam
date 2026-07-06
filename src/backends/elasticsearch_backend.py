@@ -175,7 +175,7 @@ class ElasticsearchBackend(DatabaseBackend):
                             "doc_values": True
                         },
                         "hash_value": {
-                            "type": "keyword",
+                            "type": "long",
                             "index": True
                         },
                         "time_offset": {

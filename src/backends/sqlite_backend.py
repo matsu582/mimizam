@@ -86,7 +86,7 @@ class SQLiteBackend(DatabaseBackend):
                 CREATE TABLE IF NOT EXISTS fingerprints (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     song_id TEXT NOT NULL,
-                    hash_value TEXT NOT NULL,
+                    hash_value INTEGER NOT NULL,
                     time_offset REAL NOT NULL,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     FOREIGN KEY (song_id) REFERENCES songs (id)

@@ -113,7 +113,7 @@ class PostgreSQLBackend(DatabaseBackend):
                 CREATE TABLE IF NOT EXISTS fingerprints (
                     id BIGSERIAL PRIMARY KEY,
                     song_id VARCHAR(255) NOT NULL,
-                    hash_value VARCHAR(64) NOT NULL,
+                    hash_value BIGINT NOT NULL,
                     time_offset DOUBLE PRECISION NOT NULL,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     FOREIGN KEY (song_id) REFERENCES songs (id) ON DELETE CASCADE

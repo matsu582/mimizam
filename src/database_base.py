@@ -13,7 +13,7 @@ from dataclasses import dataclass
 @dataclass
 class Fingerprint:
     """音声フィンガープリントハッシュを表現"""
-    hash_value: str
+    hash_value: int
     time_offset: float
     song_id: Optional[str] = None
 
