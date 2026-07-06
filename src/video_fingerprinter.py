@@ -231,7 +231,6 @@ class FrameSelector:
             return []
 
         fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
-        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         interval_frames = max(1, int(self.config.sample_interval * fps))
 
         # 評価間隔: scene_eval_fps でフレームを評価（精度と速度のバランス）
@@ -940,42 +939,6 @@ class VideoFingerprinter:
             f"{dims}次元)"
         )
         return fp
-
-    def compute_similarity(
-        self,
-        fp_a: VideoFingerprint,
-        fp_b: VideoFingerprint,
-        use_frame_matching: bool = True,
-    ) -> float:
-        """
-        2つの映像指紋の類似度を計算
-
-        フレーム単位指紋どうしを総当りし、各クエリフレームの最高一致
-        スコアの最大値を採用する（部分一致に強い）。
-
-        Args:
-            fp_a: 映像指紋A
-            fp_b: 映像指紋B
-            use_frame_matching: 互換用フラグ（現在は常にフレーム照合）
-
-        Returns:
-            類似度スコア（-1.0〜1.0）
-        """
-        if not fp_a.frame_fingerprints or not fp_b.frame_fingerprints:
-            return 0.0
-
-        # 各クエリフレーム×DBフレームの類似度を行列積で一括計算
-        q_mat = np.stack(
-            [q_fp.astype(np.float32) for _, _, q_fp in fp_a.frame_fingerprints]
-        )
-        d_mat = np.stack(
-            [d_fp.astype(np.float32) for _, _, d_fp in fp_b.frame_fingerprints]
-        )
-        with np.errstate(all="ignore"):
-            sims = q_mat @ d_mat.T
-        np.nan_to_num(sims, copy=False, nan=0.0, posinf=0.0, neginf=0.0)
-
-        return float(np.max(sims.max(axis=1)))
 
     def rebuild_from_descriptors(
         self,

@@ -9,7 +9,6 @@ import librosa
 from pydub import AudioSegment
 import matplotlib.pyplot as plt
 from scipy.signal import find_peaks
-from skimage.feature import peak_local_max
 from typing import List, Tuple, Dict, Optional
 import hashlib
 import sqlite3
@@ -204,107 +203,36 @@ class SpectrogramAnalyzer:
         
         return mask, min_amplitude
 
-    # 局所最大値検出のオリジナル（未使用）
-    def _original_find_local_maxima(self, magnitude: np.ndarray, mask: np.ndarray, 
-                          frequencies: np.ndarray, times: np.ndarray,
-                          peak_neighborhood_size: int, debug: bool) -> List[Peak]:
-        """スペクトログラム内の局所最大値を検出"""
-        logger = logging.getLogger(__name__)
-        
-        peaks = []
-        search_range_t = range(peak_neighborhood_size, magnitude.shape[1] - peak_neighborhood_size)
-        search_range_f = range(peak_neighborhood_size, magnitude.shape[0] - peak_neighborhood_size)
-        
-        candidates_found = 0
-        
-        for t_idx in search_range_t:
-            for f_idx in search_range_f:
-                if not mask[f_idx, t_idx]:
-                    continue
-                
-                candidates_found += 1
-                
-                # この点が局所最大値かどうかをチェック
-                neighborhood = magnitude[
-                    f_idx - peak_neighborhood_size:f_idx + peak_neighborhood_size + 1,
-                    t_idx - peak_neighborhood_size:t_idx + peak_neighborhood_size + 1
-                ]
-                
-                if magnitude[f_idx, t_idx] == np.max(neighborhood):
-                    peak = Peak(
-                        time=np.float64(times[t_idx]),
-                        frequency=np.float64(frequencies[f_idx]),
-                        amplitude=np.float64(magnitude[f_idx, t_idx])
-                    )
-                    peaks.append(peak)
-        
-        if debug:
-            logger.info(f"Candidate points: {candidates_found}")
-            logger.info(f"Detected peaks: {len(peaks)}")
-            if len(peaks) > 0:
-                amplitudes = [p.amplitude for p in peaks]
-                logger.info(f"Peak amplitude range: {np.min(amplitudes):.2f} to {np.max(amplitudes):.2f} dB")
-        
-        return peaks
-
     def _find_local_maxima(self, magnitude: np.ndarray, mask: np.ndarray,
                           frequencies: np.ndarray, times: np.ndarray,
                           peak_neighborhood_size: int, debug: bool) -> List[Peak]:
         """
         スペクトログラム内の局所最大値を検出
-        
-        Numba最適化対応
+
+        Numbaの有無に関わらず同一の検出関数（_numba_optimized_peak_detection）
+        を用いる。Numba未導入時はnjitがno-opとなり同じ関数が純Pythonで実行
+        されるため、生成される指紋は環境に依存せず一致する（DB整合性を保証）。
         """
         logger = logging.getLogger(__name__)
-        
-        if self.enable_numba_optimization:
-            # 修正されたNumba版を使用（元の処理ロジックと完全一致）
-            peak_f_indices, peak_t_indices = _numba_optimized_peak_detection(
-                magnitude, mask, peak_neighborhood_size
+
+        peak_f_indices, peak_t_indices = _numba_optimized_peak_detection(
+            magnitude, mask, peak_neighborhood_size
+        )
+
+        peaks = [
+            Peak(
+                time=np.float64(times[t_idx]),
+                frequency=np.float64(frequencies[f_idx]),
+                amplitude=np.float64(magnitude[f_idx, t_idx])
             )
-            
-            # Peak オブジェクト生成（元の実装と同じ）
-            peaks = [
-                Peak(
-                    time=np.float64(times[t_idx]), 
-                    frequency=np.float64(frequencies[f_idx]), 
-                    amplitude=np.float64(magnitude[f_idx, t_idx])
-                )
-                for f_idx, t_idx in zip(peak_f_indices, peak_t_indices)
-            ]
-            
-            if debug:
-                logger.info("use Numba:")
-                logger.info(f"Detected peaks: {len(peaks)}")
-                if len(peaks) > 0:
-                    amplitudes = [p.amplitude for p in peaks]
-                    logger.info(f"Peak amplitude range: {np.min(amplitudes):.2f} to {np.max(amplitudes):.2f} dB")
-        else:
-            # peak_local_max版
-            coords = peak_local_max(
-                magnitude,
-                min_distance=peak_neighborhood_size,
-                threshold_abs=None  # マスクで閾値制御
-            )
-            # マスク適用
-            coords = coords[mask[coords[:, 0], coords[:, 1]]]
-            candidates_found = coords.shape[0]
-            # 有効範囲外の座標を削除
-            valid = []
-            f_start, f_end = peak_neighborhood_size, magnitude.shape[0] - peak_neighborhood_size
-            t_start, t_end = peak_neighborhood_size, magnitude.shape[1] - peak_neighborhood_size
-            for f_idx, t_idx in coords:
-                if f_start <= f_idx < f_end and t_start <= t_idx < t_end:
-                    valid.append((f_idx, t_idx))
-            # Peakオブジェクトを作成
-            peaks = [Peak(time=np.float64(times[t]), frequency=np.float64(frequencies[f]), amplitude=np.float64(magnitude[f, t]))
-                     for f, t in valid]
-            if debug:
-                logger.info(f"Candidate points: {candidates_found}")
-                logger.info(f"Detected peaks: {len(peaks)}")
-                if len(peaks) > 0:
-                    amplitudes = [p.amplitude for p in peaks]
-                    logger.info(f"Peak amplitude range: {np.min(amplitudes):.2f} to {np.max(amplitudes):.2f} dB")
+            for f_idx, t_idx in zip(peak_f_indices, peak_t_indices)
+        ]
+
+        if debug:
+            logger.info(f"Detected peaks: {len(peaks)}")
+            if len(peaks) > 0:
+                amplitudes = [p.amplitude for p in peaks]
+                logger.info(f"Peak amplitude range: {np.min(amplitudes):.2f} to {np.max(amplitudes):.2f} dB")
         return peaks
     
     def detect_peaks(self, 
@@ -473,65 +401,6 @@ class HashGenerator:
         
         return fingerprints
 
-    def _generate_hashes_from_peaks_numpy(self, sorted_peaks: List[Peak], debug: bool, logger) -> List[Fingerprint]:
-        """
-            NumPyベクトル化によるハッシュ生成
-                -ベンチの結果速度改善に優位がなかった為、採用しないけどとりあえず残しておく
-        """
-        fingerprints = []
-        seen_hashes = set()
-        anchor_count = 0
-        pairs_checked = 0
-        valid_time_deltas = []
-
-        # NumPy配列化
-        times = np.array([p.time for p in sorted_peaks])
-        freqs = np.array([p.frequency for p in sorted_peaks])
-        amps = np.array([p.amplitude for p in sorted_peaks])
-        N = len(sorted_peaks)
-
-        for i in range(N):
-            anchor_time = times[i]
-            anchor_freq = freqs[i]
-            anchor_amp = amps[i]
-            # ターゲット候補のインデックス
-            idx_start = i + 1
-            idx_end = min(i + 1 + self.target_zone_size, N)
-            if idx_start >= N:
-                continue
-            candidate_idx = np.arange(idx_start, idx_end)
-            time_deltas = times[candidate_idx] - anchor_time
-            valid_mask = (self.time_delta_range[0] <= time_deltas) & (time_deltas <= self.time_delta_range[1])
-            valid_idx = candidate_idx[valid_mask]
-            if len(valid_idx) > 0:
-                anchor_count += 1
-            for j in valid_idx:
-                target_time = times[j]
-                target_freq = freqs[j]
-                time_delta = target_time - anchor_time
-                valid_time_deltas.append(time_delta)
-                # ハッシュ生成（元のロジックと同じ）
-                f1_quantized = int(anchor_freq // 30) * 30
-                f2_quantized = int(target_freq // 30) * 30
-                if time_delta > 0:
-                    time_delta_q = int(time_delta * 20) * 5
-                else:
-                    time_delta_q = 0
-                primary_hash_input = f"{f1_quantized}|{f2_quantized}|{time_delta_q}"
-                hash_object = hashlib.sha256(primary_hash_input.encode())
-                hash_value = hash_object.hexdigest()
-                if hash_value not in seen_hashes:
-                    seen_hashes.add(hash_value)
-                    fingerprint = Fingerprint(
-                        hash_value=hash_value,
-                        time_offset=anchor_time
-                    )
-                    fingerprints.append(fingerprint)
-                pairs_checked += 1
-        if debug:
-            self._log_generation_summary(pairs_checked, anchor_count, N, valid_time_deltas, len(fingerprints), logger)
-        return fingerprints
-    
     def _debug_anchor_info(self, i: int, anchor_peak: Peak, sorted_peaks: List[Peak], logger) -> None:
         """アンカー情報をデバッグ出力"""
         candidates = sorted_peaks[i+1:i+1+self.target_zone_size]
