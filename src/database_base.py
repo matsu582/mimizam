@@ -84,6 +84,11 @@ class DatabaseConfig:
     es_songs_replicas: int = 0
     es_fingerprints_shards: int = 3
     es_fingerprints_replicas: int = 0
+    # 書き込み時にインデックスをrefreshし、追加データを即座に検索可能にする。
+    # これにより検索時の毎回refresh（本番レイテンシ悪化）を不要にする。
+    es_refresh_on_write: bool = True
+    # 検索時にrefreshを打つか。書き込み時refreshに任せる場合はFalse推奨。
+    es_refresh_on_search: bool = False
     
     # 接続プール設定
     pool_size: int = 5

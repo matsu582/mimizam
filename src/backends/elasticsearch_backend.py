@@ -253,7 +253,7 @@ class ElasticsearchBackend(DatabaseBackend):
                 index=self.songs_index,
                 id=song.id,
                 body=song_doc,
-                refresh=False,  # リフレッシュを無効化してパフォーマンス向上
+                refresh=self.config.es_refresh_on_write,
                 timeout='60s'  # タイムアウト延長
             )
             
@@ -302,7 +302,7 @@ class ElasticsearchBackend(DatabaseBackend):
                     self.client, 
                     actions,
                     chunk_size=5000,
-                    refresh=False  # 非同期リフレッシュでパフォーマンス向上
+                    refresh=self.config.es_refresh_on_write,
                 )
                 
                 if failed:
@@ -322,11 +322,13 @@ class ElasticsearchBackend(DatabaseBackend):
             return matches
 
         try:
-            # 検索前にインデックスを明示的にリフレッシュ（最新データを確実に反映）
-            try:
-                self.client.indices.refresh(index=self.fingerprints_index)
-            except ElasticsearchException:
-                pass  # リフレッシュエラーは無視
+            # 書き込み時refreshで追加データは即座に検索可能なため、検索時refreshは既定で行わない。
+            # 本番レイテンシ改善のため es_refresh_on_search=True のときのみ明示refreshする。
+            if self.config.es_refresh_on_search:
+                try:
+                    self.client.indices.refresh(index=self.fingerprints_index)
+                except ElasticsearchException:
+                    pass  # リフレッシュエラーは無視
             
             # ハッシュ値のリストを作成
             # 同一ハッシュの多重度を保持するため hash -> query_time群 で集約
@@ -432,10 +434,11 @@ class ElasticsearchBackend(DatabaseBackend):
         if not unique_ids:
             return song_map
         try:
-            try:
-                self.client.indices.refresh(index=self.songs_index)
-            except ElasticsearchException:
-                pass  # リフレッシュエラーは無視
+            if self.config.es_refresh_on_search:
+                try:
+                    self.client.indices.refresh(index=self.songs_index)
+                except ElasticsearchException:
+                    pass  # リフレッシュエラーは無視
 
             result = self.client.mget(index=self.songs_index, ids=unique_ids)
             for doc in result.get('docs', []):
@@ -693,7 +696,7 @@ class ElasticsearchBackend(DatabaseBackend):
             }
             resp = self.client.index(
                 index=self._videos_index, id=video.id,
-                body=doc, refresh=False, timeout="60s",
+                body=doc, refresh=self.config.es_refresh_on_write, timeout="60s",
             )
             return resp.get("result") in ("created", "updated")
         except ElasticsearchException as e:
@@ -731,7 +734,7 @@ class ElasticsearchBackend(DatabaseBackend):
                 })
             if actions:
                 _, failed = bulk(self.client, actions, chunk_size=5000,
-                                 refresh=False)
+                                 refresh=self.config.es_refresh_on_write)
                 if failed:
                     self.logger.error(
                         f"Bulk frame fingerprint index failed: "

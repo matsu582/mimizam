@@ -17,6 +17,8 @@ from typing import List, Optional, Dict, Any, Tuple
 from pathlib import Path
 import json
 
+import numpy as np
+
 from .audio_fingerprinter import AudioFingerprinter
 from .fingerprint_database import FingerprintDatabase, FingerprintMatcher
 from .database_base import DatabaseConfig, Song, Fingerprint, Video
@@ -119,47 +121,11 @@ class Mimizam:
             self.logger.debug("Generating audio fingerprints...")
             fingerprints = self.fingerprinter.fingerprint_file(file_path)
             
-            if not fingerprints:
-                # 指紋が1件も生成できないのは「登録対象なし」ではなく処理失敗。
-                # 呼び出し側が原因を判別できるよう例外で通知する。
-                raise AudioProcessingError(
-                    "No fingerprints could be generated from audio",
-                    context={'file_path': file_path},
-                )
-            
-            self.logger.info(f"Generated {len(fingerprints)} fingerprints")
-            
-            # 楽曲メタデータを作成
-            meta_dict = None
-            if meta_json:
-                try:
-                    meta_dict = json.loads(meta_json)
-                except Exception as e:
-                    self.logger.warning(f"Failed to parse meta_json: {e}")
-            song = Song(
-                id=song_id,
-                title=title,
-                artist=artist,
-                file_path=file_path,
-                meta=meta_dict if meta_dict else None
+            return self._register_fingerprints(
+                fingerprints, title, artist,
+                stored_path=file_path, song_id=song_id, meta_json=meta_json,
+                source=file_path,
             )
-            
-            # データベースに楽曲を追加
-            if not self.database.add_song(song):
-                raise DatabaseError(
-                    "Failed to persist song", context={'song_id': song_id},
-                )
-            
-            # フィンガープリントをデータベースに追加
-            if not self.database.add_fingerprints(song_id, fingerprints):
-                # 楽曲も削除
-                self.database.delete_song(song_id)
-                raise DatabaseError(
-                    "Failed to persist fingerprints", context={'song_id': song_id},
-                )
-            
-            self.logger.info(f"Song successfully added: {song_id} - {title} by {artist}")
-            return song_id
             
         except (FileNotFoundError, MimizamError):
             # ファイル不在・既知のドメイン例外はそのまま送出（原因を握り潰さない）
@@ -171,6 +137,52 @@ class Mimizam:
                 "Unexpected error while adding song", original_error=e,
                 context={'file_path': file_path},
             ) from e
+
+    def _register_fingerprints(self, fingerprints: List[Fingerprint],
+                               title: str, artist: str, stored_path: str,
+                               song_id: Optional[str] = None,
+                               meta_json: Optional[str] = None,
+                               source: Optional[str] = None) -> str:
+        """生成済みフィンガープリントを楽曲として永続化する共通処理
+
+        add_song（ファイル経由）と add_movie（ffmpegパイプ経由）で共有し、
+        指紋生成後の検証・メタ整形・DB保存の重複を避ける。
+        """
+        if song_id is None:
+            song_id = str(uuid.uuid4())
+        if not fingerprints:
+            raise AudioProcessingError(
+                "No fingerprints could be generated from audio",
+                context={'source': source or stored_path},
+            )
+        self.logger.info(f"Generated {len(fingerprints)} fingerprints")
+
+        meta_dict = None
+        if meta_json:
+            try:
+                meta_dict = json.loads(meta_json)
+            except Exception as e:
+                self.logger.warning(f"Failed to parse meta_json: {e}")
+        song = Song(
+            id=song_id,
+            title=title,
+            artist=artist,
+            file_path=stored_path,
+            meta=meta_dict if meta_dict else None,
+        )
+
+        if not self.database.add_song(song):
+            raise DatabaseError(
+                "Failed to persist song", context={'song_id': song_id},
+            )
+        if not self.database.add_fingerprints(song_id, fingerprints):
+            self.database.delete_song(song_id)
+            raise DatabaseError(
+                "Failed to persist fingerprints", context={'song_id': song_id},
+            )
+
+        self.logger.info(f"Song successfully added: {song_id} - {title} by {artist}")
+        return song_id
     
     def search_song(self, query_file_path: str, 
                     min_confidence: float = 0.1,
@@ -208,45 +220,9 @@ class Mimizam:
             self.logger.debug("Generating fingerprints for query audio...")
             query_fingerprints = self.fingerprinter.fingerprint_file(query_file_path)
             
-            if not query_fingerprints:
-                # クエリから指紋を1件も生成できないのは「一致なし」ではなく音声処理失敗。
-                # 空リスト（=一致なし）に潰さず例外で通知し、両者を区別できるようにする。
-                raise AudioProcessingError(
-                    "No fingerprints could be generated from query audio",
-                    context={'query_file_path': query_file_path},
-                )
-            
-            self.logger.info(f"Generated {len(query_fingerprints)} query fingerprints")
-            
-            # マッチャーの設定を更新
-            self.matcher.min_confidence = min_confidence
-            self.matcher.max_results = top_k
-            
-            # データベースで検索
-            self.logger.debug("Searching in database...")
-            matches = self.matcher.find_matches(
-                query_fingerprints,
-                min_matches=3,  # 最小マッチ数
-                top_k=top_k,
-                include_details=True
+            return self._search_fingerprints(
+                query_fingerprints, min_confidence, top_k, source=query_file_path,
             )
-            
-            # 結果を整形
-            # find_matches が付与した Song オブジェクトを再利用し、再取得（N+1）を避ける
-            results = []
-            for match in matches:
-                song = match.get('song')
-                if song:
-                    result = {
-                        'song': song,
-                        'confidence': match.get('confidence', 0.0),
-                        'match_count': match.get('match_count', 0),
-                        'details': match
-                    }
-                    results.append(result)
-            
-            self.logger.info(f"Retrieved {len(results)} search results")
-            return results
             
         except (FileNotFoundError, MimizamError):
             # 「一致なし」は空リストで返し、処理失敗は例外として区別する
@@ -257,7 +233,47 @@ class Mimizam:
                 "Unexpected error during audio search", original_error=e,
                 context={'query_file_path': query_file_path},
             ) from e
-    
+
+    def _search_fingerprints(self, query_fingerprints: List[Fingerprint],
+                             min_confidence: float, top_k: int,
+                             source: Optional[str] = None) -> List[Dict[str, Any]]:
+        """生成済みクエリ指紋でDB検索する共通処理
+
+        search_song（ファイル経由）と search_movie（ffmpegパイプ経由）で共有する。
+        指紋が空なら「一致なし」に潰さず処理失敗として例外を送出する。
+        """
+        if not query_fingerprints:
+            raise AudioProcessingError(
+                "No fingerprints could be generated from query audio",
+                context={'source': source},
+            )
+        self.logger.info(f"Generated {len(query_fingerprints)} query fingerprints")
+
+        self.matcher.min_confidence = min_confidence
+        self.matcher.max_results = top_k
+
+        matches = self.matcher.find_matches(
+            query_fingerprints,
+            min_matches=3,
+            top_k=top_k,
+            include_details=True,
+        )
+
+        # find_matches が付与した Song オブジェクトを再利用し、再取得（N+1）を避ける
+        results = []
+        for match in matches:
+            song = match.get('song')
+            if song:
+                results.append({
+                    'song': song,
+                    'confidence': match.get('confidence', 0.0),
+                    'match_count': match.get('match_count', 0),
+                    'details': match,
+                })
+
+        self.logger.info(f"Retrieved {len(results)} search results")
+        return results
+
     def identify_audio(self, query_file_path: str, 
                       min_confidence: float = 0.3) -> Optional[Tuple[Song, float]]:
         """
@@ -720,17 +736,18 @@ class Mimizam:
         visual_registered = False
 
         if not skip_audio:
-            temp_dir = tempfile.mkdtemp(prefix="movie_add_")
             try:
-                audio_path = self._extract_audio_to_wav(file_path, temp_dir)
-                result_id = self.add_song(
-                    audio_path, title, artist, song_id=movie_id
+                # ffmpegパイプでPCMを直接読み、一時WAVのI/Oを回避する。
+                # 保存する file_path は元の動画パス（旧実装は削除される一時WAVを保存していた）。
+                audio = self._decode_audio_from_media(file_path)
+                fingerprints = self.fingerprinter.fingerprint_audio(audio)
+                result_id = self._register_fingerprints(
+                    fingerprints, title, artist,
+                    stored_path=file_path, song_id=movie_id, source=file_path,
                 )
                 audio_registered = bool(result_id)
             except Exception as exc:
                 self.logger.error(f"Audio fingerprinting error during movie registration: {exc}")
-            finally:
-                shutil.rmtree(temp_dir, ignore_errors=True)
 
         if not skip_visual:
             try:
@@ -751,23 +768,23 @@ class Mimizam:
             "visual_registered": visual_registered,
         }
 
-    def _extract_audio_to_wav(self, video_path: str, out_dir: str) -> str:
-        """ffmpegで動画から音声を22050Hzモノラルwavとして抽出する
+    def _decode_audio_from_media(self, media_path: str) -> np.ndarray:
+        """ffmpegで動画/音声からPCMを取り出し、numpy配列として返す
 
-        映像検索と組み合わせる統合検索で音声トラックを得るために使う。
-        登録時（movie_fingerprinter）と同じ抽出条件に揃える。
+        一時WAVファイルを書き出さず ffmpeg の標準出力（パイプ）からPCMを直接読み、
+        繰り返し運用時のディスクI/Oを削減する。サンプルレートはフィンガープリンタの
+        設定（sr）に合わせ、16bitモノラルPCMを [-1, 1) の float32 へ正規化する。
         """
-        out_path = os.path.join(
-            out_dir, f"{Path(video_path).stem}.wav"
-        )
+        sr = int(getattr(self.fingerprinter, 'sr', 22050))
         cmd = [
-            "ffmpeg", "-i", video_path,
-            "-vn", "-acodec", "pcm_s16le",
-            "-ar", "22050", "-ac", "1",
-            "-y", out_path,
+            "ffmpeg", "-nostdin", "-i", media_path,
+            "-vn", "-f", "s16le", "-acodec", "pcm_s16le",
+            "-ar", str(sr), "-ac", "1",
+            "pipe:1",
         ]
-        subprocess.run(cmd, capture_output=True, text=True, check=True)
-        return out_path
+        proc = subprocess.run(cmd, capture_output=True, check=True)
+        pcm = np.frombuffer(proc.stdout, dtype=np.int16)
+        return (pcm.astype(np.float32) / 32768.0)
 
     @staticmethod
     def _movie_position_diverges(
@@ -922,13 +939,13 @@ class Mimizam:
         visual_results: List[Dict[str, Any]] = []
 
         if not skip_audio:
-            temp_dir = tempfile.mkdtemp(prefix="movie_search_")
             try:
-                audio_path = self._extract_audio_to_wav(
-                    query_file_path, temp_dir
-                )
-                raw_matches = self.search_song(
-                    audio_path, min_confidence=0.0, top_k=top_k * 4
+                # ffmpegパイプでPCMを直接読み、一時WAVのI/Oを回避する
+                audio = self._decode_audio_from_media(query_file_path)
+                query_fingerprints = self.fingerprinter.fingerprint_audio(audio)
+                raw_matches = self._search_fingerprints(
+                    query_fingerprints, min_confidence=0.0, top_k=top_k * 4,
+                    source=query_file_path,
                 )
                 for match in raw_matches:
                     details = match.get("details", {})
@@ -943,8 +960,6 @@ class Mimizam:
                     })
             except Exception as exc:
                 self.logger.warning(f"Audio search error during movie search: {exc}")
-            finally:
-                shutil.rmtree(temp_dir, ignore_errors=True)
 
         if not skip_visual:
             try:
