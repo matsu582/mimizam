@@ -71,10 +71,10 @@ class PostgreSQLBackend(DatabaseBackend):
             try:
                 cursor.execute("CREATE EXTENSION IF NOT EXISTS vector")
                 self._pgvector_available = True
-                self.logger.info("pgvector拡張を有効化しました")
+                self.logger.info("Enabled pgvector extension")
             except PostgresError as e:
                 self.logger.info(
-                    f"pgvector未検出（音声のみ利用可、映像指紋には必須）: {e}"
+                    f"pgvector not found (audio only; required for video fingerprints): {e}"
                 )
             
             cursor.close()
@@ -373,7 +373,7 @@ class PostgreSQLBackend(DatabaseBackend):
             cursor.close()
             return True
         except Exception as e:
-            self.logger.warning(f"pgvectorフレーム列追加エラー: {e}")
+            self.logger.warning(f"pgvector frame column addition error: {e}")
             return False
 
     @staticmethod
@@ -397,7 +397,7 @@ class PostgreSQLBackend(DatabaseBackend):
         if not self._pgvector_available or not \
                 self._ensure_pgvector_frame_column(dimensions):
             raise QueryError(
-                "pgvector拡張が必要です（映像指紋にはpgvectorが必須）"
+                "pgvector extension is required (pgvector is mandatory for video fingerprints)"
             )
         try:
             cursor = self.connection.cursor()
@@ -431,7 +431,7 @@ class PostgreSQLBackend(DatabaseBackend):
         except QueryError:
             raise
         except Exception as e:
-            self.logger.error(f"pgvectorフレーム検索エラー: {e}")
+            self.logger.error(f"pgvector frame search error: {e}")
             return agg
 
     def _create_video_tables(self) -> bool:
@@ -512,7 +512,7 @@ class PostgreSQLBackend(DatabaseBackend):
             if not self._pgvector_available or not \
                     self._ensure_pgvector_frame_column(dims):
                 raise QueryError(
-                    "pgvector拡張が必要です（映像指紋にはpgvectorが必須）"
+                    "pgvector extension is required (pgvector is mandatory for video fingerprints)"
                 )
             rows = [
                 (video_id, fidx, float(ts), fp_blob,

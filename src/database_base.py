@@ -168,14 +168,14 @@ class DatabaseBackend(ABC):
 
     def add_video(self, video: 'Video') -> bool:
         """映像メタデータを追加"""
-        raise NotImplementedError("このバックエンドは映像指紋に未対応です")
+        raise NotImplementedError("This backend does not support video fingerprinting")
 
     def add_frame_fingerprints(
         self, video_id: str,
         frames: List[Tuple[int, float, bytes]]
     ) -> bool:
         """フレーム単位指紋を一括保存（各要素は(frame_index, timestamp, fp_bytes)）"""
-        raise NotImplementedError("このバックエンドは映像指紋に未対応です")
+        raise NotImplementedError("This backend does not support video fingerprinting")
 
     def search_frame_candidates(
         self, query_fps: List[bytes], dimensions: int,
@@ -185,13 +185,13 @@ class DatabaseBackend(ABC):
 
         戻り値: {video_id: {"votes": 得票数, "score_sum": 類似度合計}}
         """
-        raise NotImplementedError("このバックエンドは映像指紋に未対応です")
+        raise NotImplementedError("This backend does not support video fingerprinting")
 
     def get_frame_fingerprints(
         self, video_id: str
     ) -> List[Tuple[int, float, bytes]]:
         """指定映像のフレーム指紋を取得"""
-        raise NotImplementedError("このバックエンドは映像指紋に未対応です")
+        raise NotImplementedError("This backend does not support video fingerprinting")
 
     def get_frame_fingerprints_batch(
         self, video_ids: List[str]
@@ -208,38 +208,38 @@ class DatabaseBackend(ABC):
 
     def get_video(self, video_id: str) -> Optional['Video']:
         """映像情報を取得"""
-        raise NotImplementedError("このバックエンドは映像指紋に未対応です")
+        raise NotImplementedError("This backend does not support video fingerprinting")
 
     def list_videos(self) -> List['Video']:
         """全映像をリスト取得"""
-        raise NotImplementedError("このバックエンドは映像指紋に未対応です")
+        raise NotImplementedError("This backend does not support video fingerprinting")
 
     def delete_video(self, video_id: str) -> bool:
         """映像と関連指紋を削除"""
-        raise NotImplementedError("このバックエンドは映像指紋に未対応です")
+        raise NotImplementedError("This backend does not support video fingerprinting")
 
     def add_frame_descriptors(
         self, video_id: str,
         frames: List[Tuple[int, float, bytes, int]],
     ) -> bool:
         """フレーム単位AKAZE記述子を保存（再生成用）"""
-        raise NotImplementedError("このバックエンドは映像指紋に未対応です")
+        raise NotImplementedError("This backend does not support video fingerprinting")
 
     def get_frame_descriptors(
         self, video_id: str,
     ) -> List[Tuple[int, float, bytes, int]]:
         """指定映像のフレーム記述子を取得"""
-        raise NotImplementedError("このバックエンドは映像指紋に未対応です")
+        raise NotImplementedError("This backend does not support video fingerprinting")
 
     def get_all_frame_descriptors(
         self,
     ) -> Dict[str, List[Tuple[int, float, bytes, int]]]:
         """全映像のフレーム記述子を取得"""
-        raise NotImplementedError("このバックエンドは映像指紋に未対応です")
+        raise NotImplementedError("This backend does not support video fingerprinting")
 
     def get_video_stats(self) -> Dict[str, int]:
         """映像指紋の統計を取得"""
-        raise NotImplementedError("このバックエンドは映像指紋に未対応です")
+        raise NotImplementedError("This backend does not support video fingerprinting")
 
 
 # エクスポートするシンボルを定義

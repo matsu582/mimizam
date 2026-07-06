@@ -38,8 +38,8 @@ def _create_akaze():
     if xfeatures2d is not None and hasattr(xfeatures2d, 'AKAZE_create'):
         return xfeatures2d.AKAZE_create()
     raise RuntimeError(
-        "AKAZEが利用できません。"
-        "opencv-contrib-python をインストールしてください"
+        "AKAZE is not available. "
+        "Install opencv-contrib-python"
     )
 
 
@@ -193,7 +193,7 @@ class FrameSelector:
         """
         cap = cv2.VideoCapture(video_path)
         if not cap.isOpened():
-            logger.error(f"映像を開けません: {video_path}")
+            logger.error(f"Failed to open video: {video_path}")
             return []
 
         fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
@@ -299,18 +299,18 @@ class FrameSelector:
 
         cap.release()
         logger.info(
-            f"フレーム選定: {scene_count}シーン, "
-            f"{len(accepted)}フレーム採用 "
-            f"({evaluated}フレーム評価)"
+            f"Frame selection: {scene_count} scenes, "
+            f"{len(accepted)} frames accepted "
+            f"({evaluated} frames evaluated)"
         )
         if prof_on:
             logger.info(
-                "フレーム選定 内訳[秒]: "
-                f"decode(全復号)={prof['decode']:.1f} "
-                f"resize(縮小)={prof['resize']:.1f} "
+                "Frame selection breakdown[s]: "
+                f"decode(all)={prof['decode']:.1f} "
+                f"resize={prof['resize']:.1f} "
                 f"scene(ContentDetector)={prof['scene']:.1f} "
-                f"dedup(ヒスト判定×{n_dedup})={prof['dedup']:.1f} "
-                f"accept(採用時ヒスト×{len(accepted)})={prof['accept']:.1f}"
+                f"dedup(hist×{n_dedup})={prof['dedup']:.1f} "
+                f"accept(hist×{len(accepted)})={prof['accept']:.1f}"
             )
         return accepted
 
@@ -461,8 +461,8 @@ class VLADEncoder:
         n_samples = all_desc.shape[0]
 
         logger.info(
-            f"コードブック学習: {n_samples}記述子, "
-            f"{self._descriptor_dim}次元"
+            f"Codebook training: {n_samples} descriptors, "
+            f"{self._descriptor_dim} dimensions"
         )
 
         # K-Meansコードブック構築（Collapse対策付き）
@@ -474,7 +474,7 @@ class VLADEncoder:
         self._codebook_centers = codebook.cluster_centers_.copy()
 
         vlad_dim = k * self._descriptor_dim
-        logger.info(f"VLAD次元: {vlad_dim}")
+        logger.info(f"VLAD dimensions: {vlad_dim}")
 
         # フレーム/画像ごとのVLADベクトルを生成してPCA学習
         vlad_samples = []
@@ -497,9 +497,9 @@ class VLADEncoder:
 
         variance = np.sum(pca.explained_variance_ratio_) * 100
         logger.info(
-            f"PCA: {vlad_dim}→{target_dim}次元 "
-            f"({len(vlad_samples)}サンプル, "
-            f"分散保持率: {variance:.1f}%)"
+            f"PCA: {vlad_dim}→{target_dim} dimensions "
+            f"({len(vlad_samples)} samples, "
+            f"variance retained: {variance:.1f}%)"
         )
 
     def _train_codebook(
@@ -541,17 +541,17 @@ class VLADEncoder:
 
             if empty_count == 0 and max_ratio < 0.5:
                 logger.info(
-                    f"codebook学習完了: "
-                    f"割り当て min={counts.min()} "
+                    f"Codebook training complete: "
+                    f"assignments min={counts.min()} "
                     f"max={counts.max()} "
-                    f"(最大比率{max_ratio:.1%})"
+                    f"(max ratio {max_ratio:.1%})"
                 )
                 return codebook
 
             logger.warning(
-                f"codebook偏り検出 (試行{attempt + 1}): "
-                f"空クラスタ={empty_count}, "
-                f"最大比率={max_ratio:.1%}"
+                f"Codebook imbalance detected (attempt {attempt + 1}): "
+                f"empty clusters={empty_count}, "
+                f"max ratio={max_ratio:.1%}"
             )
 
             if empty_count > 0:
@@ -563,13 +563,13 @@ class VLADEncoder:
                 empty_after = int(np.sum(counts == 0))
                 if empty_after == 0:
                     logger.info(
-                        f"空クラスタ修復完了: "
-                        f"割り当て min={counts.min()} "
+                        f"Empty cluster repair complete: "
+                        f"assignments min={counts.min()} "
                         f"max={counts.max()}"
                     )
                     return codebook
 
-        logger.warning("codebook修復の試行回数超過。最後の結果を使用")
+        logger.warning("Exceeded codebook repair retry limit; using last result")
         return codebook
 
     @staticmethod
@@ -648,7 +648,7 @@ class VLADEncoder:
             L2正規化済み指紋ベクトル（128次元）。生成不可の場合None
         """
         if not self.is_trained:
-            raise RuntimeError("モデルが未学習です。先にtrain()を呼んでください")
+            raise RuntimeError("Model is not trained. Call train() first")
 
         vlad_vec = self._compute_vlad_vector(descriptors)
         compressed = self._pca_transform(vlad_vec)
@@ -671,7 +671,7 @@ class VLADEncoder:
             VideoFingerprint: フレーム単位指紋の集合
         """
         if not self.is_trained:
-            raise RuntimeError("モデルが未学習です。先にtrain()を呼んでください")
+            raise RuntimeError("Model is not trained. Call train() first")
 
         frame_fingerprints = []
         total_desc = 0
@@ -698,8 +698,8 @@ class VLADEncoder:
 
         if prof_on:
             logger.info(
-                f"指紋集約 内訳[秒]: vlad(量子化+残差×{len(per_frame_desc)})"
-                f"={t_vlad:.1f} pca(圧縮×{len(per_frame_desc)})={t_pca:.1f}"
+                f"Fingerprint aggregation breakdown[s]: vlad(quantize+residual×{len(per_frame_desc)})"
+                f"={t_vlad:.1f} pca(compress×{len(per_frame_desc)})={t_pca:.1f}"
             )
 
         return VideoFingerprint(
@@ -761,7 +761,7 @@ class VLADEncoder:
                 pca_mean=self._pca_mean,
                 meta_json=np.array(json.dumps(meta)),
             )
-        logger.info(f"モデル保存: {path}")
+        logger.info(f"Model saved: {path}")
 
     def load_model(self, path: str) -> None:
         """保存済みモデルをファイルから読み込み（npz形式のみ対応）
@@ -776,8 +776,8 @@ class VLADEncoder:
         # npz(zip)はマジックバイト "PK\x03\x04" で始まる
         if head[:2] != b"PK":
             raise ValueError(
-                "npz形式ではないモデルファイルです。セキュリティ上pickle"
-                "形式は読み込みません。npz形式へ再保存してください。"
+                "Model file is not in npz format. For security reasons "
+                "pickle format is not loaded. Re-save it in npz format."
             )
         with open(path, "rb") as f:
             data = np.load(f, allow_pickle=False)
@@ -788,7 +788,7 @@ class VLADEncoder:
         self._descriptor_dim = meta["descriptor_dim"]
         if "config_dict" in meta:
             self.config = VideoFingerprintConfig(**meta["config_dict"])
-        logger.info(f"モデル読み込み: {path}")
+        logger.info(f"Model loaded: {path}")
 
     @staticmethod
     def _l2_normalize(vec: np.ndarray) -> np.ndarray:
@@ -842,7 +842,7 @@ class VideoFingerprinter:
 
         for vpath in video_paths:
             if not os.path.exists(vpath):
-                logger.warning(f"映像が見つかりません: {vpath}")
+                logger.warning(f"Video not found: {vpath}")
                 continue
 
             frames = self.frame_selector.select_keyframes(vpath)
@@ -855,11 +855,11 @@ class VideoFingerprinter:
             stats["descriptors"] += n_desc
             logger.info(
                 f"  {os.path.basename(vpath)}: "
-                f"{len(frames)}フレーム, {n_desc}記述子"
+                f"{len(frames)} frames, {n_desc} descriptors"
             )
 
         if not all_descriptors:
-            raise ValueError("記述子が抽出できませんでした")
+            raise ValueError("Failed to extract descriptors")
 
         self.encoder.train(all_descriptors)
         return stats
@@ -878,17 +878,17 @@ class VideoFingerprinter:
         """
         if not self.is_trained:
             raise RuntimeError(
-                "モデルが未学習です。"
-                "先にtrain_from_videos()を呼んでください"
+                "Model is not trained. "
+                "Call train_from_videos() first"
             )
 
         if not os.path.exists(video_path):
-            logger.error(f"映像が見つかりません: {video_path}")
+            logger.error(f"Video not found: {video_path}")
             return None
 
         frames = self.frame_selector.select_keyframes(video_path)
         if not frames:
-            logger.warning(f"フレームを選定できませんでした: {video_path}")
+            logger.warning(f"Failed to select frames: {video_path}")
             return None
 
         prof_on = self.config.profile_frames
@@ -896,11 +896,11 @@ class VideoFingerprinter:
         _, per_frame = self.encoder.extract_descriptors(frames)
         if prof_on:
             logger.info(
-                f"指紋集約 内訳[秒]: akaze(記述子抽出×{len(frames)}"
-                f"フレーム)={time.perf_counter() - _t:.1f}"
+                f"Fingerprint aggregation breakdown[s]: akaze(descriptor extraction×{len(frames)}"
+                f" frames)={time.perf_counter() - _t:.1f}"
             )
         if not per_frame:
-            logger.warning(f"記述子を抽出できませんでした: {video_path}")
+            logger.warning(f"Failed to extract descriptors: {video_path}")
             return None
 
         fp = self.encoder.encode_video(per_frame)
@@ -911,10 +911,10 @@ class VideoFingerprinter:
             if fp.frame_fingerprints else 0
         )
         logger.info(
-            f"映像指紋生成: {os.path.basename(video_path)} "
-            f"({fp.frame_count}フレーム, "
-            f"{fp.descriptor_count}記述子, "
-            f"{dims}次元)"
+            f"Video fingerprint generated: {os.path.basename(video_path)} "
+            f"({fp.frame_count} frames, "
+            f"{fp.descriptor_count} descriptors, "
+            f"{dims} dimensions)"
         )
         return fp
 
@@ -936,8 +936,8 @@ class VideoFingerprinter:
         """
         if not self.is_trained:
             raise RuntimeError(
-                "モデルが未学習です。"
-                "先にload_model()を呼んでください"
+                "Model is not trained. "
+                "Call load_model() first"
             )
         if not per_frame_desc:
             return None
@@ -970,12 +970,12 @@ class VideoFingerprinter:
 
         if not self.is_trained:
             raise RuntimeError(
-                "モデルが未学習です。"
-                "先にload_model()を呼んでください"
+                "Model is not trained. "
+                "Call load_model() first"
             )
 
         if not os.path.exists(video_path):
-            logger.error(f"映像が見つかりません: {video_path}")
+            logger.error(f"Video not found: {video_path}")
             return []
 
         # PiP矩形を検出
@@ -1047,11 +1047,11 @@ class VideoFingerprinter:
             results.append((region, fp))
 
             logger.info(
-                f"PiP矩形指紋生成: "
+                f"PiP rectangle fingerprint generated: "
                 f"({region.x},{region.y}) {region.w}x{region.h} "
                 f"pip_score={region.pip_score:.2f} "
-                f"({fp.frame_count}フレーム, "
-                f"{fp.descriptor_count}記述子)"
+                f"({fp.frame_count} frames, "
+                f"{fp.descriptor_count} descriptors)"
             )
 
         cap.release()

@@ -112,8 +112,8 @@ def detect_pip_regions(
 
     if result:
         logger.info(
-            f"PiP矩形検出: {len(result)}件 "
-            f"(候補{len(candidates)}件中)"
+            f"PiP rectangle detection: {len(result)} found "
+            f"(out of {len(candidates)} candidates)"
         )
 
     return result[:5]

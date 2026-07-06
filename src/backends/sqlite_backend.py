@@ -50,7 +50,7 @@ class SQLiteBackend(DatabaseBackend):
             self.connection.enable_load_extension(True)
             sqlite_vec.load(self.connection)
             self.connection.enable_load_extension(False)
-            self.logger.info("sqlite-vec拡張を読み込みました")
+            self.logger.info("Loaded sqlite-vec extension")
             
             self.logger.info(f"Connected to SQLite database with optimization settings: {self.db_path}")
             return True
@@ -332,7 +332,7 @@ class SQLiteBackend(DatabaseBackend):
             self._vec_frame_dim = dimensions
             return True
         except Exception as e:
-            self.logger.warning(f"vec0フレームテーブル作成エラー: {e}")
+            self.logger.warning(f"vec0 frame table creation error: {e}")
             return False
 
     def _index_frames_vec(
@@ -362,7 +362,7 @@ class SQLiteBackend(DatabaseBackend):
             )
             self.connection.commit()
         except Exception as e:
-            self.logger.warning(f"vec0フレーム索引投入エラー: {e}")
+            self.logger.warning(f"vec0 frame index insertion error: {e}")
 
     def search_frame_candidates(
         self, query_fps: List[bytes], dimensions: int,
@@ -403,7 +403,7 @@ class SQLiteBackend(DatabaseBackend):
                     slot["score_sum"] += sim
             return agg
         except Exception as e:
-            self.logger.error(f"vec0フレーム検索エラー: {e}")
+            self.logger.error(f"vec0 frame search error: {e}")
             return agg
 
     def _create_video_tables(self) -> bool:

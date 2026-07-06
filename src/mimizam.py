@@ -442,7 +442,7 @@ class Mimizam:
         try:
             if not os.path.exists(file_path):
                 raise FileNotFoundError(
-                    f"映像ファイルが見つかりません: {file_path}"
+                    f"Video file not found: {file_path}"
                 )
 
             if video_id is None:
@@ -454,14 +454,14 @@ class Mimizam:
             # モデル未学習の場合はこの映像で学習
             if not vfp.is_trained:
                 self.logger.info(
-                    "モデル未学習: この映像で学習を実行"
+                    "Model not trained: training on this video"
                 )
                 vfp.train_from_videos([file_path])
 
             fp = vfp.fingerprint_video(file_path)
             if fp is None:
                 self.logger.error(
-                    f"映像指紋生成失敗: {file_path}"
+                    f"Failed to generate video fingerprint: {file_path}"
                 )
                 return None
 
@@ -490,14 +490,14 @@ class Mimizam:
                 vdb.add_frame_descriptors(video_id, fp.raw_descriptors)
 
             self.logger.info(
-                f"映像追加成功: {video_id} - {title}"
+                f"Video successfully added: {video_id} - {title}"
             )
             return video_id
 
         except FileNotFoundError:
             raise
         except Exception as exc:
-            self.logger.error(f"映像追加エラー: {exc}")
+            self.logger.error(f"Error occurred while adding video: {exc}")
             return None
 
     @staticmethod
@@ -555,7 +555,7 @@ class Mimizam:
         try:
             if not os.path.exists(query_file_path):
                 raise FileNotFoundError(
-                    f"映像ファイルが見つかりません: {query_file_path}"
+                    f"Video file not found: {query_file_path}"
                 )
 
             vfp = self._get_video_fingerprinter()
@@ -563,8 +563,8 @@ class Mimizam:
 
             if not vfp.is_trained:
                 self.logger.warning(
-                    "モデルが未学習です。"
-                    "先にadd_video()で映像を登録してください"
+                    "Model is not trained. "
+                    "Register a video with add_video() first"
                 )
                 return []
 
@@ -635,7 +635,7 @@ class Mimizam:
         except FileNotFoundError:
             raise
         except Exception as exc:
-            self.logger.error(f"映像検索エラー: {exc}")
+            self.logger.error(f"Error occurred during video search: {exc}")
             return []
 
     def add_movie(
@@ -670,11 +670,11 @@ class Mimizam:
         """
         if not os.path.exists(file_path):
             raise FileNotFoundError(
-                f"動画ファイルが見つかりません: {file_path}"
+                f"Movie file not found: {file_path}"
             )
         if skip_audio and skip_visual:
             raise ValueError(
-                "skip_audio と skip_visual を同時に指定できません"
+                "skip_audio and skip_visual cannot both be set"
             )
 
         movie_id = movie_id or str(uuid.uuid4())
@@ -691,7 +691,7 @@ class Mimizam:
                 )
                 audio_registered = bool(result_id)
             except Exception as exc:
-                self.logger.error(f"統合登録の音声指紋エラー: {exc}")
+                self.logger.error(f"Audio fingerprinting error during movie registration: {exc}")
             finally:
                 shutil.rmtree(temp_dir, ignore_errors=True)
 
@@ -705,7 +705,7 @@ class Mimizam:
                 )
                 visual_registered = bool(result_id)
             except Exception as exc:
-                self.logger.error(f"統合登録の映像指紋エラー: {exc}")
+                self.logger.error(f"Video fingerprinting error during movie registration: {exc}")
 
         return {
             "id": movie_id,
@@ -880,7 +880,7 @@ class Mimizam:
         """
         if not os.path.exists(query_file_path):
             raise FileNotFoundError(
-                f"動画ファイルが見つかりません: {query_file_path}"
+                f"Movie file not found: {query_file_path}"
             )
 
         audio_results: List[Dict[str, Any]] = []
@@ -907,7 +907,7 @@ class Mimizam:
                         "detailed_info": details.get("detailed_info"),
                     })
             except Exception as exc:
-                self.logger.warning(f"統合検索の音声検索エラー: {exc}")
+                self.logger.warning(f"Audio search error during movie search: {exc}")
             finally:
                 shutil.rmtree(temp_dir, ignore_errors=True)
 
@@ -921,7 +921,7 @@ class Mimizam:
                     video_db_path=video_db_path,
                 )
             except Exception as exc:
-                self.logger.warning(f"統合検索の映像検索エラー: {exc}")
+                self.logger.warning(f"Video search error during movie search: {exc}")
 
         merged = self._merge_movie_results(
             audio_results, visual_results, divergence_tolerance
@@ -958,7 +958,7 @@ class Mimizam:
 
             return pip_results
         except Exception as exc:
-            self.logger.warning(f"PiP検索エラー: {exc}")
+            self.logger.warning(f"PiP search error: {exc}")
             return []
 
     @staticmethod
@@ -1042,8 +1042,8 @@ class Mimizam:
 
         if not vfp.is_trained:
             raise RuntimeError(
-                "モデルが未学習です。"
-                "先にload_video_model()を呼んでください"
+                "Model is not trained. "
+                "Call load_video_model() first"
             )
 
         all_desc = vdb.get_all_frame_descriptors()
@@ -1053,10 +1053,11 @@ class Mimizam:
         # 有効化して登録し直す必要があることを明確なエラーで知らせる。
         if not any(descs for descs in all_desc.values()):
             raise RuntimeError(
-                "再生成用の生記述子がDBに保存されていません。"
-                "指紋再生成には登録時の記述子保持が必要です。"
-                "configure_video(store_raw_descriptors=True) を指定して"
-                "登録し直してください。"
+                "No raw descriptors are stored in the database for "
+                "rebuilding. Fingerprint rebuilding requires descriptor "
+                "retention at registration time. Set "
+                "configure_video(store_raw_descriptors=True) and register "
+                "again."
             )
 
         stats = {"total": len(all_desc), "success": 0, "skip": 0}
@@ -1065,7 +1066,7 @@ class Mimizam:
             if not frame_descs:
                 stats["skip"] += 1
                 self.logger.warning(
-                    f"記述子なし（スキップ）: {vid_id}"
+                    f"No descriptors (skipped): {vid_id}"
                 )
                 continue
 
@@ -1079,13 +1080,13 @@ class Mimizam:
             )
             stats["success"] += 1
             self.logger.info(
-                f"指紋再生成: {vid_id} "
-                f"({fp.frame_count}フレーム)"
+                f"Fingerprint rebuilt: {vid_id} "
+                f"({fp.frame_count} frames)"
             )
 
         self.logger.info(
-            f"指紋再生成完了: "
-            f"{stats['success']}/{stats['total']}件成功"
+            f"Fingerprint rebuild complete: "
+            f"{stats['success']}/{stats['total']} succeeded"
         )
         return stats
 

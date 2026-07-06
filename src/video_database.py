@@ -45,11 +45,11 @@ class VideoFingerprintDatabase:
 
         if not self.backend.connect():
             raise RuntimeError(
-                f"映像指紋DB接続に失敗: {config.backend}"
+                f"Failed to connect to video fingerprint DB: {config.backend}"
             )
 
         if not self.backend.create_tables():
-            raise RuntimeError("映像指紋DBテーブル作成に失敗")
+            raise RuntimeError("Failed to create video fingerprint DB tables")
 
     def __del__(self):
         """デストラクタ"""
@@ -84,7 +84,7 @@ class VideoFingerprintDatabase:
         """
         success = self.backend.add_video(video)
         if success:
-            self.logger.info(f"映像追加: {video.title} (ID: {video.id})")
+            self.logger.info(f"Video added: {video.title} (ID: {video.id})")
         return success
 
     def get_video(self, video_id: str) -> Optional[Video]:
@@ -99,7 +99,7 @@ class VideoFingerprintDatabase:
         """映像と関連指紋を削除"""
         success = self.backend.delete_video(video_id)
         if success:
-            self.logger.info(f"映像削除: {video_id}")
+            self.logger.info(f"Video deleted: {video_id}")
         return success
 
     # ===== 映像指紋 =====
