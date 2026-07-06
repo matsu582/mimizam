@@ -70,7 +70,13 @@ with create_mimizam_sqlite("my_media.db") as mimizam:
     # Configure video fingerprinting at runtime (as a class feature, not env vars)
     mimizam.configure_video(scene_eval_fps=4.0, profile_frames=False)
 
-    # Register a video (the first video also trains the codebook/PCA model)
+    # Load the pre-trained codebook/PCA model (recommended)
+    mimizam.load_video_model("model/codebook_model.pki")
+
+    # Register a video
+    # (If no model is loaded, the first added video trains the model on itself,
+    #  but a codebook learned from a single video is low quality. Loading the
+    #  pre-trained model above is strongly recommended.)
     video_id = mimizam.add_video("path/to/video.mp4", "My Video")
 
     # Search by video (per-frame ANN voting -> precise matching, with PiP detection)

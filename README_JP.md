@@ -70,7 +70,13 @@ with create_mimizam_sqlite("my_media.db") as mimizam:
     # 映像指紋の実行時設定（環境変数ではなくクラス機能として設定）
     mimizam.configure_video(scene_eval_fps=4.0, profile_frames=False)
 
-    # 映像を登録（初回はこの映像でコードブック/PCAモデルを学習）
+    # 学習済みコードブック/PCAモデルを読み込み（推奨）
+    mimizam.load_video_model("model/codebook_model.pki")
+
+    # 映像を登録
+    # （モデル未読込の場合は初回登録映像でモデルを自作するが、
+    #   単一映像から学習したコードブックは品質が低い。上記の
+    #   学習済みモデル読み込みを強く推奨。）
     video_id = mimizam.add_video("path/to/video.mp4", "My Video")
 
     # 映像で検索（フレーム単位ANN投票→精密照合、PiP矩形検出付き）
