@@ -979,44 +979,56 @@ class FingerprintMatcher:
         
         return len(match_pairs) / time_span
 
+    def detailed_match_info(self,
+                            match_pairs: List[Tuple[float, float]]) -> Dict[str, Any]:
+        """マッチペアから詳細なマッチ情報を取得する（match_pairs主導の公開API）
+
+        find_matches / search_fingerprints で既に取得済みの
+        (query_time, db_time) ペアを直接受け取り、DB再検索を行わずに詳細情報を
+        構築する。これが詳細取得の主経路であり、query_fingerprints から
+        DB再検索する get_detailed_match_info は補助（後方互換）に位置付ける。
+
+        Args:
+            match_pairs: (query_time, db_time) ペアのリスト
+
+        Returns:
+            詳細なマッチ情報を含む辞書
+        """
+        return self._build_detailed_match_info(match_pairs or [])
+
     def get_detailed_match_info(self, query_fingerprints: List[Fingerprint], 
                                song_id: str,
                                match_pairs: Optional[List[Tuple[float, float]]] = None) -> Dict[str, Any]:
         """
-        特定の楽曲の詳細なマッチ情報を取得
-        
+        特定の楽曲の詳細なマッチ情報を取得（後方互換API）
+
+        match_pairs 主導の :meth:`detailed_match_info` を推奨する。本メソッドは
+        match_pairs が未指定のとき query_fingerprints から DB を再検索する補助経路で、
+        その再検索経路は非推奨（将来的に削除予定）。
+
         Args:
-            query_fingerprints: クエリフィンガープリントのリスト
+            query_fingerprints: クエリフィンガープリントのリスト（再検索経路でのみ使用）
             song_id: 詳細を取得する楽曲識別子
             match_pairs: 取得済みの (query_time, db_time) ペア。指定された場合は
-                DB再検索を行わずこれを使う（find_matches 経路のN+1回避と同様に、
-                呼び出し側が既にペアを持っているときの再検索を避けるため）。
+                DB再検索を行わずこれを使う（推奨経路）。
             
         Returns:
             詳細なマッチ情報を含む辞書
         """
-        # 取得済みペアがあれば再検索せずそのまま使う
+        # 取得済みペアがあれば再検索せずそのまま使う（推奨経路）
         if match_pairs is not None:
-            return self._build_detailed_match_info(match_pairs)
+            return self.detailed_match_info(match_pairs)
 
-        # この楽曲のすべての一致を取得
+        # 補助（後方互換）: query_fingerprints から DB を再検索する。非推奨。
+        import warnings
+        warnings.warn(
+            "get_detailed_match_info() の query_fingerprints からの再検索経路は非推奨です。"
+            "取得済みの match_pairs を detailed_match_info(match_pairs) に渡してください。",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         all_matches = self.database.search_fingerprints(query_fingerprints)
-        
-        if song_id not in all_matches:
-            return {
-                'match_positions': [],
-                'statistics': {
-                    'total_matches': 0,
-                    'aligned_matches': 0,
-                    'alignment_ratio': 0.0,
-                    'best_offset': 0.0,
-                    'query_time_range': (0.0, 0.0),
-                    'db_time_range': (0.0, 0.0)
-                }
-            }
-        
-        match_pairs = all_matches[song_id]
-        return self._build_detailed_match_info(match_pairs)
+        return self.detailed_match_info(all_matches.get(song_id, []))
 
     def _build_detailed_match_info(self, match_pairs: List[Tuple[float, float]]) -> Dict[str, Any]:
         """マッチペアから詳細なマッチ情報を構築する
