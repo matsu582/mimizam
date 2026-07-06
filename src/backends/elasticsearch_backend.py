@@ -253,7 +253,7 @@ class ElasticsearchBackend(DatabaseBackend):
                 index=self.songs_index,
                 id=song.id,
                 body=song_doc,
-                refresh=False,  # リフレッシュを無効化してパフォーマンス向上
+                refresh=self.config.es_refresh_on_write,
                 timeout='60s'  # タイムアウト延長
             )
             
@@ -302,7 +302,7 @@ class ElasticsearchBackend(DatabaseBackend):
                     self.client, 
                     actions,
                     chunk_size=5000,
-                    refresh=False  # 非同期リフレッシュでパフォーマンス向上
+                    refresh=self.config.es_refresh_on_write,
                 )
                 
                 if failed:
@@ -314,6 +314,21 @@ class ElasticsearchBackend(DatabaseBackend):
             self.logger.error(f"Elasticsearch fingerprint addition error: {e} | Context: {{'song_id': song_id, 'count': len(fingerprints)}}")
             return False
 
+    def _maybe_refresh_for_search(self, *indices: str) -> None:
+        """検索時refreshが有効な場合のみ、指定インデックスをrefreshする
+
+        書き込み時refresh(es_refresh_on_write)で追加データは即座に検索可能なため、
+        検索・読み取り経路のrefreshは既定で行わない（本番レイテンシ改善）。
+        音声・映像いずれのESホットパスもこのヘルパで方針を統一する。
+        """
+        if not self.config.es_refresh_on_search:
+            return
+        for index in indices:
+            try:
+                self.client.indices.refresh(index=index)
+            except ElasticsearchException:
+                pass  # リフレッシュエラーは無視
+
     def search_fingerprints(self, query_fingerprints: List[Fingerprint]) -> Dict[str, List[Tuple[float, float]]]:
         """Elasticsearchでフィンガープリントを検索"""
         matches = {}
@@ -322,11 +337,7 @@ class ElasticsearchBackend(DatabaseBackend):
             return matches
 
         try:
-            # 検索前にインデックスを明示的にリフレッシュ（最新データを確実に反映）
-            try:
-                self.client.indices.refresh(index=self.fingerprints_index)
-            except ElasticsearchException:
-                pass  # リフレッシュエラーは無視
+            self._maybe_refresh_for_search(self.fingerprints_index)
             
             # ハッシュ値のリストを作成
             # 同一ハッシュの多重度を保持するため hash -> query_time群 で集約
@@ -402,11 +413,7 @@ class ElasticsearchBackend(DatabaseBackend):
     def get_song(self, song_id: str) -> Optional[Song]:
         """Elasticsearchから楽曲情報を取得"""
         try:
-            # 検索前にインデックスを明示的にリフレッシュ（最新データを確実に反映）
-            try:
-                self.client.indices.refresh(index=self.songs_index)
-            except ElasticsearchException:
-                pass  # リフレッシュエラーは無視
+            self._maybe_refresh_for_search(self.songs_index)
             
             result = self.client.get(index=self.songs_index, id=song_id)
             source = result['_source']
@@ -432,10 +439,7 @@ class ElasticsearchBackend(DatabaseBackend):
         if not unique_ids:
             return song_map
         try:
-            try:
-                self.client.indices.refresh(index=self.songs_index)
-            except ElasticsearchException:
-                pass  # リフレッシュエラーは無視
+            self._maybe_refresh_for_search(self.songs_index)
 
             result = self.client.mget(index=self.songs_index, ids=unique_ids)
             for doc in result.get('docs', []):
@@ -459,11 +463,7 @@ class ElasticsearchBackend(DatabaseBackend):
         """Elasticsearchから全楽曲をリスト表示"""
         songs = []
         try:
-            # 検索前にインデックスを明示的にリフレッシュ（最新データを確実に反映）
-            try:
-                self.client.indices.refresh(index=self.songs_index)
-            except ElasticsearchException:
-                pass  # リフレッシュエラーは無視
+            self._maybe_refresh_for_search(self.songs_index)
             
             result = self.client.search(
                 index=self.songs_index,
@@ -496,12 +496,7 @@ class ElasticsearchBackend(DatabaseBackend):
         stats = {"songs": 0, "fingerprints": 0}
         
         try:
-            # インデックスを明示的にリフレッシュ（最新データを確実に反映）
-            try:
-                self.client.indices.refresh(index=self.songs_index)
-                self.client.indices.refresh(index=self.fingerprints_index)
-            except ElasticsearchException:
-                pass  # リフレッシュエラーは無視
+            self._maybe_refresh_for_search(self.songs_index, self.fingerprints_index)
             
             # 楽曲数を取得
             songs_count = self.client.count(index=self.songs_index)
@@ -693,7 +688,7 @@ class ElasticsearchBackend(DatabaseBackend):
             }
             resp = self.client.index(
                 index=self._videos_index, id=video.id,
-                body=doc, refresh=False, timeout="60s",
+                body=doc, refresh=self.config.es_refresh_on_write, timeout="60s",
             )
             return resp.get("result") in ("created", "updated")
         except ElasticsearchException as e:
@@ -731,7 +726,7 @@ class ElasticsearchBackend(DatabaseBackend):
                 })
             if actions:
                 _, failed = bulk(self.client, actions, chunk_size=5000,
-                                 refresh=False)
+                                 refresh=self.config.es_refresh_on_write)
                 if failed:
                     self.logger.error(
                         f"Bulk frame fingerprint index failed: "
@@ -762,10 +757,7 @@ class ElasticsearchBackend(DatabaseBackend):
             return agg
         try:
             self._ensure_video_indices()
-            try:
-                self.client.indices.refresh(index=self._frame_fp_index)
-            except ElasticsearchException:
-                pass
+            self._maybe_refresh_for_search(self._frame_fp_index)
 
             num_candidates = max(k_per_query * 5, 100)
             body: List[Dict[str, Any]] = []
@@ -811,10 +803,7 @@ class ElasticsearchBackend(DatabaseBackend):
         results: list = []
         try:
             self._ensure_video_indices()
-            try:
-                self.client.indices.refresh(index=self._frame_fp_index)
-            except ElasticsearchException:
-                pass
+            self._maybe_refresh_for_search(self._frame_fp_index)
 
             resp = self.client.search(
                 index=self._frame_fp_index,
@@ -851,10 +840,7 @@ class ElasticsearchBackend(DatabaseBackend):
             return result
         try:
             self._ensure_video_indices()
-            try:
-                self.client.indices.refresh(index=self._frame_fp_index)
-            except ElasticsearchException:
-                pass
+            self._maybe_refresh_for_search(self._frame_fp_index)
 
             resp = self.client.search(
                 index=self._frame_fp_index,
@@ -884,10 +870,7 @@ class ElasticsearchBackend(DatabaseBackend):
         """Elasticsearchから映像情報を取得"""
         try:
             self._ensure_video_indices()
-            try:
-                self.client.indices.refresh(index=self._videos_index)
-            except ElasticsearchException:
-                pass
+            self._maybe_refresh_for_search(self._videos_index)
             result = self.client.get(
                 index=self._videos_index, id=video_id
             )
@@ -906,10 +889,7 @@ class ElasticsearchBackend(DatabaseBackend):
         """Elasticsearchから全映像をリスト取得"""
         try:
             self._ensure_video_indices()
-            try:
-                self.client.indices.refresh(index=self._videos_index)
-            except ElasticsearchException:
-                pass
+            self._maybe_refresh_for_search(self._videos_index)
             resp = self.client.search(
                 index=self._videos_index,
                 body={
@@ -961,12 +941,14 @@ class ElasticsearchBackend(DatabaseBackend):
         }
         try:
             self._ensure_video_indices()
+            self._maybe_refresh_for_search(
+                self._videos_index, self._frame_fp_index
+            )
             for idx_name, key in [
                 (self._videos_index, "videos"),
                 (self._frame_fp_index, "frame_fingerprints"),
             ]:
                 try:
-                    self.client.indices.refresh(index=idx_name)
                     cnt = self.client.count(index=idx_name)
                     stats[key] = cnt["count"]
                 except ElasticsearchException:
