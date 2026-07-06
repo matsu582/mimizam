@@ -1065,13 +1065,16 @@ class VideoFingerprinter:
         """保存済みモデルを読み込み（npz形式のみ対応）
 
         モデルには学習時の構造パラメータ（コードブック/PCA次元等）が保存されるが、
-        scene_eval_fps・profile_frames といった実行時設定は現在のconfigを維持する。
+        scene_eval_fps・profile_frames・store_raw_descriptors といった実行時設定は
+        現在のconfigを維持する（モデル読込で上書きしない）。
         読み込み後は3クラスで同一のconfigインスタンスを共有する。
         """
         runtime_scene_eval_fps = self.config.scene_eval_fps
         runtime_profile_frames = self.config.profile_frames
+        runtime_store_raw_descriptors = self.config.store_raw_descriptors
         self.encoder.load_model(path)
         self.encoder.config.scene_eval_fps = runtime_scene_eval_fps
         self.encoder.config.profile_frames = runtime_profile_frames
+        self.encoder.config.store_raw_descriptors = runtime_store_raw_descriptors
         self.config = self.encoder.config
         self.frame_selector.config = self.encoder.config
