@@ -799,10 +799,11 @@ class Mimizam:
     ) -> bool:
         """同一動画内で音声位置と映像位置が乖離しているか判定する
 
-        音声のDB区間は time_offset（=query_time - db_time の代表値）と
-        クリップ長から推定し、映像の最大整列区間(db_start..db_end)と比較する。
-        両区間の隙間が tolerance を超える場合は乖離とみなす。
-        判定に必要なデータが揃わない場合は False（乖離なし扱い＝除外しない）。
+        音声のDB区間は支配直線 db ≈ time_scale·query + offset の切片 offset
+        （=query=0 でのDB位置）とクリップ長から推定し、映像の最大整列区間
+        (db_start..db_end)と比較する。両区間の隙間が tolerance を超える場合は
+        乖離とみなす。判定に必要なデータが揃わない場合は False（乖離なし扱い＝
+        除外しない）。
         """
         if not audio or not visual:
             return False
@@ -812,9 +813,12 @@ class Mimizam:
         if offset is None or not regions:
             return False
 
+        # db = time_scale·query + offset なので、query∈[0, clip_len] のとき
+        # DB区間は [offset, offset + time_scale·clip_len]。速度変化を倍率で反映する。
         clip_len = md.get("query_duration", 0.0) or 0.0
-        audio_db_start = -offset
-        audio_db_end = audio_db_start + clip_len
+        time_scale = audio.get("time_scale", 1.0) or 1.0
+        audio_db_start = offset
+        audio_db_end = offset + time_scale * clip_len
         a_lo = min(audio_db_start, audio_db_end)
         a_hi = max(audio_db_start, audio_db_end)
 

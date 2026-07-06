@@ -301,5 +301,53 @@ class TestAlignmentRatioSign(unittest.TestCase):
         self.assertLess(ratio, 1.0)
 
 
+class TestMoviePositionDivergence(unittest.TestCase):
+    """統合検索: 音声位置と映像位置の乖離判定の符号を誤らない
+
+    time_offset は支配直線 db≈time_scale·query+offset の切片（query=0でのDB位置）。
+    これを負号で扱うと、音声・映像が同一区間に整列していても乖離扱いになり、
+    正しい二重一致が幾何平均で持ち上げられず不当に減点される。
+    """
+
+    def _visual(self, db_start, db_end, query_duration):
+        return {
+            "match_details": {
+                "query_duration": query_duration,
+                "regions": [{
+                    "db_start": db_start, "db_end": db_end, "frame_count": 40,
+                }],
+            }
+        }
+
+    def test_aligned_positions_not_diverged(self):
+        """音声DB 22:28〜 と映像DB 22:28〜 は同一区間→乖離なし"""
+        from mimizam.src.mimizam import Mimizam
+        # 22:28 = 1348秒から84.7秒の一致（速度変化なし）
+        audio = {"time_offset": 1348.0, "time_scale": 1.0}
+        visual = self._visual(db_start=1348.0, db_end=1433.0, query_duration=84.7)
+        self.assertFalse(
+            Mimizam._movie_position_diverges(audio, visual, tolerance=30.0)
+        )
+
+    def test_far_positions_diverged(self):
+        """音声DBと映像DBが数百秒離れていれば乖離ありとして除外する"""
+        from mimizam.src.mimizam import Mimizam
+        audio = {"time_offset": 100.0, "time_scale": 1.0}
+        visual = self._visual(db_start=1348.0, db_end=1433.0, query_duration=84.7)
+        self.assertTrue(
+            Mimizam._movie_position_diverges(audio, visual, tolerance=30.0)
+        )
+
+    def test_speed_changed_positions_use_time_scale(self):
+        """速度変化ありでも倍率でDB終端を伸ばし、同一区間なら乖離なし"""
+        from mimizam.src.mimizam import Mimizam
+        # time_scale=1.2 → DB区間 [1000, 1000+1.2*100]=[1000,1120]
+        audio = {"time_offset": 1000.0, "time_scale": 1.2}
+        visual = self._visual(db_start=1000.0, db_end=1120.0, query_duration=100.0)
+        self.assertFalse(
+            Mimizam._movie_position_diverges(audio, visual, tolerance=30.0)
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
