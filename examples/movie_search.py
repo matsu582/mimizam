@@ -39,12 +39,9 @@ DB区間が大きく離れている（隙間 > 30秒）場合は、別々の箇�
 
 import argparse
 import logging
-import math
 import os
-import shutil
 import subprocess
 import sys
-import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -55,6 +52,7 @@ from mimizam import (
     create_mimizam_postgresql,
     create_mimizam_elasticsearch,
     DatabaseConfig,
+    dominant_time_offset,
 )
 
 VIDEO_EXTENSIONS = {
@@ -155,28 +153,6 @@ def _get_video_duration(file_path: str) -> float:
         return 0.0
 
 
-def extract_audio(video_path: str, temp_dir: str) -> str:
-    """ffmpegで動画から音声を抽出する"""
-    video_name = Path(video_path).stem
-    output_path = os.path.join(temp_dir, f"{video_name}.wav")
-
-    cmd = [
-        "ffmpeg",
-        "-i", video_path,
-        "-vn",
-        "-acodec", "pcm_s16le",
-        "-ar", "22050",
-        "-ac", "1",
-        "-y",
-        output_path,
-    ]
-
-    subprocess.run(
-        cmd, capture_output=True, text=True, check=True,
-    )
-    return output_path
-
-
 def _format_duration(seconds: float) -> str:
     """秒数を mm:ss 形式にフォーマットする"""
     minutes = int(seconds // 60)
@@ -192,25 +168,6 @@ def _format_similarity(similarity: float) -> str:
         return f"MEDIUM ({similarity:.3f})"
     else:
         return f"LOW    ({similarity:.3f})"
-
-
-def _dominant_time_offset(
-    time_diffs: List[float], bin_width: float = 0.5,
-) -> float:
-    """時間差の最頻ビン中心を返す
-
-    短いクリップを長い全編で照合すると、全編に散る偶発一致（ノイズ）が
-    多数を占め、時間差の中央値はノイズの重心へ引かれて誤位置を示す。
-    最大整列クラスタ＝最頻ビンを採ることでノイズに強い代表オフセットを得る。
-    """
-    if not time_diffs:
-        return 0.0
-    from collections import Counter
-    counts = Counter(round(d / bin_width) for d in time_diffs)
-    best_bin = max(counts.items(), key=lambda kv: kv[1])[0]
-    center = best_bin * bin_width
-    near = [d for d in time_diffs if abs(d - center) <= bin_width]
-    return sum(near) / len(near) if near else center
 
 
 def _format_time_offset(offset: float) -> str:
@@ -250,151 +207,6 @@ def _render_bar(
             bar[i] = "\u2588"
 
     return "|" + "".join(bar) + "|"
-
-
-def _audio_video_diverge(
-    audio: Optional[Dict[str, Any]],
-    visual: Optional[Dict[str, Any]],
-    tolerance: float = 30.0,
-) -> bool:
-    """同一動画内で音声位置と映像位置が乖離しているか判定する
-
-    音声のDB区間は time_offset（=query_time - db_time の代表値）と
-    クリップ長から推定し、映像の最大整列区間(db_start..db_end)と比較する。
-    両区間の隙間が tolerance を超える場合は乖離とみなす。
-    判定に必要なデータが揃わない場合は False（乖離なし扱い＝除外しない）。
-    """
-    if not audio or not visual:
-        return False
-    offset = audio.get("time_offset")
-    md = visual.get("match_details") or {}
-    regions = md.get("regions") or []
-    if offset is None or not regions:
-        return False
-
-    clip_len = md.get("query_duration", 0.0) or 0.0
-    audio_db_start = -offset
-    audio_db_end = audio_db_start + clip_len
-    a_lo, a_hi = min(audio_db_start, audio_db_end), max(audio_db_start, audio_db_end)
-
-    # 映像はフレーム数最多の整列区間を代表とする
-    region = max(regions, key=lambda r: r.get("frame_count", 0))
-    v_lo = region.get("db_start", 0.0)
-    v_hi = region.get("db_end", 0.0)
-
-    # 区間同士の隙間（重なれば0）
-    gap = max(0.0, v_lo - a_hi, a_lo - v_hi)
-    return gap > tolerance
-
-
-def merge_results(
-    audio_results: List[Dict[str, Any]],
-    visual_results: List[Dict[str, Any]],
-) -> List[Dict[str, Any]]:
-    """
-    音声検索と映像検索の結果をIDで結合し統合スコアを算出する
-
-    同一UUIDで登録されている場合、song_idとvideo_idが一致する。
-    両方一致した場合は高スコア、片方のみでも結果に含める。
-
-    Args:
-        audio_results: 音声検索結果
-        visual_results: 映像検索結果
-
-    Returns:
-        統合された検索結果のリスト
-    """
-    # 音声結果をIDでインデックス化
-    audio_map: Dict[str, Dict] = {}
-    for match in audio_results:
-        song = match.get("song")
-        if song:
-            sid = song.id if hasattr(song, "id") else str(song)
-            audio_map[sid] = match
-
-    # 映像結果をIDでインデックス化
-    visual_map: Dict[str, Dict] = {}
-    for result in visual_results:
-        vid = result.get("video_id", "")
-        visual_map[vid] = result
-
-    # 全IDの和集合で統合
-    all_ids = set(audio_map.keys()) | set(visual_map.keys())
-    merged = []
-
-    for item_id in all_ids:
-        audio = audio_map.get(item_id)
-        visual = visual_map.get(item_id)
-
-        a_score = 0.0
-        v_score = 0.0
-        entry: Dict[str, Any] = {"id": item_id}
-
-        if audio:
-            a_score = audio.get("confidence", 0)
-            entry["audio_confidence"] = a_score
-            entry["audio_match"] = audio
-
-        if visual:
-            v_score = visual.get("similarity", 0)
-            entry["visual_similarity"] = v_score
-            entry["visual_match"] = visual
-
-        # 音声位置と映像位置の乖離を判定
-        diverged = _audio_video_diverge(audio, visual)
-        entry["position_diverged"] = diverged
-
-        # 統合スコア: 幾何平均ベース
-        # 両方一致→高い、片方のみ→中程度の高め、両方低い→低いまま
-        # 位置が乖離する場合は「音声+映像の二重一致」とはせず、
-        # 信頼できる単独モダリティ（高い方）のスコアで評価する。
-        if a_score > 0 and v_score > 0 and not diverged:
-            entry["combined_score"] = math.sqrt(a_score * v_score)
-        else:
-            entry["combined_score"] = max(a_score, v_score) * 0.8
-
-        # タイトルの取得
-        title = _extract_title(audio, visual)
-        entry["title"] = title
-
-        # ファイルパスの取得
-        file_path = _extract_file_path(audio, visual)
-        entry["file_path"] = file_path
-
-        merged.append(entry)
-
-    merged.sort(key=lambda x: x["combined_score"], reverse=True)
-    return merged
-
-
-def _extract_title(
-    audio: Optional[Dict], visual: Optional[Dict],
-) -> str:
-    """音声/映像結果からタイトルを取得する"""
-    if audio:
-        song = audio.get("song")
-        if song and hasattr(song, "title"):
-            return song.title
-    if visual:
-        video = visual.get("video")
-        if video and hasattr(video, "title"):
-            return video.title
-    return "不明"
-
-
-def _extract_file_path(
-    audio: Optional[Dict], visual: Optional[Dict],
-) -> str:
-    """音声/映像結果からファイルパスを取得する"""
-    if visual:
-        video = visual.get("video")
-        if video and hasattr(video, "file_path"):
-            return video.file_path
-    if audio:
-        song = audio.get("song")
-        if song and hasattr(song, "file_path"):
-            return song.file_path
-    return "不明"
 
 
 def print_merged_results(
@@ -548,7 +360,7 @@ def _print_audio_match_detail(
     # 全マッチの中央値は全編に散るノイズに引かれて誤位置を示すため、
     # 最大整列クラスタ＝最頻ビンの中心を代表オフセットに採る。
     time_diffs = [pos["time_diff"] for pos in positions]
-    dominant_offset = _dominant_time_offset(time_diffs)
+    dominant_offset = dominant_time_offset(time_diffs)
 
     # 最頻オフセット±2秒以内の一致ポジションを集計
     consistent = [
@@ -695,56 +507,16 @@ def search_single_file(
     query_name = Path(file_path).name
     logger.info(f"検索中: {query_name}")
 
-    audio_results: List[Dict] = []
-    visual_results: List[Dict] = []
-
-    # 音声検索
-    if not skip_audio:
-        temp_dir = tempfile.mkdtemp(prefix="movie_search_")
-        try:
-            audio_path = extract_audio(file_path, temp_dir)
-            raw_matches = mimizam.search_song(
-                audio_path,
-                min_confidence=0.0,
-                top_k=top_k * 4,
-            )
-            # 結果を変換
-            for match in raw_matches:
-                song = match["song"]
-                details = match["details"]
-                entry = {
-                    "song": song,
-                    "confidence": match["confidence"],
-                    "match_count": match["match_count"],
-                    "time_offset": details.get("time_offset", 0),
-                    "time_scale": details.get("time_scale", 1.0),
-                    "freq_scale": details.get("freq_scale", 1.0),
-                }
-                if show_details and "detailed_info" in details:
-                    entry["detailed_info"] = details["detailed_info"]
-                audio_results.append(entry)
-            logger.info(f"音声候補: {len(audio_results)} 件")
-        except Exception as exc:
-            logger.warning(f"音声検索エラー: {exc}")
-        finally:
-            shutil.rmtree(temp_dir, ignore_errors=True)
-
-    # 映像検索
-    if not skip_visual:
-        try:
-            visual_results = mimizam.search_video(
-                query_file_path=file_path,
-                top_k=top_k * 4,
-                use_frame_matching=use_frame_matching,
-                detect_pip=detect_pip,
-                video_db_path=video_db_path,
-            )
-            logger.info(f"映像候補: {len(visual_results)} 件")
-        except Exception as exc:
-            logger.warning(f"映像検索エラー: {exc}")
-
-    # 結果の統合
-    merged = merge_results(audio_results, visual_results)
+    # 音声＋映像の統合検索（統合スコア・位置乖離チェックはAPI側で実施）
+    merged = mimizam.search_movie(
+        query_file_path=file_path,
+        top_k=top_k,
+        use_frame_matching=use_frame_matching,
+        detect_pip=detect_pip,
+        video_db_path=video_db_path,
+        skip_audio=skip_audio,
+        skip_visual=skip_visual,
+    )
     logger.info(f"統合候補: {len(merged)} 件")
 
     # クエリ動画の長さを取得してマージ結果に付与

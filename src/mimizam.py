@@ -8,7 +8,11 @@ VideoFingerprinterによる映像指紋機能も統合。
 
 import os
 import uuid
+import math
+import shutil
 import logging
+import tempfile
+import subprocess
 from typing import List, Optional, Dict, Any, Tuple
 from pathlib import Path
 import json
@@ -623,6 +627,225 @@ class Mimizam:
         except Exception as exc:
             self.logger.error(f"映像検索エラー: {exc}")
             return []
+
+    def _extract_audio_to_wav(self, video_path: str, out_dir: str) -> str:
+        """ffmpegで動画から音声を22050Hzモノラルwavとして抽出する
+
+        映像検索と組み合わせる統合検索で音声トラックを得るために使う。
+        登録時（movie_fingerprinter）と同じ抽出条件に揃える。
+        """
+        out_path = os.path.join(
+            out_dir, f"{Path(video_path).stem}.wav"
+        )
+        cmd = [
+            "ffmpeg", "-i", video_path,
+            "-vn", "-acodec", "pcm_s16le",
+            "-ar", "22050", "-ac", "1",
+            "-y", out_path,
+        ]
+        subprocess.run(cmd, capture_output=True, text=True, check=True)
+        return out_path
+
+    @staticmethod
+    def _movie_position_diverges(
+        audio: Optional[Dict[str, Any]],
+        visual: Optional[Dict[str, Any]],
+        tolerance: float,
+    ) -> bool:
+        """同一動画内で音声位置と映像位置が乖離しているか判定する
+
+        音声のDB区間は time_offset（=query_time - db_time の代表値）と
+        クリップ長から推定し、映像の最大整列区間(db_start..db_end)と比較する。
+        両区間の隙間が tolerance を超える場合は乖離とみなす。
+        判定に必要なデータが揃わない場合は False（乖離なし扱い＝除外しない）。
+        """
+        if not audio or not visual:
+            return False
+        offset = audio.get("time_offset")
+        md = visual.get("match_details") or {}
+        regions = md.get("regions") or []
+        if offset is None or not regions:
+            return False
+
+        clip_len = md.get("query_duration", 0.0) or 0.0
+        audio_db_start = -offset
+        audio_db_end = audio_db_start + clip_len
+        a_lo = min(audio_db_start, audio_db_end)
+        a_hi = max(audio_db_start, audio_db_end)
+
+        # 映像はフレーム数最多の整列区間を代表とする
+        region = max(regions, key=lambda r: r.get("frame_count", 0))
+        v_lo = region.get("db_start", 0.0)
+        v_hi = region.get("db_end", 0.0)
+
+        # 区間同士の隙間（重なれば0）
+        gap = max(0.0, v_lo - a_hi, a_lo - v_hi)
+        return gap > tolerance
+
+    def _merge_movie_results(
+        self,
+        audio_results: List[Dict[str, Any]],
+        visual_results: List[Dict[str, Any]],
+        divergence_tolerance: float,
+    ) -> List[Dict[str, Any]]:
+        """音声検索と映像検索の結果をIDで結合し統合スコアを算出する
+
+        同一UUIDで登録されている場合、song_id と video_id が一致する。
+        両方一致（かつ位置が乖離しない）なら幾何平均で持ち上げ、片方のみ
+        または位置乖離ありなら高い方のモダリティを 0.8 掛けで評価する。
+
+        統合スコアの式:
+            両モダリティ一致・非乖離: √(音声信頼度 × 実効映像スコア)
+            片方のみ / 位置乖離あり:   max(音声信頼度, 実効映像スコア) × 0.8
+        """
+        audio_map: Dict[str, Dict[str, Any]] = {}
+        for match in audio_results:
+            song = match.get("song")
+            if song is not None:
+                sid = song.id if hasattr(song, "id") else str(song)
+                audio_map[sid] = match
+
+        visual_map: Dict[str, Dict[str, Any]] = {}
+        for result in visual_results:
+            visual_map[result.get("video_id", "")] = result
+
+        merged: List[Dict[str, Any]] = []
+        for item_id in set(audio_map) | set(visual_map):
+            audio = audio_map.get(item_id)
+            visual = visual_map.get(item_id)
+
+            a_score = 0.0
+            v_score = 0.0
+            entry: Dict[str, Any] = {"id": item_id}
+
+            if audio:
+                a_score = audio.get("confidence", 0.0)
+                entry["audio_confidence"] = a_score
+                entry["audio_match"] = audio
+
+            if visual:
+                v_score = visual.get("similarity", 0.0)
+                entry["visual_similarity"] = v_score
+                entry["visual_match"] = visual
+
+            diverged = self._movie_position_diverges(
+                audio, visual, divergence_tolerance
+            )
+            entry["position_diverged"] = diverged
+
+            if a_score > 0 and v_score > 0 and not diverged:
+                entry["combined_score"] = math.sqrt(a_score * v_score)
+            else:
+                entry["combined_score"] = max(a_score, v_score) * 0.8
+
+            song = audio.get("song") if audio else None
+            video = visual.get("video") if visual else None
+            entry["title"] = (
+                getattr(song, "title", None)
+                or getattr(video, "title", None)
+                or "不明"
+            )
+            entry["file_path"] = (
+                getattr(video, "file_path", None)
+                or getattr(song, "file_path", None)
+                or "不明"
+            )
+
+            merged.append(entry)
+
+        merged.sort(key=lambda x: x["combined_score"], reverse=True)
+        return merged
+
+    def search_movie(
+        self,
+        query_file_path: str,
+        top_k: int = 5,
+        use_frame_matching: bool = True,
+        detect_pip: bool = False,
+        video_db_path: Optional[str] = None,
+        skip_audio: bool = False,
+        skip_visual: bool = False,
+        divergence_tolerance: float = 30.0,
+        min_combined_score: float = 0.0,
+    ) -> List[Dict[str, Any]]:
+        """動画を音声指紋と映像指紋の両方で検索し、結果を統合する
+
+        動画から音声を抽出して音声検索し、同じ動画で映像検索した結果を
+        同一UUID（song_id / video_id）で結合する。両モダリティが一致し
+        位置が乖離しなければ幾何平均で持ち上げ、片方のみ・位置乖離ありなら
+        高い方のモダリティを 0.8 掛けで評価する（統合スコアの詳細は
+        docs/video_fingerprint_spec.md 3.3 の実効映像スコアも参照）。
+
+        Args:
+            query_file_path: 検索対象の動画ファイルパス
+            top_k: 返す結果の最大数
+            use_frame_matching: 映像でフレーム単位精密照合を行うか
+            detect_pip: PiP矩形検出を行うか
+            video_db_path: 映像DBファイルパス
+            skip_audio: 音声検索をスキップする
+            skip_visual: 映像検索をスキップする
+            divergence_tolerance: 音声DB区間と映像DB区間の乖離許容（秒）
+            min_combined_score: これ未満の統合スコアを除外する閾値
+
+        Returns:
+            統合検索結果のリスト（combined_score 降順）。各要素は id / title /
+            file_path / combined_score / position_diverged を持ち、該当時に
+            audio_confidence / audio_match / visual_similarity / visual_match を含む。
+        """
+        if not os.path.exists(query_file_path):
+            raise FileNotFoundError(
+                f"動画ファイルが見つかりません: {query_file_path}"
+            )
+
+        audio_results: List[Dict[str, Any]] = []
+        visual_results: List[Dict[str, Any]] = []
+
+        if not skip_audio:
+            temp_dir = tempfile.mkdtemp(prefix="movie_search_")
+            try:
+                audio_path = self._extract_audio_to_wav(
+                    query_file_path, temp_dir
+                )
+                raw_matches = self.search_song(
+                    audio_path, min_confidence=0.0, top_k=top_k * 4
+                )
+                for match in raw_matches:
+                    details = match.get("details", {})
+                    audio_results.append({
+                        "song": match["song"],
+                        "confidence": match["confidence"],
+                        "match_count": match.get("match_count", 0),
+                        "time_offset": details.get("time_offset", 0),
+                        "time_scale": details.get("time_scale", 1.0),
+                        "freq_scale": details.get("freq_scale", 1.0),
+                        "detailed_info": details.get("detailed_info"),
+                    })
+            except Exception as exc:
+                self.logger.warning(f"統合検索の音声検索エラー: {exc}")
+            finally:
+                shutil.rmtree(temp_dir, ignore_errors=True)
+
+        if not skip_visual:
+            try:
+                visual_results = self.search_video(
+                    query_file_path=query_file_path,
+                    top_k=top_k * 4,
+                    use_frame_matching=use_frame_matching,
+                    detect_pip=detect_pip,
+                    video_db_path=video_db_path,
+                )
+            except Exception as exc:
+                self.logger.warning(f"統合検索の映像検索エラー: {exc}")
+
+        merged = self._merge_movie_results(
+            audio_results, visual_results, divergence_tolerance
+        )
+        if min_combined_score > 0.0:
+            merged = [
+                m for m in merged
+                if m["combined_score"] >= min_combined_score
+            ]
+        return merged[:top_k]
 
     def _search_pip_regions(
         self, query_path, vfp, vdb, top_k

@@ -47,6 +47,7 @@ from .src.pip_detector import (
     PipRegion,
 )
 from .src.adaptive_parameters import AdaptiveParameterTuner,PerformanceMonitor
+from .src.time_alignment import dominant_time_offset
 
 __version__ = "1.0.3"
 
@@ -94,4 +95,5 @@ __all__ = [
     # 高度な機能
     'AdaptiveParameterTuner',
     'PerformanceMonitor',
+    'dominant_time_offset',
 ]
