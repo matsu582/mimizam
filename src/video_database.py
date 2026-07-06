@@ -15,6 +15,7 @@ import numpy as np
 
 from .database_base import Video, DatabaseConfig
 from .database_backends import DatabaseBackend, create_database_backend
+from .video_fingerprinter import geometric_match, split_raw_descriptor
 
 
 logger = logging.getLogger(__name__)
@@ -47,6 +48,14 @@ class VideoFingerprintDatabase:
         # を候補にする（メモリ保護のため1フレームあたり cap 件で頭打ち）。
         self._frame_match_cand_threshold = 0.4
         self._frame_match_cap = 50
+        # 幾何検証（RANSAC再ランク）のパラメータ。VLAD/PCAコサインは候補の
+        # 絞り込みに使い、各クエリフレームで上位 _geom_top_k 件のDB候補に対し
+        # AKAZE記述子を突き合わせる。インライア数が _geom_min_inliers 以上の
+        # ペアのみ一致とみなし、_geom_inlier_saturation で[0,1]スコアへ正規化。
+        self._geom_top_k = 10
+        self._geom_min_inliers = 15
+        self._geom_ransac_thresh = 5.0
+        self._geom_inlier_saturation = 100.0
         self.backend: DatabaseBackend = create_database_backend(config)
 
         if not self.backend.connect():
@@ -262,6 +271,8 @@ class VideoFingerprintDatabase:
         query_frame_fps: List[Tuple[int, float, np.ndarray]],
         candidate_video_ids: List[str],
         threshold: float = 0.5,
+        query_raw: Optional[List[Tuple[int, float, np.ndarray]]] = None,
+        descriptor_dim: int = 61,
     ) -> List[Dict]:
         """
         フレーム単位マッチングで精密照合（PiP対策）
@@ -270,10 +281,17 @@ class VideoFingerprintDatabase:
         全クエリフレーム中の最高スコアを映像の最終スコアとする。
         また、一致区間の時間帯情報も返す。
 
+        query_raw（クエリの生AKAZE記述子＋キーポイント座標）が与えられ、DB側にも
+        生記述子が保存されている場合は、VLAD/PCAコサインを候補の絞り込み(recall)
+        のみに使い、最終判定はANN上位候補へのRANSAC幾何検証（インライア数）で行う。
+        大域記述子の量子化に潰されがちな真の局所一致を、幾何整合で拾い直すため。
+
         Args:
             query_frame_fps: クエリ映像のフレーム指紋リスト
             candidate_video_ids: 候補映像IDリスト
             threshold: 最低類似度閾値
+            query_raw: クエリの生記述子（[(fidx, ts, N×(2+D)), ...]）。幾何検証に使う
+            descriptor_dim: AKAZE記述子の本来の次元D（座標分離に使用）
 
         Returns:
             [{"video_id": ..., "frame_similarity": ...,
@@ -288,6 +306,14 @@ class VideoFingerprintDatabase:
         frames_by_video = self.backend.get_frame_fingerprints_batch(
             candidate_video_ids
         )
+
+        # 幾何検証を使うか（クエリ側の生記述子が揃っている場合のみ）
+        query_raw_by_fidx: Dict[int, Tuple[Optional[np.ndarray], np.ndarray]] = {}
+        if query_raw:
+            for fidx, _ts, arr in query_raw:
+                kq, dq = split_raw_descriptor(arr, descriptor_dim)
+                query_raw_by_fidx[fidx] = (kq, dq)
+        use_geometric = bool(query_raw_by_fidx)
 
         for vid_id in candidate_video_ids:
             raw_frames = frames_by_video.get(vid_id, [])
@@ -316,39 +342,64 @@ class VideoFingerprintDatabase:
             best_idx = np.argmax(sims, axis=1)
             best_per_query = sims[np.arange(sims.shape[0]), best_idx]
 
-            # 各クエリフレームで「最類似の1件」だけを残すと、似た画が反復する
-            # 映像（OP等）で真に時間整列するDBフレームが僅差の偶発一致に負けて
-            # 捨てられ、整列が散る。候補は「上位1件」ではなく閾値(cand_threshold)
-            # 以上の全DBフレームを保持し、支配直線フィットが直線に乗るものを選べる
-            # ようにする。メモリ保護のため1フレームあたり _frame_match_cap 件で頭打ち。
-            cand_threshold = self._frame_match_cand_threshold
-            cap = self._frame_match_cap
+            # DB側に生記述子が保存されている映像のみ幾何検証を行う。
+            # 旧DB（記述子なし）では従来のコサイン整列にフォールバックする。
+            db_raw_by_fidx: Dict[
+                int, Tuple[Optional[np.ndarray], np.ndarray]
+            ] = {}
+            if use_geometric:
+                for fidx, _ts, arr in self.get_frame_descriptors(vid_id):
+                    kd, dd = split_raw_descriptor(arr, descriptor_dim)
+                    db_raw_by_fidx[fidx] = (kd, dd)
+            use_geom_video = use_geometric and bool(db_raw_by_fidx)
 
-            frame_matches = []
-            for i, (_, q_ts, _) in enumerate(query_frame_fps):
-                row = sims[i]
-                cand_j = np.nonzero(row >= cand_threshold)[0]
-                if cand_j.size > cap:
-                    # 類似度上位capのみ残す（真の整列側を落とさないため十分大きく取る）
-                    cand_j = cand_j[np.argsort(-row[cand_j])[:cap]]
-                cands = [
-                    (float(db_ts_arr[j]), float(row[j])) for j in cand_j
-                ]
-                frame_matches.append({
-                    "query_ts": q_ts,
-                    # 表示・後方互換用の最良1件
-                    "db_ts": float(db_ts_arr[best_idx[i]]),
-                    "similarity": float(best_per_query[i]),
-                    # 支配整列用の候補（閾値以上の全DBフレーム、cap件まで）
-                    "candidates": cands,
-                })
+            if use_geom_video:
+                frame_matches, geom_scores = self._build_geometric_matches(
+                    query_frame_fps, db_frame_vecs, db_ts_arr, sims,
+                    query_raw_by_fidx, db_raw_by_fidx,
+                )
+                # 幾何検証済み候補の代表スコア（インライア正規化）を採否に使う
+                max_sim = max(geom_scores) if geom_scores else 0.0
+                median_sim = (
+                    float(np.median(geom_scores)) if geom_scores else 0.0
+                )
+                region_threshold = 0.0
+            else:
+                # 各クエリフレームで「最類似の1件」だけを残すと、似た画が反復する
+                # 映像（OP等）で真に時間整列するDBフレームが僅差の偶発一致に負けて
+                # 捨てられ、整列が散る。候補は「上位1件」ではなく閾値(cand_threshold)
+                # 以上の全DBフレームを保持し、支配直線フィットが直線に乗るものを選べる
+                # ようにする。メモリ保護のため1フレームあたり _frame_match_cap 件で頭打ち。
+                cand_threshold = self._frame_match_cand_threshold
+                cap = self._frame_match_cap
 
-            max_sim = float(np.max(best_per_query))
+                frame_matches = []
+                for i, (_, q_ts, _) in enumerate(query_frame_fps):
+                    row = sims[i]
+                    cand_j = np.nonzero(row >= cand_threshold)[0]
+                    if cand_j.size > cap:
+                        # 類似度上位capのみ残す（真の整列側を落とさないため十分大きく取る）
+                        cand_j = cand_j[np.argsort(-row[cand_j])[:cap]]
+                    cands = [
+                        (float(db_ts_arr[j]), float(row[j])) for j in cand_j
+                    ]
+                    frame_matches.append({
+                        "query_ts": q_ts,
+                        # 表示・後方互換用の最良1件
+                        "db_ts": float(db_ts_arr[best_idx[i]]),
+                        "similarity": float(best_per_query[i]),
+                        # 支配整列用の候補（閾値以上の全DBフレーム、cap件まで）
+                        "candidates": cands,
+                    })
+                max_sim = float(np.max(best_per_query))
+                median_sim = float(np.median(best_per_query))
+                region_threshold = 0.4
+
             if max_sim >= threshold:
                 q_timestamps = [q_ts for _, q_ts, _ in query_frame_fps]
                 query_duration = max(q_timestamps) if q_timestamps else 0.0
                 match_details = self._compute_match_regions(
-                    frame_matches, threshold=0.4,
+                    frame_matches, threshold=region_threshold,
                     query_duration=query_duration,
                 )
                 db_timestamps = [d_ts for _, d_ts, _ in db_frame_vecs]
@@ -364,12 +415,88 @@ class VideoFingerprintDatabase:
                 results.append({
                     "video_id": vid_id,
                     "frame_similarity": max_sim,
-                    "median_similarity": float(np.median(best_per_query)),
+                    "median_similarity": median_sim,
                     "match_details": match_details,
                 })
 
         results.sort(key=lambda r: r["frame_similarity"], reverse=True)
         return results
+
+    def _build_geometric_matches(
+        self,
+        query_frame_fps: List[Tuple[int, float, np.ndarray]],
+        db_frame_vecs: List[Tuple[int, float, np.ndarray]],
+        db_ts_arr: np.ndarray,
+        sims: np.ndarray,
+        query_raw_by_fidx: Dict[int, Tuple[Optional[np.ndarray], np.ndarray]],
+        db_raw_by_fidx: Dict[int, Tuple[Optional[np.ndarray], np.ndarray]],
+    ) -> Tuple[List[Dict], List[float]]:
+        """ANN上位候補にRANSAC幾何検証を掛けフレーム一致候補を構築する
+
+        各クエリフレームについて、VLAD/PCAコサインの上位 _geom_top_k 件のDB候補へ
+        AKAZE記述子を突き合わせ、RANSACインライア数が _geom_min_inliers 以上の
+        ペアのみ一致候補とする。インライア数は _geom_inlier_saturation で[0,1]へ
+        正規化し、後段の支配整列・被覆スコアが扱えるスコアにする。
+
+        Args:
+            query_frame_fps: クエリのフレーム指紋
+            db_frame_vecs: DB側フレーム指紋 [(fidx, ts, vec), ...]
+            db_ts_arr: DB側タイムスタンプ配列
+            sims: クエリ×DBのコサイン類似度行列
+            query_raw_by_fidx: クエリfidx→(キーポイント座標, 記述子)
+            db_raw_by_fidx: DBフレームfidx→(キーポイント座標, 記述子)
+
+        Returns:
+            (frame_matches, geom_scores)
+        """
+        top_k = self._geom_top_k
+        min_inl = self._geom_min_inliers
+        sat = self._geom_inlier_saturation
+        db_fidx_arr = [f for f, _, _ in db_frame_vecs]
+
+        frame_matches: List[Dict] = []
+        geom_scores: List[float] = []
+        for i, (q_fidx, q_ts, _) in enumerate(query_frame_fps):
+            qkd = query_raw_by_fidx.get(q_fidx)
+            if qkd is None:
+                frame_matches.append({
+                    "query_ts": q_ts, "db_ts": 0.0,
+                    "similarity": 0.0, "candidates": [],
+                })
+                continue
+            kq, dq = qkd
+            row = sims[i]
+            order = np.argsort(-row)[:top_k]
+
+            cands: List[Tuple[float, float]] = []
+            best_score = 0.0
+            best_db_ts = 0.0
+            for j in order:
+                dbkd = db_raw_by_fidx.get(db_fidx_arr[j])
+                if dbkd is None:
+                    continue
+                kd, dd = dbkd
+                _good, inl = geometric_match(
+                    dq, kq, dd, kd,
+                    ransac_thresh=self._geom_ransac_thresh,
+                )
+                if inl >= min_inl:
+                    score = min(1.0, inl / sat)
+                    cands.append((float(db_ts_arr[j]), score))
+                    if score > best_score:
+                        best_score = score
+                        best_db_ts = float(db_ts_arr[j])
+
+            frame_matches.append({
+                "query_ts": q_ts,
+                "db_ts": best_db_ts,
+                "similarity": best_score,
+                "candidates": cands,
+            })
+            if best_score > 0.0:
+                geom_scores.append(best_score)
+
+        return frame_matches, geom_scores
 
     @staticmethod
     def _fit_dominant_alignment(

@@ -501,7 +501,14 @@ class Mimizam:
                 )
                 vfp.train_from_videos([file_path])
 
-            fp = vfp.fingerprint_video(file_path)
+            # 幾何検証（RANSAC）に使うため、DB側も生AKAZE記述子＋キーポイント座標を
+            # 保存する。DBに座標が無いと検索時の幾何検証ができないため既定で有効化する。
+            prev_store_raw = vfp.config.store_raw_descriptors
+            vfp.config.store_raw_descriptors = True
+            try:
+                fp = vfp.fingerprint_video(file_path)
+            finally:
+                vfp.config.store_raw_descriptors = prev_store_raw
             if fp is None:
                 # 映像指紋の生成失敗を None に潰さず処理失敗として通知する
                 raise MimizamError(
@@ -624,7 +631,14 @@ class Mimizam:
                     context={'query_file_path': query_file_path},
                 )
 
-            fp = vfp.fingerprint_video(query_file_path)
+            # 幾何検証（RANSAC）のためクエリ側は生AKAZE記述子＋キーポイント座標を
+            # 保持する。VLAD/PCAコサインで候補を絞った後、最終判定を幾何整合で行う。
+            prev_store_raw = vfp.config.store_raw_descriptors
+            vfp.config.store_raw_descriptors = True
+            try:
+                fp = vfp.fingerprint_video(query_file_path)
+            finally:
+                vfp.config.store_raw_descriptors = prev_store_raw
             if fp is None:
                 # 映像指紋の生成失敗を「一致なし」に潰さず処理失敗として通知する
                 raise MimizamError(
@@ -641,9 +655,13 @@ class Mimizam:
                 results = candidates[:top_k]
             else:
                 # Step 2: フレーム単位マッチングで精密照合
+                # クエリに生記述子があればANN上位候補をRANSAC幾何検証で再判定する
                 candidate_ids = [c["video_id"] for c in candidates]
+                desc_dim = getattr(vfp.encoder, "_descriptor_dim", None) or 61
                 frame_results = vdb.search_video_with_frame_matching(
-                    fp.frame_fingerprints, candidate_ids
+                    fp.frame_fingerprints, candidate_ids,
+                    query_raw=fp.raw_descriptors,
+                    descriptor_dim=desc_dim,
                 )
 
                 # 結果を統合
