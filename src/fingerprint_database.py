@@ -196,11 +196,18 @@ class FingerprintMatcher:
         # 見合う狭さにする。
         self.time_tolerance = 0.05
 
-        # 信頼度算出の飽和パラメータ。整列インライアが confidence_full_matches 件
-        # かつ整列割合が confidence_full_ratio に達したら信頼度1.0とみなす。
-        # 無関係曲は整列"数"が桁違いに少ないため、数と割合の積で明確に分離できる。
-        self.confidence_full_matches = 80
-        self.confidence_full_ratio = 0.12
+        # 信頼度算出の飽和パラメータ（significance方式）。
+        # 整列インライアが confidence_full_matches 件で数項が飽和する。粗い尺度不変
+        # ハッシュ＋ソフト2ビンで偶発衝突が大量に出る大規模DBでは「整列数/全衝突数」の
+        # 割合が正解でも極端に小さくなり信頼度が過小表示された。そこで割合ではなく
+        # 「偶然の整列期待値に対する超過倍率（significance）」で評価する。無関係曲は
+        # 全衝突がオフセット全域へ散るため単一オフセットの整列数が偶然並みに留まり、
+        # 正解は一つのオフセットに集中するため significance が桁違いに大きくなる。
+        self.confidence_full_matches = 40
+        # significance の飽和値。significance が この値 に達したら significance項=1.0。
+        # 多数のオフセット帯を暗黙に比較するため、偶然でも数倍程度は生じうる。確実な
+        # 一致は数十〜百倍に達するので、無関係曲の弱い集中を抑えるよう高めに設定する。
+        self.confidence_full_significance = 100.0
         # 純度項の下限。整列割合がこの値を超えた分だけ純度信頼度に寄与する。
         # 無関係曲の整列割合（概ね0.1〜0.2）では0となり、クリーン一致でのみ効く。
         self.confidence_purity_floor = 0.5
@@ -316,7 +323,10 @@ class FingerprintMatcher:
             if aligned < min_matches:
                 continue
 
-            confidence = self._confidence_from_inliers(aligned, len(pairs))
+            # significance算出用に、全衝突ペアが散らばるDB時間幅を求める
+            db_times = [db_time for _, db_time in pairs]
+            db_span = (max(db_times) - min(db_times)) if db_times else 0.0
+            confidence = self._confidence_from_inliers(aligned, len(pairs), db_span)
             if confidence < self.min_confidence:
                 continue
 
@@ -450,29 +460,59 @@ class FingerprintMatcher:
                 best = (slope, offset, inliers)
         return best
 
-    def _confidence_from_inliers(self, aligned: int, total: int) -> float:
-        """支配直線に整合したインライア数と割合から信頼度[0,1]を算出する
+    def _alignment_significance(self, aligned: int, total: int,
+                                db_span: Optional[float]) -> float:
+        """単一オフセットへの整列が偶然よりどれだけ多いか（significance）を返す
 
-        速度・ピッチ変化した実音源では、候補ペアに偶発衝突が多く混じるため整列
-        "割合"は低くなる（数%）。一方 無関係曲も割合が同程度に低いので、両者は主に
-        整列"絶対数"で分離する（真の一致は数十〜数千、無関係曲は数件）。よって
-        数の飽和×割合の飽和を基本信頼度とする（どちらか一方が低いだけで抑制）。
+        全 total 件の衝突が DB時間幅 db_span 全域へ一様に散らばると仮定すると、
+        許容幅 ±time_tolerance の1オフセット帯に偶然入る期待数は
+        exp = total × (2·time_tolerance / db_span)。真の一致は一つのオフセットに
+        集中するため aligned ≫ exp となり、無関係曲は衝突が全域へ散って aligned が
+        exp 並みに留まる。significance = aligned / exp は DB規模・衝突総数に依存せず
+        両者を分離できる（割合 aligned/total は大規模DBで正解でも極小になり不適）。
 
-        ただしノイズの少ないクリーンな一致では整列割合が1.0近くまで上がる。この
-        「ほぼ全ペアが単一直線に乗る」純度は無関係曲では起こらないため、高純度時は
-        絶対数が少なくても高信頼度とみなす純度項を併用し、両者の大きい方を採る。
+        db_span が不明・極小のときは exp を1件（偶然1件相当）とみなし、significance を
+        整列絶対数そのものに退化させる（小規模・単体テスト向けの安全側フォールバック）。
+        """
+        if aligned <= 0:
+            return 0.0
+        if db_span and db_span > 0:
+            expected = total * (2.0 * self.time_tolerance / db_span)
+        else:
+            expected = 1.0
+        expected = max(expected, 1e-6)
+        return aligned / expected
+
+    def _confidence_from_inliers(self, aligned: int, total: int,
+                                 db_span: Optional[float] = None) -> float:
+        """整列インライア数と significance から信頼度[0,1]を算出する
+
+        - 数項: min(1, aligned/confidence_full_matches)。整列の絶対数。無関係曲は
+          単一オフセットの整列数が偶然並みに少ないため、この時点で低く抑えられる。
+        - significance項: min(1, log1p(significance)/log1p(confidence_full_significance))。
+          偶然の整列期待値に対する超過倍率で、大規模DBでも正解と無関係曲を分離する
+          （割合ベースだと正解でも過小になる問題を解消）。
+        - 両者の積を基本信頼度とし、どちらか一方が低いだけで抑制される。
+
+        加えて、ノイズの少ないクリーンな一致では整列割合が1.0近くまで上がる。この
+        純度は無関係曲では起こらないため、高純度時は絶対数が少なくても高信頼度と
+        みなす純度項を併用し、基本信頼度との大きい方を採る。
         """
         if total <= 0 or aligned < 2:
             return 0.0
         ratio = aligned / total
         count_term = min(1.0, aligned / self.confidence_full_matches)
-        ratio_term = min(1.0, ratio / self.confidence_full_ratio)
-        count_conf = count_term * ratio_term
+        significance = self._alignment_significance(aligned, total, db_span)
+        sig_term = min(
+            1.0,
+            math.log1p(significance) / math.log1p(self.confidence_full_significance),
+        )
+        base_conf = count_term * sig_term
         # 純度項: 整列割合が purity_floor を超えた分を [0,1] に線形写像する。
         # 無関係曲の割合（〜0.1）では0、クリーン一致（〜1.0）で1に近づく。
         purity_conf = max(0.0, (ratio - self.confidence_purity_floor)
                           / (1.0 - self.confidence_purity_floor))
-        return min(max(count_conf, purity_conf), 1.0)
+        return min(max(base_conf, purity_conf), 1.0)
 
     def _sort_and_limit_results(self, best_results: Dict[str, Dict[str, Any]]) -> List[Dict[str, Any]]:
         """

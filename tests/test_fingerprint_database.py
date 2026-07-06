@@ -561,13 +561,14 @@ class TestAdvancedMatchingAlgorithms(unittest.TestCase):
         self.assertLessEqual(confidence, 1.0)
     
     def test_confidence_from_inliers_monotonic(self):
-        """インライアベース信頼度：整列数と割合が高いほど信頼度が上がる
+        """significanceベース信頼度：整列数とsignificanceが高いほど信頼度が上がる
 
         旧 _calculate_confidence_score_with_scaling（探索スケール依存の信頼度）は
-        完全置換され、信頼度は「支配直線に整合したインライア数×割合」で算出される。
-        整列数が桁違いに少ない無関係曲を数で棄却できることを検証する。
+        完全置換され、信頼度は「整列インライア数 × significance（偶然整列に対する
+        超過倍率）」で算出される。整列数が桁違いに少ない無関係曲を棄却できること、
+        および大規模DB（全衝突数が巨大）でも正解が過小評価されないことを検証する。
         """
-        # 整列数が多いほど信頼度は高い（同一割合なら数で単調増加）
+        # 整列数が多いほど信頼度は高い（db_span未指定時はsignificance=整列絶対数）
         low = self.matcher._confidence_from_inliers(aligned=5, total=10)
         high = self.matcher._confidence_from_inliers(aligned=60, total=120)
         self.assertGreaterEqual(high, low)
@@ -576,6 +577,27 @@ class TestAdvancedMatchingAlgorithms(unittest.TestCase):
             self.assertLessEqual(c, 1.0)
         # インライアが極端に少なければ0（偶発衝突の棄却）
         self.assertEqual(self.matcher._confidence_from_inliers(aligned=1, total=100), 0.0)
+
+    def test_confidence_significance_robust_to_db_size(self):
+        """大規模DBの偶発衝突で正解が過小評価されない（significance方式）
+
+        全衝突が巨大（例: 2万件）でも、それらが長いDB時間幅(24分)へ散る一方、
+        正解の整列は単一オフセットに集中する。割合(aligned/total)基準では正解でも
+        数%に沈むが、significance基準なら高信頼度になることを確認する。
+        逆に無関係曲（衝突は多いが単一オフセットへの集中が偶然並み）は低信頼度。
+        """
+        db_span = 24 * 60.0  # 24分
+        # 正解: 156件が単一オフセットに集中（偶然期待は約1.4件）→ 高信頼度
+        true_conf = self.matcher._confidence_from_inliers(
+            aligned=156, total=21000, db_span=db_span
+        )
+        self.assertGreater(true_conf, 0.8)
+        # 無関係曲: 衝突総数は同程度でも単一オフセットの整列は偶然並み(数件)→ 低信頼度
+        noise_conf = self.matcher._confidence_from_inliers(
+            aligned=4, total=21000, db_span=db_span
+        )
+        self.assertLess(noise_conf, self.matcher.min_confidence)
+        self.assertGreater(true_conf, noise_conf)
 
 
 class TestIntegrationScenarios(unittest.TestCase):
