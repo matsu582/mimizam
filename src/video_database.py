@@ -42,9 +42,11 @@ class VideoFingerprintDatabase:
             config = DatabaseConfig(backend="sqlite", file_path=path)
 
         self.config = config
-        # 各クエリフレームで支配整列判定に渡すDB候補数の上限。似た画が反復する
-        # 映像で整列側フレームが僅差の偶発一致に負けて捨てられないよう複数保持する。
-        self._frame_match_top_k = 5
+        # 支配整列判定に渡すDB候補の閾値と上限。似た画が反復する映像で整列側
+        # フレームが僅差の偶発一致に負けて捨てられないよう、閾値以上の全DBフレーム
+        # を候補にする（メモリ保護のため1フレームあたり cap 件で頭打ち）。
+        self._frame_match_cand_threshold = 0.4
+        self._frame_match_cap = 50
         self.backend: DatabaseBackend = create_database_backend(config)
 
         if not self.backend.connect():
@@ -316,28 +318,28 @@ class VideoFingerprintDatabase:
 
             # 各クエリフレームで「最類似の1件」だけを残すと、似た画が反復する
             # 映像（OP等）で真に時間整列するDBフレームが僅差の偶発一致に負けて
-            # 捨てられ、整列が散る。上位K件の候補（閾値以上）を保持し、支配直線
-            # フィットが各クエリフレームの候補から直線に乗るものを選べるようにする。
-            top_k_db = min(self._frame_match_top_k, sims.shape[1])
-            if top_k_db > 1:
-                cand_idx = np.argpartition(-sims, top_k_db - 1, axis=1)[
-                    :, :top_k_db
-                ]
-            else:
-                cand_idx = best_idx[:, None]
+            # 捨てられ、整列が散る。候補は「上位1件」ではなく閾値(cand_threshold)
+            # 以上の全DBフレームを保持し、支配直線フィットが直線に乗るものを選べる
+            # ようにする。メモリ保護のため1フレームあたり _frame_match_cap 件で頭打ち。
+            cand_threshold = self._frame_match_cand_threshold
+            cap = self._frame_match_cap
 
             frame_matches = []
             for i, (_, q_ts, _) in enumerate(query_frame_fps):
+                row = sims[i]
+                cand_j = np.nonzero(row >= cand_threshold)[0]
+                if cand_j.size > cap:
+                    # 類似度上位capのみ残す（真の整列側を落とさないため十分大きく取る）
+                    cand_j = cand_j[np.argsort(-row[cand_j])[:cap]]
                 cands = [
-                    (float(db_ts_arr[j]), float(sims[i, j]))
-                    for j in cand_idx[i]
+                    (float(db_ts_arr[j]), float(row[j])) for j in cand_j
                 ]
                 frame_matches.append({
                     "query_ts": q_ts,
                     # 表示・後方互換用の最良1件
                     "db_ts": float(db_ts_arr[best_idx[i]]),
                     "similarity": float(best_per_query[i]),
-                    # 支配整列用の上位候補
+                    # 支配整列用の候補（閾値以上の全DBフレーム、cap件まで）
                     "candidates": cands,
                 })
 
