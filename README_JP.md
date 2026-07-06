@@ -89,7 +89,8 @@ with create_mimizam_sqlite("my_media.db") as mimizam:
 
 ```bash
 # 映像の登録（音声＋映像の統合指紋を登録）
-python examples/movie_fingerprinter.py path/to/video.mp4 --database ./media.db
+python examples/movie_fingerprinter.py path/to/video.mp4 --database ./media.db \
+    --model ./model/codebook_model.npz
 
 # 生AKAZE記述子をDBに保存しつつ登録する。
 # モデル更新後に指紋を再生成（rebuild_video_fingerprints）したい場合は必須。
