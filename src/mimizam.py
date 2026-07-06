@@ -829,12 +829,10 @@ class Mimizam:
             entry["title"] = (
                 getattr(song, "title", None)
                 or getattr(video, "title", None)
-                or "不明"
             )
             entry["file_path"] = (
                 getattr(video, "file_path", None)
                 or getattr(song, "file_path", None)
-                or "不明"
             )
 
             merged.append(entry)

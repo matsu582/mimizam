@@ -234,7 +234,7 @@ def print_merged_results(
     print("-" * 70)
 
     for i, result in enumerate(valid, 1):
-        title = result["title"]
+        title = result["title"] or "不明"
         combined = result["combined_score"]
         a_conf = result.get("audio_confidence")
         v_sim = result.get("visual_similarity")
@@ -258,7 +258,7 @@ def print_merged_results(
         if show_details:
             _print_detail_section(result)
 
-        print(f"     ファイル: {result['file_path']}")
+        print(f"     ファイル: {result['file_path'] or '不明'}")
 
         if i < len(valid):
             print()
