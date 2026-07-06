@@ -21,7 +21,10 @@
 from typing import List, Optional, Dict, Any, Tuple
 from datetime import datetime
 import traceback
-from ..database_base import DatabaseBackend, DatabaseConfig, Song, Video, Fingerprint
+from ..database_base import (
+    DatabaseBackend, DatabaseConfig, Song, Video, Fingerprint,
+    group_query_times as _group_query_times,
+)
 from ..exceptions import ConnectionError, QueryError
 
 try:
@@ -326,8 +329,9 @@ class ElasticsearchBackend(DatabaseBackend):
                 pass  # リフレッシュエラーは無視
             
             # ハッシュ値のリストを作成
-            hash_values = [fp.hash_value for fp in query_fingerprints]
-            hash_to_time = {fp.hash_value: float(fp.time_offset) for fp in query_fingerprints}
+            # 同一ハッシュの多重度を保持するため hash -> query_time群 で集約
+            hash_to_query_times = _group_query_times(query_fingerprints)
+            hash_values = list(hash_to_query_times.keys())
             
             # Elasticsearch専用高性能検索クエリ
             search_body = {
@@ -373,19 +377,18 @@ class ElasticsearchBackend(DatabaseBackend):
                         allow_partial_search_results=False  # 部分結果無効化
                     )
                     
-                    # 結果処理
+                    # 結果処理：DB返り行ごとに該当する全query_timeへ展開
                     for hit in result['hits']['hits']:
                         source = hit['_source']
                         hash_value = source['hash_value']
                         song_id = source['song_id']
-                        db_time_offset = source['time_offset']
+                        db_time = float(source['time_offset'])
                         
-                        if hash_value in hash_to_time:
-                            query_time_offset = hash_to_time[hash_value]
-                            
-                            if song_id not in matches:
-                                matches[song_id] = []
-                            matches[song_id].append((float(query_time_offset), float(db_time_offset)))
+                        query_times = hash_to_query_times.get(hash_value)
+                        if query_times:
+                            bucket = matches.setdefault(song_id, [])
+                            for query_time_offset in query_times:
+                                bucket.append((float(query_time_offset), db_time))
                             
                 except ElasticsearchException as batch_error:
                     self.logger.warning(f"Elasticsearch batch search error (batch {i//batch_size + 1}): {batch_error}")

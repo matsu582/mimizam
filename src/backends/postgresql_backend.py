@@ -1,7 +1,10 @@
 """PostgreSQLデータベースバックエンド実装"""
 
 from typing import List, Optional, Dict, Tuple
-from ..database_base import DatabaseBackend, DatabaseConfig, Song, Video, Fingerprint
+from ..database_base import (
+    DatabaseBackend, DatabaseConfig, Song, Video, Fingerprint,
+    group_query_times as _group_query_times,
+)
 from ..exceptions import ConnectionError, QueryError
 import json
 
@@ -214,8 +217,9 @@ class PostgreSQLBackend(DatabaseBackend):
             cursor = self.connection.cursor()
             
             # バッチクエリ方式：ANY句を使用して1回のクエリで全てのマッチを取得
-            hash_to_query_time = {fp.hash_value: fp.time_offset for fp in query_fingerprints}
-            hash_values = list(hash_to_query_time.keys())
+            # 同一ハッシュの多重度を保持するため hash -> query_time群 で集約
+            hash_to_query_times = _group_query_times(query_fingerprints)
+            hash_values = list(hash_to_query_times.keys())
             
             # PostgreSQLのパラメータ制限を考慮してバッチ分割
             batch_size = 10000  # PostgreSQLは大きなIN句に対応
@@ -229,12 +233,12 @@ class PostgreSQLBackend(DatabaseBackend):
                     WHERE hash_value = ANY(%s)
                 """, (batch_hashes,))
                 
-                # 結果を処理
+                # 結果を処理：DB返り行ごとに該当する全query_timeへ展開
                 for song_id, db_time_offset, hash_value in cursor.fetchall():
-                    query_time = hash_to_query_time[hash_value]
-                    if song_id not in matches:
-                        matches[song_id] = []
-                    matches[song_id].append((float(query_time), float(db_time_offset)))
+                    db_time = float(db_time_offset)
+                    bucket = matches.setdefault(song_id, [])
+                    for query_time in hash_to_query_times[hash_value]:
+                        bucket.append((float(query_time), db_time))
                     
         except PostgresError as e:
             self.logger.error(f"PostgreSQL fingerprint search error: {e}")

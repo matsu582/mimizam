@@ -1,7 +1,10 @@
 """SQLiteデータベースバックエンド実装"""
 
 from typing import List, Optional, Dict, Any, Tuple
-from ..database_base import DatabaseBackend, DatabaseConfig, Song, Video, Fingerprint
+from ..database_base import (
+    DatabaseBackend, DatabaseConfig, Song, Video, Fingerprint,
+    group_query_times as _group_query_times,
+)
 from ..exceptions import ConnectionError, QueryError
 import json
 
@@ -171,8 +174,10 @@ class SQLiteBackend(DatabaseBackend):
             cursor = self.connection.cursor()
             
             # バッチクエリ方式：IN句を使用して1回のクエリで全てのマッチを取得
-            hash_to_query_time = {fp.hash_value: fp.time_offset for fp in query_fingerprints}
-            hash_values = list(hash_to_query_time.keys())
+            # 同一ハッシュが複数のquery_timeに現れる多重度を保持するため、
+            # hash -> query_time群 として集約する（dict化で最後の1件に潰さない）
+            hash_to_query_times = _group_query_times(query_fingerprints)
+            hash_values = list(hash_to_query_times.keys())
             
             # SQLiteの変数制限（999個）を考慮してバッチ分割
             batch_size = 999
@@ -186,12 +191,12 @@ class SQLiteBackend(DatabaseBackend):
                     WHERE hash_value IN ({placeholders})
                 """, batch_hashes)
                 
-                # 結果を処理
+                # 結果を処理：DB返り行ごとに、そのハッシュを持つ全query_timeへ展開
                 for song_id, db_time_offset, hash_value in cursor.fetchall():
-                    query_time = hash_to_query_time[hash_value]
-                    if song_id not in matches:
-                        matches[song_id] = []
-                    matches[song_id].append((float(query_time), float(db_time_offset)))
+                    db_time = float(db_time_offset)
+                    bucket = matches.setdefault(song_id, [])
+                    for query_time in hash_to_query_times[hash_value]:
+                        bucket.append((float(query_time), db_time))
                     
         except Exception as e:
             self.logger.error(f"SQLite fingerprint search error: {e}")

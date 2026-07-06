@@ -216,19 +216,18 @@ class Mimizam:
             )
             
             # 結果を整形
+            # find_matches が付与した Song オブジェクトを再利用し、再取得（N+1）を避ける
             results = []
             for match in matches:
-                song_id = match.get('song_id')
-                if song_id:
-                    song = self.database.get_song(song_id)
-                    if song:
-                        result = {
-                            'song': song,
-                            'confidence': match.get('confidence', 0.0),
-                            'match_count': match.get('match_count', 0),
-                            'details': match
-                        }
-                        results.append(result)
+                song = match.get('song')
+                if song:
+                    result = {
+                        'song': song,
+                        'confidence': match.get('confidence', 0.0),
+                        'match_count': match.get('match_count', 0),
+                        'details': match
+                    }
+                    results.append(result)
             
             self.logger.info(f"Retrieved {len(results)} search results")
             return results

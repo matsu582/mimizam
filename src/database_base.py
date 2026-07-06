@@ -18,6 +18,29 @@ class Fingerprint:
     song_id: Optional[str] = None
 
 
+def group_query_times(
+    query_fingerprints: List['Fingerprint'],
+) -> Dict[int, List[float]]:
+    """クエリ指紋を hash_value -> query_time群 に集約する
+
+    同一ハッシュが複数のquery_timeに現れる多重度を保持するためのヘルパ。
+    dict(``{hash: time}``)化すると最後の1件しか残らず、match_count・
+    時間整列・信頼度が歪むため、各ハッシュに紐づく全query_timeをリストで
+    保持する。DB検索側はこのキー集合(distinctなハッシュ)で候補を引き、
+    返り行ごとに該当する全query_timeへ展開して多重度を復元する。
+
+    Args:
+        query_fingerprints: クエリフィンガープリントのリスト
+
+    Returns:
+        hash_value をキー、query_time(float)のリストを値とする辞書
+    """
+    grouped: Dict[int, List[float]] = {}
+    for fp in query_fingerprints:
+        grouped.setdefault(fp.hash_value, []).append(float(fp.time_offset))
+    return grouped
+
+
 @dataclass
 class Song:
     """データベース内の楽曲を表現"""
@@ -248,5 +271,6 @@ __all__ = [
     'Song',
     'Video',
     'DatabaseConfig',
-    'DatabaseBackend'
+    'DatabaseBackend',
+    'group_query_times',
 ]

@@ -119,7 +119,7 @@ python examples/mimizam_demo.py
 
 1. **Spectrogram Generation**: Time-frequency analysis using Short-Time Fourier Transform (STFT)
 2. **Adaptive Peak Detection**: Dynamic threshold-based spectral peak extraction based on audio characteristics
-3. **Hash-based Fingerprinting**: SHA-256 hash generation from anchor-target peak pairs
+3. **Hash-based Fingerprinting**: Reversible 32-bit bit-packed hash generation from anchor-target peak pairs (frequency/time-delta bins packed into a single integer; not a cryptographic hash)
 4. **Intelligent Matching**: Time alignment and confidence scoring
 
 ### Video Fingerprinting
