@@ -10,7 +10,6 @@ from pydub import AudioSegment
 import matplotlib.pyplot as plt
 from scipy.signal import find_peaks
 from typing import List, Tuple, Dict, Optional
-import zlib
 import sqlite3
 from dataclasses import dataclass
 import pickle
@@ -483,29 +482,28 @@ class HashGenerator:
         Returns:
             32bit符号なし整数のハッシュ値
 
-        入力は f1|f2|Δt の低カーディナリティな量子化値であり、
-        64文字のsha256はDB容量・索引効率の無駄が大きいため、
-        crc32で32bit整数に収める（環境非依存で決定的）。
+        f1ビン・f2ビン・Δtビンを可逆にビットパックして32bit整数に収める。
+        crc32のような非可逆ハッシュは量子化空間内でも衝突し、別ピーク対が
+        同一一致として扱われて誤ヒット要因になるため使用しない。
+        レイアウト: [f1ビン:11bit][f2ビン:11bit][Δtビン:10bit]
+        可聴域(≤20kHz→666ビン)・Δt≤2.0s(40ビン)は各フィールド幅に収まり、
+        通常入力では飽和が発生しないため衝突しない。
         """
-        # より堅牢な周波数量子化 - 広い速度変化対応のため大きなビン
-        f1_quantized = int(anchor.frequency // 30) * 30  # 0.5x-2x速度変化対応のため大きなビン
-        f2_quantized = int(target.frequency // 30) * 30
-        
-        # より広い速度範囲対応の適応的量子化を持つ時間差
-        time_delta_raw = target.time - anchor.time
-        
-        # 0.5x-2x範囲のより良いカバレッジのため対数時間量子化を使用
-        if time_delta_raw > 0:
-            # より良い速度許容度のため50msビン（10msの代わり）に量子化
-            time_delta = int(time_delta_raw * 20) * 5  # センチ秒単位での50msビン
-        else:
-            time_delta = 0
-        
-        # 速度変化に対する改良されたロバスト性を持つハッシュを作成
-        primary_hash_input = f"{f1_quantized}|{f2_quantized}|{time_delta}"
+        # 周波数量子化（0.5x-2x速度変化対応のため30Hzビン）
+        f1_bin = int(anchor.frequency // 30)
+        f2_bin = int(target.frequency // 30)
 
-        # 32bit整数ハッシュを生成
-        return zlib.crc32(primary_hash_input.encode()) & 0xFFFFFFFF
+        # 時間差の量子化（50msビン: 1/20秒刻み）
+        time_delta_raw = target.time - anchor.time
+        dt_bin = int(time_delta_raw * 20) if time_delta_raw > 0 else 0
+
+        # フィールド幅への飽和クランプ（範囲外は端に丸める＝決定的）
+        f1_bin = min(max(f1_bin, 0), 0x7FF)   # 11bit
+        f2_bin = min(max(f2_bin, 0), 0x7FF)   # 11bit
+        dt_bin = min(max(dt_bin, 0), 0x3FF)   # 10bit
+
+        # 可逆ビットパック（32bit符号なし整数）
+        return (f1_bin << 21) | (f2_bin << 10) | dt_bin
     
     def _filter_peaks_by_density(self, peaks: List[Peak], debug: bool = False) -> List[Peak]:
         """

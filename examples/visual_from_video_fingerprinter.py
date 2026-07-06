@@ -232,7 +232,15 @@ def main() -> int:
         "--rebuild",
         action="store_true",
         help="DB内の全映像指紋を保存済み記述子から再生成。"
-             "モデル更新後に元映像なしで指紋を再計算する",
+             "モデル更新後に元映像なしで指紋を再計算する。"
+             "登録時に --store-descriptors で記述子を保持しておく必要がある",
+    )
+    parser.add_argument(
+        "--store-descriptors",
+        action="store_true",
+        help="登録時に生AKAZE記述子をDBに保存する（既定は保存しない）。"
+             "後で --rebuild による指紋再生成を行う場合に指定する。"
+             "容量が増える点に注意",
     )
     parser.add_argument(
         "--verbose", "-v",
@@ -251,6 +259,11 @@ def main() -> int:
 
         # VLAD/PCAモデルの読み込み
         load_model(mimizam, args.model)
+
+        # --store-descriptors: 登録時に生記述子を保持（再生成用）
+        if args.store_descriptors:
+            mimizam.configure_video(store_raw_descriptors=True)
+            logger.info("生記述子の保存を有効化しました（--rebuild用）")
 
         # --rebuild: DB内の指紋を記述子から再生成
         if args.rebuild:

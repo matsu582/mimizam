@@ -325,6 +325,7 @@ class Mimizam:
         self,
         scene_eval_fps: Optional[float] = None,
         profile_frames: Optional[bool] = None,
+        store_raw_descriptors: Optional[bool] = None,
     ) -> None:
         """映像指紋の実行時設定を行う
 
@@ -334,6 +335,10 @@ class Mimizam:
         Args:
             scene_eval_fps: シーン検出の評価fps（Noneで変更なし）
             profile_frames: 処理時間内訳のログ出力（Noneで変更なし）
+            store_raw_descriptors: 生AKAZE記述子をDB保存するか（Noneで変更なし）。
+                Trueにすると元映像なしでの指紋再生成
+                （rebuild_video_fingerprints）が可能になる。既定はFalseで
+                容量肥大を避けるため保存しない。
         """
         from .video_fingerprinter import VideoFingerprintConfig
         self._ensure_video_system()
@@ -343,11 +348,16 @@ class Mimizam:
             self._video_config.scene_eval_fps = scene_eval_fps
         if profile_frames is not None:
             self._video_config.profile_frames = profile_frames
+        if store_raw_descriptors is not None:
+            self._video_config.store_raw_descriptors = store_raw_descriptors
         # 既に生成済みなら即反映（全クラスでconfigを共有）
         vfp = self._video_fingerprinter
         if vfp is not None:
             vfp.config.scene_eval_fps = self._video_config.scene_eval_fps
             vfp.config.profile_frames = self._video_config.profile_frames
+            vfp.config.store_raw_descriptors = (
+                self._video_config.store_raw_descriptors
+            )
             vfp.frame_selector.config = vfp.config
             vfp.encoder.config.scene_eval_fps = vfp.config.scene_eval_fps
             vfp.encoder.config.profile_frames = vfp.config.profile_frames
@@ -1037,6 +1047,19 @@ class Mimizam:
             )
 
         all_desc = vdb.get_all_frame_descriptors()
+
+        # 記述子が1件も保存されていない場合、再生成は無言で全スキップに
+        # 落ちるだけで実質機能しない。store_raw_descriptors(既定False)を
+        # 有効化して登録し直す必要があることを明確なエラーで知らせる。
+        if not any(descs for descs in all_desc.values()):
+            raise RuntimeError(
+                "再生成用の生記述子がDBに保存されていません。"
+                "指紋再生成には登録時の記述子保持が必要です。"
+                "configure_video(store_raw_descriptors=True) を指定して"
+                "（CLIでは --store-descriptors を付けて）登録し直して"
+                "ください。"
+            )
+
         stats = {"total": len(all_desc), "success": 0, "skip": 0}
 
         for vid_id, frame_descs in all_desc.items():
