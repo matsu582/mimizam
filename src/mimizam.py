@@ -1056,8 +1056,7 @@ class Mimizam:
                 "再生成用の生記述子がDBに保存されていません。"
                 "指紋再生成には登録時の記述子保持が必要です。"
                 "configure_video(store_raw_descriptors=True) を指定して"
-                "（CLIでは --store-descriptors を付けて）登録し直して"
-                "ください。"
+                "登録し直してください。"
             )
 
         stats = {"total": len(all_desc), "success": 0, "skip": 0}
