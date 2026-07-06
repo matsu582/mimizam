@@ -209,8 +209,12 @@ class Mimizam:
             query_fingerprints = self.fingerprinter.fingerprint_file(query_file_path)
             
             if not query_fingerprints:
-                self.logger.warning(f"No fingerprints generated from query file: {query_file_path}")
-                return []
+                # クエリから指紋を1件も生成できないのは「一致なし」ではなく音声処理失敗。
+                # 空リスト（=一致なし）に潰さず例外で通知し、両者を区別できるようにする。
+                raise AudioProcessingError(
+                    "No fingerprints could be generated from query audio",
+                    context={'query_file_path': query_file_path},
+                )
             
             self.logger.info(f"Generated {len(query_fingerprints)} query fingerprints")
             
@@ -451,7 +455,11 @@ class Mimizam:
             video_db_path: 映像DBファイルパス
 
         Returns:
-            追加に成功した場合は映像ID、失敗した場合はNone
+            追加に成功した場合は映像ID
+
+        Raises:
+            FileNotFoundError: 指定されたファイルが存在しない場合
+            MimizamError: 映像指紋の生成失敗など処理が実行できない場合
         """
         try:
             if not os.path.exists(file_path):
@@ -474,10 +482,11 @@ class Mimizam:
 
             fp = vfp.fingerprint_video(file_path)
             if fp is None:
-                self.logger.error(
-                    f"Failed to generate video fingerprint: {file_path}"
+                # 映像指紋の生成失敗を None に潰さず処理失敗として通知する
+                raise MimizamError(
+                    "Failed to generate video fingerprint",
+                    context={'file_path': file_path},
                 )
-                return None
 
             # DBに保存
             import cv2
@@ -567,7 +576,11 @@ class Mimizam:
             video_db_path: 映像DBファイルパス
 
         Returns:
-            検索結果のリスト
+            検索結果のリスト（「一致なし」は空リスト）
+
+        Raises:
+            FileNotFoundError: 指定されたファイルが存在しない場合
+            MimizamError: 未学習・映像指紋生成失敗など処理が実行できない場合
         """
         try:
             if not os.path.exists(query_file_path):
@@ -579,15 +592,19 @@ class Mimizam:
             vdb = self._get_video_db(video_db_path)
 
             if not vfp.is_trained:
-                self.logger.warning(
-                    "Model is not trained. "
-                    "Register a video with add_video() first"
+                # 未学習は「一致なし」ではなく前提条件未充足。空リストに潰さず例外化する
+                raise MimizamError(
+                    "Video model is not trained. Register a video with add_video() first",
+                    context={'query_file_path': query_file_path},
                 )
-                return []
 
             fp = vfp.fingerprint_video(query_file_path)
             if fp is None:
-                return []
+                # 映像指紋の生成失敗を「一致なし」に潰さず処理失敗として通知する
+                raise MimizamError(
+                    "Failed to generate video fingerprint for query",
+                    context={'query_file_path': query_file_path},
+                )
 
             # Step 1: フレーム指紋のANN近傍投票で候補絞り込み
             candidates = vdb.search_frame_candidates(

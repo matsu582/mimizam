@@ -142,6 +142,23 @@ class TestErrorVsNoMatch(unittest.TestCase):
             if os.path.exists(tmp.name):
                 os.unlink(tmp.name)
 
+    def test_search_song_empty_fingerprints_raises_not_empty_list(self):
+        """クエリ指紋が空のとき、[]（一致なし）ではなく処理失敗例外を送出する"""
+        from mimizam import create_mimizam_sqlite
+        from mimizam.src.exceptions import AudioProcessingError
+        m = create_mimizam_sqlite(':memory:')
+        tmp = tempfile.NamedTemporaryFile(delete=False, suffix='.wav')
+        tmp.write(b'not audio')
+        tmp.close()
+        try:
+            m.fingerprinter.fingerprint_file = Mock(return_value=[])
+            with self.assertRaises(AudioProcessingError):
+                m.search_song(query_file_path=tmp.name)
+        finally:
+            m.close()
+            if os.path.exists(tmp.name):
+                os.unlink(tmp.name)
+
 
 class TestFreqScaleRescale(unittest.TestCase):
     """② freq_scale（ピッチ変化）で実際にハッシュを再計算する"""
