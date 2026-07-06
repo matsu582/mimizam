@@ -103,6 +103,37 @@ class TestElasticsearchRefreshConfig(unittest.TestCase):
         self.assertTrue(cfg.es_refresh_on_write)
         self.assertFalse(cfg.es_refresh_on_search)
 
+    def test_maybe_refresh_for_search_respects_flag(self):
+        """_maybe_refresh_for_search はフラグに従い音声/映像の全読み取り経路を統一制御する"""
+        from mimizam.src.backends.elasticsearch_backend import ElasticsearchBackend
+
+        class _FakeIndices:
+            def __init__(self):
+                self.calls = []
+
+            def refresh(self, index):
+                self.calls.append(index)
+
+        class _FakeClient:
+            def __init__(self):
+                self.indices = _FakeIndices()
+
+        class _Stub:
+            pass
+
+        stub = _Stub()
+        stub.client = _FakeClient()
+
+        # 既定（検索時refreshオフ）ではrefreshを呼ばない
+        stub.config = DatabaseConfig(backend='elasticsearch')
+        ElasticsearchBackend._maybe_refresh_for_search(stub, 'idx_a', 'idx_b')
+        self.assertEqual(stub.client.indices.calls, [])
+
+        # 明示的に有効化した場合のみ、指定インデックスをrefreshする
+        stub.config = DatabaseConfig(backend='elasticsearch', es_refresh_on_search=True)
+        ElasticsearchBackend._maybe_refresh_for_search(stub, 'idx_a', 'idx_b')
+        self.assertEqual(stub.client.indices.calls, ['idx_a', 'idx_b'])
+
 
 class TestNamespaceSeparation(unittest.TestCase):
     """項目5: mimizam.audio / mimizam.video の名前空間分離"""
