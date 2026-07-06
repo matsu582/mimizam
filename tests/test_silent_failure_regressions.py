@@ -64,6 +64,39 @@ class TestQueryHashMultiplicity(unittest.TestCase):
                 os.unlink(tmp.name)
 
 
+class TestBatchSongRetrieval(unittest.TestCase):
+    """④ 楽曲メタ情報の真の一括取得（get_songs）"""
+
+    def test_get_songs_single_query_via_backend(self):
+        """FingerprintDatabase.get_songs はバックエンドの get_songs へ1回で委譲する"""
+        tmp = tempfile.NamedTemporaryFile(delete=False, suffix='.db')
+        tmp.close()
+        try:
+            db = FingerprintDatabase(create_sqlite_config(tmp.name))
+            for i in range(3):
+                db.add_song(Song(id=f"s{i}", title=f"t{i}", artist="a",
+                                 file_path=f"/x{i}.wav"))
+            got = db.get_songs(["s0", "s1", "s2", "missing", "s1"])
+            self.assertEqual(got["s0"].title, "t0")
+            self.assertEqual(got["s2"].title, "t2")
+            self.assertIsNone(got["missing"])
+            # 重複IDは1エントリに集約
+            self.assertEqual(len(got), 4)
+            db.disconnect()
+        finally:
+            if os.path.exists(tmp.name):
+                os.unlink(tmp.name)
+
+    def test_get_songs_batch_delegates_not_per_id(self):
+        """_get_songs_batch は get_songs を1回呼び、get_song を件数分呼ばない"""
+        mock_db = Mock()
+        mock_db.get_songs.return_value = {"s0": None, "s1": None}
+        matcher = FingerprintMatcher(mock_db)
+        matcher._get_songs_batch(["s0", "s1", "s0"])
+        mock_db.get_songs.assert_called_once()
+        mock_db.get_song.assert_not_called()
+
+
 class TestFreqScaleRescale(unittest.TestCase):
     """② freq_scale（ピッチ変化）で実際にハッシュを再計算する"""
 

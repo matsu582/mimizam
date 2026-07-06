@@ -424,7 +424,37 @@ class ElasticsearchBackend(DatabaseBackend):
                 self.logger.error(f"Elasticsearch song retrieval error: {e}")
         
         return None
-    
+
+    def get_songs(self, song_ids: List[str]) -> Dict[str, Optional[Song]]:
+        """Elasticsearchから複数楽曲を _mget で一括取得する"""
+        unique_ids = list(dict.fromkeys(song_ids))  # 重複排除・順序保持
+        song_map: Dict[str, Optional[Song]] = {sid: None for sid in unique_ids}
+        if not unique_ids:
+            return song_map
+        try:
+            try:
+                self.client.indices.refresh(index=self.songs_index)
+            except ElasticsearchException:
+                pass  # リフレッシュエラーは無視
+
+            result = self.client.mget(index=self.songs_index, ids=unique_ids)
+            for doc in result.get('docs', []):
+                if not doc.get('found'):
+                    continue
+                source = doc['_source']
+                meta = source.get('meta') if 'meta' in source else None
+                song_map[source['id']] = Song(
+                    id=source['id'],
+                    title=source['title'],
+                    artist=source['artist'],
+                    file_path=source['file_path'],
+                    meta=meta,
+                    created_at=source.get('created_at'),
+                )
+        except ElasticsearchException as e:
+            self.logger.error(f"Elasticsearch batch song retrieval error: {e}")
+        return song_map
+
     def list_songs(self) -> List[Song]:
         """Elasticsearchから全楽曲をリスト表示"""
         songs = []

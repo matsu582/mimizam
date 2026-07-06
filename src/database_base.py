@@ -170,7 +170,20 @@ class DatabaseBackend(ABC):
     def get_song(self, song_id: str) -> Optional[Song]:
         """楽曲情報を取得。致命的エラー時は例外を投げる可能性がある。"""
         pass
-    
+
+    def get_songs(self, song_ids: List[str]) -> Dict[str, Optional[Song]]:
+        """複数楽曲をまとめて取得する。
+
+        既定実装は ``get_song`` のループ（後方互換用フォールバック）。
+        各バックエンドは ``WHERE id IN (...)`` / ``ANY`` / ``_mget`` 等で
+        1回の問い合わせに集約するようオーバーライドすること。
+        重複IDは一度だけ引き、入力順を保持したマップを返す。
+        """
+        result: Dict[str, Optional[Song]] = {}
+        for song_id in dict.fromkeys(song_ids):  # 重複排除・順序保持
+            result[song_id] = self.get_song(song_id)
+        return result
+
     @abstractmethod
     def list_songs(self) -> List[Song]:
         """全楽曲をリスト表示。致命的エラー時は例外を投げる可能性がある。"""

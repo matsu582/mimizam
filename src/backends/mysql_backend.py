@@ -245,7 +245,39 @@ class MySQLBackend(DatabaseBackend):
             self.logger.error(f"MySQL song retrieval error: {e}")
         
         return None
-    
+
+    def get_songs(self, song_ids: List[str]) -> Dict[str, Optional[Song]]:
+        """MySQLから複数楽曲を IN 句で一括取得する"""
+        unique_ids = list(dict.fromkeys(song_ids))  # 重複排除・順序保持
+        song_map: Dict[str, Optional[Song]] = {sid: None for sid in unique_ids}
+        if not unique_ids:
+            return song_map
+        try:
+            cursor = self.connection.cursor()
+            batch_size = 10000  # 安全マージン
+            for i in range(0, len(unique_ids), batch_size):
+                batch = unique_ids[i:i + batch_size]
+                placeholders = ','.join(['%s'] * len(batch))
+                cursor.execute(f"""
+                    SELECT id, title, artist, file_path, created_at, meta
+                    FROM songs
+                    WHERE id IN ({placeholders})
+                """, batch)
+                for row in cursor.fetchall():
+                    meta = None
+                    if row[5]:
+                        try:
+                            meta = json.loads(row[5])
+                        except Exception:
+                            meta = None
+                    song_map[row[0]] = Song(
+                        id=row[0], title=row[1], artist=row[2],
+                        file_path=row[3], created_at=row[4], meta=meta,
+                    )
+        except MySQLError as e:
+            self.logger.error(f"MySQL batch song retrieval error: {e}")
+        return song_map
+
     def list_songs(self) -> List[Song]:
         """MySQLから全楽曲をリスト表示"""
         songs = []

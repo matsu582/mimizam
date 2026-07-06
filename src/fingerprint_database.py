@@ -113,7 +113,18 @@ class FingerprintDatabase:
             見つかった場合は楽曲オブジェクト、そうでなければNone
         """
         return self.backend.get_song(song_id)
-    
+
+    def get_songs(self, song_ids: List[str]) -> Dict[str, Optional[Song]]:
+        """複数の楽曲情報をまとめて取得（バックエンドの一括取得へ委譲）
+
+        Args:
+            song_ids: 取得する楽曲IDのリスト
+
+        Returns:
+            song_id -> Song(見つからない場合None) のマッピング辞書
+        """
+        return self.backend.get_songs(song_ids)
+
     def list_songs(self) -> List[Song]:
         """
         データベース内の全楽曲をリスト表示
@@ -635,8 +646,16 @@ class FingerprintMatcher:
     def _get_songs_batch(self, song_ids: List[str]) -> Dict[str, Optional[Song]]:
         """複数楽曲をまとめて取得する
 
-        重複IDは一度だけ取得し、結果ごとの個別取得によるN+1を抑える。
+        バックエンドの ``get_songs``（IN/ANY/_mget による真の一括取得）へ委譲し、
+        結果ごとの個別取得によるN+1を1回の問い合わせに集約する。
+        ``FingerprintDatabase.get_songs`` が無い場合は get_song ループへフォールバック。
         """
+        if not song_ids:
+            return {}
+        get_songs = getattr(self.database, 'get_songs', None)
+        if callable(get_songs):
+            return get_songs(song_ids)
+        # フォールバック（後方互換）
         song_map: Dict[str, Optional[Song]] = {}
         for song_id in dict.fromkeys(song_ids):  # 重複排除・順序保持
             song_map[song_id] = self.database.get_song(song_id)
