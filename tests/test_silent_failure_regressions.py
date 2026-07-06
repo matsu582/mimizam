@@ -97,6 +97,52 @@ class TestBatchSongRetrieval(unittest.TestCase):
         mock_db.get_song.assert_not_called()
 
 
+class TestDetailedMatchInfoNoResearch(unittest.TestCase):
+    """③④ get_detailed_match_info は match_pairs 指定時にDB再検索しない"""
+
+    def test_match_pairs_skips_search(self):
+        mock_db = Mock()
+        matcher = FingerprintMatcher(mock_db)
+        pairs = [(1.0, 10.0), (2.0, 11.0), (3.0, 12.0)]
+        info = matcher.get_detailed_match_info([], "s1", match_pairs=pairs)
+        # 再検索(search_fingerprints)は呼ばれない
+        mock_db.search_fingerprints.assert_not_called()
+        self.assertEqual(info['statistics']['total_matches'], 3)
+
+
+class TestErrorVsNoMatch(unittest.TestCase):
+    """② 高レベルAPIは「一致なし」と「処理失敗」を区別する"""
+
+    def _make_mimizam(self):
+        from mimizam import create_mimizam_sqlite
+        return create_mimizam_sqlite(':memory:')
+
+    def test_add_song_missing_file_raises(self):
+        m = self._make_mimizam()
+        try:
+            with self.assertRaises(FileNotFoundError):
+                m.add_song(file_path="/no/such/file.wav", title="t", artist="a")
+        finally:
+            m.close()
+
+    def test_add_song_wraps_processing_failure(self):
+        """指紋生成が空を返すと処理失敗として例外を送出（Noneに潰さない）"""
+        from mimizam import create_mimizam_sqlite
+        from mimizam.src.exceptions import AudioProcessingError
+        m = create_mimizam_sqlite(':memory:')
+        tmp = tempfile.NamedTemporaryFile(delete=False, suffix='.wav')
+        tmp.write(b'not audio')
+        tmp.close()
+        try:
+            m.fingerprinter.fingerprint_file = Mock(return_value=[])
+            with self.assertRaises(AudioProcessingError):
+                m.add_song(file_path=tmp.name, title="t", artist="a")
+        finally:
+            m.close()
+            if os.path.exists(tmp.name):
+                os.unlink(tmp.name)
+
+
 class TestFreqScaleRescale(unittest.TestCase):
     """② freq_scale（ピッチ変化）で実際にハッシュを再計算する"""
 

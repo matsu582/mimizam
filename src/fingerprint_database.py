@@ -980,17 +980,25 @@ class FingerprintMatcher:
         return len(match_pairs) / time_span
 
     def get_detailed_match_info(self, query_fingerprints: List[Fingerprint], 
-                               song_id: str) -> Dict[str, Any]:
+                               song_id: str,
+                               match_pairs: Optional[List[Tuple[float, float]]] = None) -> Dict[str, Any]:
         """
         特定の楽曲の詳細なマッチ情報を取得
         
         Args:
             query_fingerprints: クエリフィンガープリントのリスト
             song_id: 詳細を取得する楽曲識別子
+            match_pairs: 取得済みの (query_time, db_time) ペア。指定された場合は
+                DB再検索を行わずこれを使う（find_matches 経路のN+1回避と同様に、
+                呼び出し側が既にペアを持っているときの再検索を避けるため）。
             
         Returns:
             詳細なマッチ情報を含む辞書
         """
+        # 取得済みペアがあれば再検索せずそのまま使う
+        if match_pairs is not None:
+            return self._build_detailed_match_info(match_pairs)
+
         # この楽曲のすべての一致を取得
         all_matches = self.database.search_fingerprints(query_fingerprints)
         
