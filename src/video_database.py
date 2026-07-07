@@ -57,10 +57,15 @@ class VideoFingerprintDatabase:
         # 絞り込みに使い、各クエリフレームで上位 _geom_top_k 件のDB候補に対し
         # AKAZE記述子を突き合わせる。インライア数が _geom_min_inliers 以上の
         # ペアのみ一致とみなし、_geom_inlier_saturation で[0,1]スコアへ正規化。
-        self._geom_top_k = 10
+        self._geom_top_k = 6
         self._geom_min_inliers = 15
         self._geom_ransac_thresh = 5.0
         self._geom_inlier_saturation = 100.0
+        # 速度対策。1クエリフレームで幾何一致が _geom_max_hits 件見つかったら、
+        # 残る上位候補のBFマッチを打ち切る。区間判定はDB時刻クラスタで行うため、
+        # 1フレームから数件拾えれば十分（同一フレームが多数のDB候補に一致しても
+        # クラスタ上は同じ塊に寄与するだけ）。強一致フレームの走査を早期終了する。
+        self._geom_max_hits = 3
         # 幾何検証の速度対策。BFマッチはフレームあたり記述子数の二乗で重くなるため、
         # 1フレームで突き合わせる記述子を _geom_max_desc 件（先頭N件）に制限する。
         # 真の一致はインライアが100+と桁違いに多く、数百点でも十分に分離できる。
@@ -519,6 +524,7 @@ class VideoFingerprintDatabase:
         """
         top_k = self._geom_top_k
         min_inl = self._geom_min_inliers
+        max_hits = self._geom_max_hits
         sat = self._geom_inlier_saturation
         db_fidx_arr = [f for f, _, _ in db_frame_vecs]
 
@@ -548,6 +554,7 @@ class VideoFingerprintDatabase:
                     dq, kq, dd, kd,
                     ransac_thresh=self._geom_ransac_thresh,
                     matcher=matcher,
+                    min_good=min_inl,
                 )
                 if inl >= min_inl:
                     score = min(1.0, inl / sat)
@@ -555,6 +562,9 @@ class VideoFingerprintDatabase:
                     if score > best_score:
                         best_score = score
                         best_db_ts = float(db_ts_arr[j])
+                    # 十分な件数を拾えたら残りの上位候補は打ち切る（高速化）
+                    if len(cands) >= max_hits:
+                        break
 
             frame_matches.append({
                 "query_ts": q_ts,

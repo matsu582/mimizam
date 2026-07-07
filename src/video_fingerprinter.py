@@ -153,6 +153,7 @@ def geometric_match(
     ratio: float = 0.75,
     ransac_thresh: float = 5.0,
     matcher: Optional["cv2.BFMatcher"] = None,
+    min_good: int = 4,
 ) -> Tuple[int, int]:
     """2フレームのAKAZE記述子を突き合わせ、良マッチ数と幾何インライア数を返す
 
@@ -168,6 +169,9 @@ def geometric_match(
         ransac_thresh: RANSACのインライア許容画素
         matcher: 再利用するBFMatcher（Noneなら都度生成）。多数フレームを
             突き合わせる際に生成コストを省くため共有インスタンスを渡せる。
+        min_good: RANSACを実行する最小良マッチ数。インライア数は良マッチ数を
+            超えないため、必要インライア数を渡せば見込みの無いペアの
+            findHomography計算を省ける（既定4はホモグラフィ推定の下限）。
 
     Returns:
         (良マッチ数, 幾何インライア数)
@@ -184,7 +188,7 @@ def geometric_match(
         pair[0] for pair in knn
         if len(pair) == 2 and pair[0].distance < ratio * pair[1].distance
     ]
-    if len(good) < 4:
+    if len(good) < max(4, min_good):
         return len(good), 0
 
     src = np.float32(
