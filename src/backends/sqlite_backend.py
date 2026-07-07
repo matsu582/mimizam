@@ -206,7 +206,10 @@ class SQLiteBackend(DatabaseBackend):
                     
         except Exception as e:
             self.logger.error(f"SQLite fingerprint search error: {e}")
-        
+            raise DatabaseError(
+                "Failed to search fingerprints", original_error=e,
+            ) from e
+
         return matches
     
     def get_song(self, song_id: str) -> Optional[Song]:
@@ -591,7 +594,10 @@ class SQLiteBackend(DatabaseBackend):
             ]
         except Exception as e:
             self.logger.error(f"SQLite frame fingerprint retrieval error: {e}")
-            return []
+            raise DatabaseError(
+                "Failed to get frame fingerprints", original_error=e,
+                context={'video_id': video_id},
+            ) from e
 
     def get_frame_fingerprints_batch(
         self, video_ids: List[str],
@@ -620,6 +626,9 @@ class SQLiteBackend(DatabaseBackend):
             self.logger.error(
                 f"SQLite frame fingerprint batch retrieval error: {e}"
             )
+            raise DatabaseError(
+                "Failed to get frame fingerprints batch", original_error=e,
+            ) from e
         return result
 
     def get_video(self, video_id: str) -> Optional[Video]:
@@ -765,7 +774,10 @@ class SQLiteBackend(DatabaseBackend):
             self.logger.error(
                 f"SQLite frame descriptor retrieval error: {exc}"
             )
-            return []
+            raise DatabaseError(
+                "Failed to get frame descriptors", original_error=exc,
+                context={'video_id': video_id},
+            ) from exc
 
     def get_all_frame_descriptors(
         self,
@@ -791,6 +803,9 @@ class SQLiteBackend(DatabaseBackend):
             self.logger.error(
                 f"SQLite all frame descriptor retrieval error: {exc}"
             )
+            raise DatabaseError(
+                "Failed to get all frame descriptors", original_error=exc,
+            ) from exc
         return result
 
     def delete_video(self, video_id: str) -> bool:

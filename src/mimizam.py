@@ -437,10 +437,14 @@ class Mimizam:
 
         requested_key = None
         if config is not None:
+            # config のいずれかのフィールドが変われば別接続とみなして作り直す。
+            # 一部フィールドだけ比較すると password 変更等で誤って旧接続を再利用する。
             requested_key = (
                 'config', config.backend, config.host, config.port,
-                config.database, config.username, config.file_path,
-                config.index_name,
+                config.database, config.username, config.password,
+                config.file_path, config.index_name,
+                config.ca_certs, config.verify_certs,
+                config.pool_size, config.pool_timeout,
             )
         elif db_path is not None:
             requested_key = ('path', os.path.abspath(db_path))

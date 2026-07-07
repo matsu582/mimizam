@@ -481,8 +481,17 @@ class VideoFingerprintDatabase:
                     kpt, desc = split_raw_descriptor(arr)
                     db_geom_by_fidx[fidx] = self._prep_geom_frame(kpt, desc)
                 t_prep += time.perf_counter() - _t0
-                # 再登録で生記述子は必ず保存される前提。無い映像は照合対象外。
+                # DB側に生記述子が無い候補（store_raw_descriptors=False で登録した
+                # 動画や旧データ等）は幾何検証できない。ここで落とすと use_frame_matching
+                # 既定検索でヒットしなくなるため、VLADフレーム一致による非幾何
+                # スコアリングにフォールバックして拾う（クエリ全フレーム q_all を使う）。
                 if not db_geom_by_fidx:
+                    fb = self._score_candidate_by_frames(
+                        vid_id, raw_frames, q_all, query_frame_fps,
+                        threshold, query_duration,
+                    )
+                    if fb is not None:
+                        results.append(fb)
                     continue
                 work.append({
                     "vid_id": vid_id,
@@ -524,84 +533,107 @@ class VideoFingerprintDatabase:
             )
         else:
             for vid_id in candidate_video_ids:
-                raw_frames = frames_by_video.get(vid_id, [])
-                if not raw_frames:
-                    continue
-
-                db_frame_vecs = [
-                    (fidx, ts, np.frombuffer(fp_blob, dtype=np.float32).copy())
-                    for fidx, ts, fp_blob in raw_frames
-                ]
-
-                # クエリ×DBのフレーム類似度を行列積で一括計算
-                # （Python二重ループを回避し、BLASによる高速化を図る）
-                d_mat = np.stack([d_fp for _, _, d_fp in db_frame_vecs])
-                # 非有限値（NaN/inf）混入時の行列積警告を抑止し0類似度化
-                with np.errstate(all="ignore"):
-                    sims = q_mat @ d_mat.T  # (クエリフレーム数, DBフレーム数)
-                np.nan_to_num(sims, copy=False, nan=0.0, posinf=0.0,
-                              neginf=0.0)
-
-                db_ts_arr = np.array(
-                    [d_ts for _, d_ts, _ in db_frame_vecs], dtype=np.float64
+                res = self._score_candidate_by_frames(
+                    vid_id, frames_by_video.get(vid_id, []),
+                    q_all, query_frame_fps, threshold, query_duration,
                 )
-
-                # 各クエリフレームで「最類似の1件」だけを残すと、似た画が反復する
-                # 映像（OP等）で真に時間整列するDBフレームが僅差の偶発一致に負けて
-                # 捨てられ、整列が散る。候補は「上位1件」ではなく閾値(cand_threshold)
-                # 以上の全DBフレームを保持し、支配直線フィットが直線に乗るものを選べる
-                # ようにする。メモリ保護のため1フレームあたり _frame_match_cap 件で頭打ち。
-                cand_threshold = self._frame_match_cand_threshold
-                cap = self._frame_match_cap
-                best_idx = np.argmax(sims, axis=1)
-                best_per_query = sims[np.arange(sims.shape[0]), best_idx]
-
-                frame_matches = []
-                for i, (_, q_ts, _) in enumerate(query_frame_fps):
-                    row = sims[i]
-                    cand_j = np.nonzero(row >= cand_threshold)[0]
-                    if cand_j.size > cap:
-                        # 類似度上位capのみ残す（真の整列側を落とさないため十分大きく取る）
-                        cand_j = cand_j[np.argsort(-row[cand_j])[:cap]]
-                    cands = [
-                        (float(db_ts_arr[j]), float(row[j])) for j in cand_j
-                    ]
-                    frame_matches.append({
-                        "query_ts": q_ts,
-                        # 表示・後方互換用の最良1件
-                        "db_ts": float(db_ts_arr[best_idx[i]]),
-                        "similarity": float(best_per_query[i]),
-                        # 支配整列用の候補（閾値以上の全DBフレーム、cap件まで）
-                        "candidates": cands,
-                    })
-                max_sim = float(np.max(best_per_query))
-                median_sim = float(np.median(best_per_query))
-
-                if max_sim < threshold:
-                    continue
-                match_details = self._compute_match_regions(
-                    frame_matches, threshold=0.4,
-                    query_duration=query_duration,
-                )
-                db_timestamps = [d_ts for _, d_ts, _ in db_frame_vecs]
-                match_details["db_duration"] = (
-                    max(db_timestamps) if db_timestamps else 0.0
-                )
-                match_details["query_duration"] = query_duration
-
-                # 時間的一貫性のある区間がなければ偶然の類似として除外
-                if not match_details.get("regions"):
-                    continue
-
-                results.append({
-                    "video_id": vid_id,
-                    "frame_similarity": max_sim,
-                    "median_similarity": median_sim,
-                    "match_details": match_details,
-                })
+                if res is not None:
+                    results.append(res)
 
         results.sort(key=lambda r: r["frame_similarity"], reverse=True)
         return results
+
+    def _score_candidate_by_frames(
+        self,
+        vid_id: str,
+        raw_frames: List[Tuple[int, float, bytes]],
+        q_mat: np.ndarray,
+        query_frame_fps: List[Tuple[int, float, np.ndarray]],
+        threshold: float,
+        query_duration: float,
+    ) -> Optional[Dict]:
+        """VLAD/PCAコサインのフレーム類似度だけで候補をスコアリングする（非幾何）
+
+        幾何検証が使えない場合（DB側に生記述子が無い候補など）でも、ANN/VLADの
+        フレーム一致から支配オフセット整列で区間を推定し、候補を拾えるようにする
+        フォールバック経路。幾何検証パスと非幾何パスの両方から共用する。
+
+        Returns:
+            スコア・区間を含む結果 dict。閾値未満や区間なしの場合は None。
+        """
+        if not raw_frames:
+            return None
+
+        db_frame_vecs = [
+            (fidx, ts, np.frombuffer(fp_blob, dtype=np.float32).copy())
+            for fidx, ts, fp_blob in raw_frames
+        ]
+
+        # クエリ×DBのフレーム類似度を行列積で一括計算
+        # （Python二重ループを回避し、BLASによる高速化を図る）
+        d_mat = np.stack([d_fp for _, _, d_fp in db_frame_vecs])
+        # 非有限値（NaN/inf）混入時の行列積警告を抑止し0類似度化
+        with np.errstate(all="ignore"):
+            sims = q_mat @ d_mat.T  # (クエリフレーム数, DBフレーム数)
+        np.nan_to_num(sims, copy=False, nan=0.0, posinf=0.0, neginf=0.0)
+
+        db_ts_arr = np.array(
+            [d_ts for _, d_ts, _ in db_frame_vecs], dtype=np.float64
+        )
+
+        # 各クエリフレームで「最類似の1件」だけを残すと、似た画が反復する
+        # 映像（OP等）で真に時間整列するDBフレームが僅差の偶発一致に負けて
+        # 捨てられ、整列が散る。候補は「上位1件」ではなく閾値(cand_threshold)
+        # 以上の全DBフレームを保持し、支配直線フィットが直線に乗るものを選べる
+        # ようにする。メモリ保護のため1フレームあたり _frame_match_cap 件で頭打ち。
+        cand_threshold = self._frame_match_cand_threshold
+        cap = self._frame_match_cap
+        best_idx = np.argmax(sims, axis=1)
+        best_per_query = sims[np.arange(sims.shape[0]), best_idx]
+
+        frame_matches = []
+        for i, (_, q_ts, _) in enumerate(query_frame_fps):
+            row = sims[i]
+            cand_j = np.nonzero(row >= cand_threshold)[0]
+            if cand_j.size > cap:
+                # 類似度上位capのみ残す（真の整列側を落とさないため十分大きく取る）
+                cand_j = cand_j[np.argsort(-row[cand_j])[:cap]]
+            cands = [
+                (float(db_ts_arr[j]), float(row[j])) for j in cand_j
+            ]
+            frame_matches.append({
+                "query_ts": q_ts,
+                # 表示・後方互換用の最良1件
+                "db_ts": float(db_ts_arr[best_idx[i]]),
+                "similarity": float(best_per_query[i]),
+                # 支配整列用の候補（閾値以上の全DBフレーム、cap件まで）
+                "candidates": cands,
+            })
+        max_sim = float(np.max(best_per_query))
+        median_sim = float(np.median(best_per_query))
+
+        if max_sim < threshold:
+            return None
+        match_details = self._compute_match_regions(
+            frame_matches, threshold=0.4,
+            query_duration=query_duration,
+        )
+        db_timestamps = [d_ts for _, d_ts, _ in db_frame_vecs]
+        match_details["db_duration"] = (
+            max(db_timestamps) if db_timestamps else 0.0
+        )
+        match_details["query_duration"] = query_duration
+
+        # 時間的一貫性のある区間がなければ偶然の類似として除外
+        if not match_details.get("regions"):
+            return None
+
+        return {
+            "video_id": vid_id,
+            "frame_similarity": max_sim,
+            "median_similarity": median_sim,
+            "match_details": match_details,
+        }
 
     def _verify_geometric_candidate(
         self,

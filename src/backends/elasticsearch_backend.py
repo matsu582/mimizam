@@ -413,12 +413,18 @@ class ElasticsearchBackend(DatabaseBackend):
                                 bucket.append((float(query_time_offset), db_time))
                             
                 except ElasticsearchException as batch_error:
-                    self.logger.warning(f"Elasticsearch batch search error (batch {i//batch_size + 1}): {batch_error}")
-                    continue
-                        
+                    self.logger.error(f"Elasticsearch batch search error (batch {i//batch_size + 1}): {batch_error}")
+                    raise DatabaseError(
+                        "Failed to search fingerprints",
+                        original_error=batch_error,
+                    ) from batch_error
+
         except ElasticsearchException as e:
             self.logger.error(f"Elasticsearch fingerprint search error: {e}")
-        
+            raise DatabaseError(
+                "Failed to search fingerprints", original_error=e,
+            ) from e
+
         return matches
     
     def get_song(self, song_id: str) -> Optional[Song]:
@@ -880,6 +886,10 @@ class ElasticsearchBackend(DatabaseBackend):
             self.logger.error(
                 f"Elasticsearch frame fingerprint retrieval error: {e}"
             )
+            raise DatabaseError(
+                "Failed to get frame fingerprints", original_error=e,
+                context={'video_id': video_id},
+            ) from e
         return results
 
     def get_frame_fingerprints_batch(
@@ -915,6 +925,9 @@ class ElasticsearchBackend(DatabaseBackend):
             self.logger.error(
                 f"Elasticsearch frame fingerprint batch retrieval error: {e}"
             )
+            raise DatabaseError(
+                "Failed to get frame fingerprints batch", original_error=e,
+            ) from e
         return result
 
     def get_video(self, video_id: str) -> Optional[Video]:
@@ -1108,6 +1121,10 @@ class ElasticsearchBackend(DatabaseBackend):
             self.logger.error(
                 f"Elasticsearch frame descriptor retrieval error: {e}"
             )
+            raise DatabaseError(
+                "Failed to get frame descriptors", original_error=e,
+                context={'video_id': video_id},
+            ) from e
         return results
 
     def get_all_frame_descriptors(
@@ -1135,6 +1152,9 @@ class ElasticsearchBackend(DatabaseBackend):
             self.logger.error(
                 f"Elasticsearch all frame descriptor retrieval error: {e}"
             )
+            raise DatabaseError(
+                "Failed to get all frame descriptors", original_error=e,
+            ) from e
         return result
 
     def get_video_stats(self) -> Dict[str, int]:
