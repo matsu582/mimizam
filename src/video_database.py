@@ -60,7 +60,9 @@ class VideoFingerprintDatabase:
         # 絞り込みに使い、各クエリフレームで上位 _geom_top_k 件のDB候補に対し
         # AKAZE記述子を突き合わせる。インライア数が _geom_min_inliers 以上の
         # ペアのみ一致とみなし、_geom_inlier_saturation で[0,1]スコアへ正規化。
-        self._geom_top_k = 6
+        # top_k を上げると短い一致断片（ANNで上位に埋もれるDBフレーム）の取りこぼしが
+        # 減る。1フレームで _geom_max_hits 件見つかれば打ち切るため速度影響は限定的。
+        self._geom_top_k = 10
         self._geom_min_inliers = 15
         self._geom_ransac_thresh = 5.0
         # 速度対策。1クエリフレームで幾何一致が _geom_max_hits 件見つかったら、
