@@ -272,7 +272,6 @@ class VideoFingerprintDatabase:
         candidate_video_ids: List[str],
         threshold: float = 0.5,
         query_raw: Optional[List[Tuple[int, float, np.ndarray]]] = None,
-        descriptor_dim: int = 61,
     ) -> List[Dict]:
         """
         フレーム単位マッチングで精密照合（PiP対策）
@@ -281,17 +280,16 @@ class VideoFingerprintDatabase:
         全クエリフレーム中の最高スコアを映像の最終スコアとする。
         また、一致区間の時間帯情報も返す。
 
-        query_raw（クエリの生AKAZE記述子＋キーポイント座標）が与えられ、DB側にも
-        生記述子が保存されている場合は、VLAD/PCAコサインを候補の絞り込み(recall)
-        のみに使い、最終判定はANN上位候補へのRANSAC幾何検証（インライア数）で行う。
-        大域記述子の量子化に潰されがちな真の局所一致を、幾何整合で拾い直すため。
+        query_raw（クエリの生AKAZE記述子＋キーポイント座標）が与えられた場合は、
+        VLAD/PCAコサインを候補の絞り込み(recall)のみに使い、最終判定はANN上位
+        候補へのRANSAC幾何検証（インライア数）で行う。大域記述子の量子化に潰され
+        がちな真の局所一致を、幾何整合で拾い直すため。
 
         Args:
             query_frame_fps: クエリ映像のフレーム指紋リスト
             candidate_video_ids: 候補映像IDリスト
             threshold: 最低類似度閾値
             query_raw: クエリの生記述子（[(fidx, ts, N×(2+D)), ...]）。幾何検証に使う
-            descriptor_dim: AKAZE記述子の本来の次元D（座標分離に使用）
 
         Returns:
             [{"video_id": ..., "frame_similarity": ...,
@@ -308,11 +306,10 @@ class VideoFingerprintDatabase:
         )
 
         # 幾何検証を使うか（クエリ側の生記述子が揃っている場合のみ）
-        query_raw_by_fidx: Dict[int, Tuple[Optional[np.ndarray], np.ndarray]] = {}
+        query_raw_by_fidx: Dict[int, Tuple[np.ndarray, np.ndarray]] = {}
         if query_raw:
             for fidx, _ts, arr in query_raw:
-                kq, dq = split_raw_descriptor(arr, descriptor_dim)
-                query_raw_by_fidx[fidx] = (kq, dq)
+                query_raw_by_fidx[fidx] = split_raw_descriptor(arr)
         use_geometric = bool(query_raw_by_fidx)
 
         for vid_id in candidate_video_ids:
@@ -342,18 +339,16 @@ class VideoFingerprintDatabase:
             best_idx = np.argmax(sims, axis=1)
             best_per_query = sims[np.arange(sims.shape[0]), best_idx]
 
-            # DB側に生記述子が保存されている映像のみ幾何検証を行う。
-            # 旧DB（記述子なし）では従来のコサイン整列にフォールバックする。
-            db_raw_by_fidx: Dict[
-                int, Tuple[Optional[np.ndarray], np.ndarray]
-            ] = {}
+            # 幾何検証にはDB側のキーポイント座標付き生記述子が必要。
+            db_raw_by_fidx: Dict[int, Tuple[np.ndarray, np.ndarray]] = {}
             if use_geometric:
                 for fidx, _ts, arr in self.get_frame_descriptors(vid_id):
-                    kd, dd = split_raw_descriptor(arr, descriptor_dim)
-                    db_raw_by_fidx[fidx] = (kd, dd)
-            use_geom_video = use_geometric and bool(db_raw_by_fidx)
+                    db_raw_by_fidx[fidx] = split_raw_descriptor(arr)
+                # 再登録で生記述子は必ず保存される前提。無い映像は照合対象外。
+                if not db_raw_by_fidx:
+                    continue
 
-            if use_geom_video:
+            if use_geometric:
                 frame_matches, geom_scores = self._build_geometric_matches(
                     query_frame_fps, db_frame_vecs, db_ts_arr, sims,
                     query_raw_by_fidx, db_raw_by_fidx,
@@ -428,8 +423,8 @@ class VideoFingerprintDatabase:
         db_frame_vecs: List[Tuple[int, float, np.ndarray]],
         db_ts_arr: np.ndarray,
         sims: np.ndarray,
-        query_raw_by_fidx: Dict[int, Tuple[Optional[np.ndarray], np.ndarray]],
-        db_raw_by_fidx: Dict[int, Tuple[Optional[np.ndarray], np.ndarray]],
+        query_raw_by_fidx: Dict[int, Tuple[np.ndarray, np.ndarray]],
+        db_raw_by_fidx: Dict[int, Tuple[np.ndarray, np.ndarray]],
     ) -> Tuple[List[Dict], List[float]]:
         """ANN上位候補にRANSAC幾何検証を掛けフレーム一致候補を構築する
 

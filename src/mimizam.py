@@ -657,11 +657,9 @@ class Mimizam:
                 # Step 2: フレーム単位マッチングで精密照合
                 # クエリに生記述子があればANN上位候補をRANSAC幾何検証で再判定する
                 candidate_ids = [c["video_id"] for c in candidates]
-                desc_dim = getattr(vfp.encoder, "_descriptor_dim", None) or 61
                 frame_results = vdb.search_video_with_frame_matching(
                     fp.frame_fingerprints, candidate_ids,
                     query_raw=fp.raw_descriptors,
-                    descriptor_dim=desc_dim,
                 )
 
                 # 結果を統合

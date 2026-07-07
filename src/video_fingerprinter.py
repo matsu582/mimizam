@@ -92,10 +92,10 @@ def pack_raw_descriptors(
 ) -> List[Tuple[int, float, np.ndarray]]:
     """記述子(N×D)とキーポイント座標(N×2)を1配列(N×(2+D))へ結合する
 
-    保存レイヤ(add_frame_descriptors)は列数を問わず ``reshape(count, -1)`` で
-    復元するため、キーポイント座標を先頭2列に結合しても後方互換を保てる。幾何検証
-    (RANSAC)で対応点座標が必要になるため、生記述子と同じ経路で永続化する。
-    フレーム順は両リストで一致している前提。
+    幾何検証(RANSAC)で対応点座標が必要になるため、キーポイント座標を先頭2列へ
+    結合し、生記述子と同じ経路で永続化する。保存レイヤ(add_frame_descriptors)は
+    列数を問わず ``reshape(count, -1)`` で復元するため列追加をそのまま扱える。
+    フレーム順・行数は両リストで一致している前提（同一のdetectAndCompute由来）。
 
     Args:
         per_frame: [(fidx, ts, 記述子(N×D)), ...]
@@ -107,63 +107,50 @@ def pack_raw_descriptors(
     packed: List[Tuple[int, float, np.ndarray]] = []
     for (fidx, ts, desc), (_, _, kpts) in zip(per_frame, per_frame_kpts):
         desc_f = desc.astype(np.float32)
-        if kpts is None or kpts.shape[0] != desc_f.shape[0]:
-            # 座標が取れない/整合しない場合は座標0で埋め、幾何検証側で無効化
-            kpts_f = np.zeros((desc_f.shape[0], KEYPOINT_COLS), np.float32)
-        else:
-            kpts_f = kpts.astype(np.float32).reshape(-1, KEYPOINT_COLS)
+        kpts_f = kpts.astype(np.float32).reshape(-1, KEYPOINT_COLS)
         packed.append((fidx, ts, np.hstack([kpts_f, desc_f])))
     return packed
 
 
 def split_raw_descriptor(
-    arr: np.ndarray, descriptor_dim: int
-) -> Tuple[Optional[np.ndarray], np.ndarray]:
+    arr: np.ndarray,
+) -> Tuple[np.ndarray, np.ndarray]:
     """結合配列(N×(2+D))をキーポイント座標(N×2)と記述子(N×D)へ分離する
 
-    先頭2列がキーポイント座標を持つ結合形式なら (座標, 記述子) を返す。列数が
-    記述子次元と一致する旧形式（座標なし）なら (None, 記述子) を返す。
+    先頭2列がキーポイント座標、残りがAKAZE記述子。
 
     Args:
-        arr: 保存済みの記述子配列
-        descriptor_dim: 記述子の本来の次元D
+        arr: 保存済みの結合記述子配列(N×(2+D))
 
     Returns:
-        (キーポイント座標 or None, 記述子(N×D))
+        (キーポイント座標(N×2), 記述子(N×D))
     """
-    if arr.ndim != 2:
-        return None, arr
-    if arr.shape[1] == descriptor_dim + KEYPOINT_COLS:
-        return arr[:, :KEYPOINT_COLS], arr[:, KEYPOINT_COLS:]
-    return None, arr
+    return arr[:, :KEYPOINT_COLS], arr[:, KEYPOINT_COLS:]
 
 
 def geometric_match(
     desc_q: np.ndarray,
-    kpt_q: Optional[np.ndarray],
+    kpt_q: np.ndarray,
     desc_d: np.ndarray,
-    kpt_d: Optional[np.ndarray],
+    kpt_d: np.ndarray,
     ratio: float = 0.75,
     ransac_thresh: float = 5.0,
 ) -> Tuple[int, int]:
     """2フレームのAKAZE記述子を突き合わせ、良マッチ数と幾何インライア数を返す
 
-    BF(Hamming)最近傍→Loweの比率検定で良マッチを選び、両フレームのキーポイント
-    座標が揃う場合はRANSACでホモグラフィを推定して幾何的に整合するインライアを
-    数える。座標が無い（旧形式）場合はインライア数に良マッチ数を代用する。
-    OpenCVの標準APIのみを用いた独自実装。
+    BF(Hamming)最近傍→Loweの比率検定で良マッチを選び、RANSACでホモグラフィを
+    推定して幾何的に整合するインライアを数える。OpenCVの標準APIのみを用いた
+    独自実装。
 
     Args:
         desc_q, desc_d: AKAZE記述子(N×D)。float32でもuint8に丸めて突き合わせる
-        kpt_q, kpt_d: キーポイント座標(N×2) or None
+        kpt_q, kpt_d: キーポイント座標(N×2)
         ratio: Loweの比率検定のしきい値
         ransac_thresh: RANSACのインライア許容画素
 
     Returns:
         (良マッチ数, 幾何インライア数)
     """
-    if desc_q is None or desc_d is None:
-        return 0, 0
     if len(desc_q) < 2 or len(desc_d) < 2:
         return 0, 0
 
@@ -178,10 +165,6 @@ def geometric_match(
     ]
     if len(good) < 4:
         return len(good), 0
-
-    if kpt_q is None or kpt_d is None:
-        # 座標が無ければ幾何検証できないので良マッチ数を信号に代用
-        return len(good), len(good)
 
     src = np.float32(
         [kpt_q[m.queryIdx] for m in good]

@@ -6,7 +6,7 @@ VLAD/PCA大域記述子＋コサイン閾値は、局所特徴（AKAZE）レベ�
 BF(Hamming)+Lowe比+RANSACで突き合わせ、幾何整合するインライア数で採否を
 決める経路を検証する。
 
-- 記述子とキーポイント座標の結合/分離（保存レイヤ後方互換）
+- 記述子とキーポイント座標の結合/分離
 - 同一フレームは高インライア、無関係フレームは低インライア
 - ANN上位候補からの幾何検証でコサインが低くても真の一致を回復する
 """
@@ -48,26 +48,9 @@ class TestPackSplit(unittest.TestCase):
         _, _, arr = packed[0]
         self.assertEqual(arr.shape, (40, DESC_DIM + KEYPOINT_COLS))
 
-        k, d = split_raw_descriptor(arr, DESC_DIM)
-        self.assertIsNotNone(k)
+        k, d = split_raw_descriptor(arr)
         np.testing.assert_allclose(k, kpts, rtol=0, atol=1e-4)
         np.testing.assert_array_equal(d.astype(np.uint8), desc)
-
-    def test_split_legacy_without_keypoints(self):
-        """座標を持たない旧形式（N×D）は座標Noneで記述子を返す"""
-        desc, _ = _make_frame(n=30, seed=2)
-        arr = desc.astype(np.float32)
-        k, d = split_raw_descriptor(arr, DESC_DIM)
-        self.assertIsNone(k)
-        np.testing.assert_array_equal(d.astype(np.uint8), desc)
-
-    def test_pack_handles_missing_keypoints(self):
-        """座標が取れないフレームは0座標で埋めて結合する"""
-        desc, _ = _make_frame(n=20, seed=3)
-        packed = pack_raw_descriptors([(0, 0.0, desc)], [(0, 0.0, None)])
-        _, _, arr = packed[0]
-        self.assertEqual(arr.shape, (20, DESC_DIM + KEYPOINT_COLS))
-        np.testing.assert_array_equal(arr[:, :KEYPOINT_COLS], 0.0)
 
 
 class TestGeometricMatch(unittest.TestCase):
@@ -91,16 +74,6 @@ class TestGeometricMatch(unittest.TestCase):
             desc_d.astype(np.float32), kpt_d,
         )
         self.assertLess(inl, 20)
-
-    def test_falls_back_to_good_count_without_keypoints(self):
-        """座標が無い場合はインライアに良マッチ数を代用する"""
-        desc, _ = _make_frame(n=80, seed=30)
-        good, inl = geometric_match(
-            desc.astype(np.float32), None,
-            desc.astype(np.float32), None,
-        )
-        self.assertEqual(inl, good)
-        self.assertGreater(inl, 0)
 
 
 class TestBuildGeometricMatches(unittest.TestCase):
