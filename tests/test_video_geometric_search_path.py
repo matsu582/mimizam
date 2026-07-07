@@ -60,6 +60,7 @@ class TestGeometricSearchPath(unittest.TestCase):
         db._geom_max_query_frames = 48
         db._geom_max_desc = 400
         db._geom_region_db_gap = 45.0
+        db._geom_max_workers = 1
         import logging
         db.logger = logging.getLogger("test.vdb")
         return db
@@ -95,6 +96,41 @@ class TestGeometricSearchPath(unittest.TestCase):
         # 例外が出ないこと（＝行列形状不一致の回帰）。結果はリストで返る。
         results = db.search_video_with_frame_matching(
             query_frame_fps, [vid], threshold=0.0, query_raw=query_raw,
+        )
+        self.assertIsInstance(results, list)
+
+    def test_search_runs_with_parallel_workers(self):
+        """候補間並列（workers>1）でも例外なく検索できる"""
+        n_query = 6
+        query_frame_fps = [(i, float(i), _vlad(i)) for i in range(n_query)]
+        row_counts = [10, 13, 7, 21, 9, 15]
+        query_raw = [
+            (i, float(i), _packed_desc(row_counts[i], 100 + i))
+            for i in range(n_query)
+        ]
+        frame_fps = {}
+        frame_descs = {}
+        vids = ["v1", "v2", "v3"]
+        for k, vid in enumerate(vids):
+            db_frames = []
+            db_descs = []
+            for j in range(4):
+                db_frames.append(
+                    (j, float(300 + j), _vlad(500 + 10 * k + j).tobytes())
+                )
+                arr = _packed_desc(12 + j, 700 + 10 * k + j)
+                db_descs.append(
+                    (j, float(300 + j), arr.astype(np.float32).tobytes(),
+                     arr.shape[0])
+                )
+            frame_fps[vid] = db_frames
+            frame_descs[vid] = db_descs
+
+        db = self._make_db()
+        db._geom_max_workers = 3
+        db.backend = _FakeBackend(frame_fps, frame_descs)
+        results = db.search_video_with_frame_matching(
+            query_frame_fps, vids, threshold=0.0, query_raw=query_raw,
         )
         self.assertIsInstance(results, list)
 

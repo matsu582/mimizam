@@ -9,6 +9,8 @@
 
 import logging
 import math
+import os
+from concurrent.futures import ThreadPoolExecutor
 from typing import List, Optional, Dict, Tuple
 
 import cv2
@@ -67,11 +69,12 @@ class VideoFingerprintDatabase:
         # クラスタ上は同じ塊に寄与するだけ）。強一致フレームの走査を早期終了する。
         self._geom_max_hits = 3
         # 幾何検証のBFマッチ回数は「検証するクエリフレーム数 × 候補数」に比例する。
-        # クエリ全フレームを検証すると候補数に比例して線形に遅くなるため、時間軸で
-        # 均等に間引いた最大 _geom_max_query_frames 件だけを幾何検証する。区間判定は
-        # DB時刻クラスタ（最小 min_region_frames フレーム）で行うので、OP等の塊には
-        # 間引き後も十分なフレームが入る。0以下で無効（全フレーム検証）。
-        self._geom_max_query_frames = 48
+        # クエリ全フレームを検証すると重いため、時間軸で均等に間引いた最大
+        # _geom_max_query_frames 件だけを幾何検証する。ただし間引きすぎると一致区間の
+        # DB時刻クラスタに入るフレームが減り、区間境界が不安定化して精度が落ちるため、
+        # 精度を保てる範囲に留める。候補間の並列化（_verify_geometric_candidate を
+        # スレッドプールで実行）で速度を稼ぐ。0以下で無効（全フレーム検証）。
+        self._geom_max_query_frames = 128
         # 幾何検証の速度対策。BFマッチはフレームあたり記述子数の二乗で重くなるため、
         # 1フレームで突き合わせる記述子を _geom_max_desc 件（先頭N件）に制限する。
         # 真の一致はインライアが100+と桁違いに多く、数百点でも十分に分離できる。
@@ -82,6 +85,10 @@ class VideoFingerprintDatabase:
         # クエリ各フレームが同一OP内の別カットに一致するため時間オフセットは一定に
         # ならないが、DB時刻はOP区間（例 340〜427s）に集中するので塊として拾える。
         self._geom_region_db_gap = 45.0
+        # 幾何検証（BFマッチ/RANSAC）はGILを解放するC++処理のため、候補ごとの検証を
+        # スレッドで並列化できる。DB読み込み（生記述子取得）は直列で先に済ませ、
+        # CPU律速の検証だけを並列化する。0以下でCPU数、1で並列無効（直列）。
+        self._geom_max_workers = 0
         self.backend: DatabaseBackend = create_database_backend(config)
 
         if not self.backend.connect():
@@ -354,10 +361,6 @@ class VideoFingerprintDatabase:
                 query_geom_by_fidx[fidx] = self._prep_geom_frame(kpt, desc)
                 geom_query_fps.append((fidx, ts, vec))
         use_geometric = bool(query_geom_by_fidx)
-        # 幾何検証のBFMatcherは1インスタンスを全ペアで共有する（生成コスト削減）。
-        geom_matcher = (
-            cv2.BFMatcher(cv2.NORM_HAMMING) if use_geometric else None
-        )
 
         # クエリ側のVLADベクトル行列は候補に依存しないため、候補ループの外で
         # 一度だけ構築する（従来は候補ごとに再構築していた）。幾何検証時は間引いた
@@ -372,38 +375,39 @@ class VideoFingerprintDatabase:
         else:
             q_mat = q_all
 
-        for vid_id in candidate_video_ids:
-            raw_frames = frames_by_video.get(vid_id, [])
-            if not raw_frames:
-                continue
+        q_timestamps = [q_ts for _, q_ts, _ in query_frame_fps]
+        query_duration = max(q_timestamps) if q_timestamps else 0.0
 
-            db_frame_vecs = [
-                (fidx, ts, np.frombuffer(fp_blob, dtype=np.float32).copy())
-                for fidx, ts, fp_blob in raw_frames
-            ]
-
-            # クエリ×DBのフレーム類似度を行列積で一括計算
-            # （Python二重ループを回避し、BLASによる高速化を図る）
-            d_mat = np.stack([d_fp for _, _, d_fp in db_frame_vecs])
-            # 非有限値（NaN/inf）混入時の行列積警告を抑止し0類似度化
-            with np.errstate(all="ignore"):
-                sims = q_mat @ d_mat.T  # (対象クエリフレーム数, DBフレーム数)
-            np.nan_to_num(sims, copy=False, nan=0.0, posinf=0.0, neginf=0.0)
-
-            db_ts_arr = np.array(
-                [d_ts for _, d_ts, _ in db_frame_vecs], dtype=np.float64
-            )
-
-            if use_geometric:
+        if use_geometric:
+            # 幾何検証パス。BFマッチ/RANSACはCPU律速でGILを解放するため、候補ごとの
+            # 検証をスレッドで並列化する。ただしDB読み込み（生記述子取得）はバックエンド
+            # 接続がスレッド安全とは限らないので、直列で先に済ませてから並列化する。
+            work: List[dict] = []
+            for vid_id in candidate_video_ids:
+                raw_frames = frames_by_video.get(vid_id, [])
+                if not raw_frames:
+                    continue
+                db_frame_vecs = [
+                    (fidx, ts, np.frombuffer(fp_blob, dtype=np.float32).copy())
+                    for fidx, ts, fp_blob in raw_frames
+                ]
+                d_mat = np.stack([d_fp for _, _, d_fp in db_frame_vecs])
+                with np.errstate(all="ignore"):
+                    sims = q_mat @ d_mat.T
+                np.nan_to_num(sims, copy=False, nan=0.0, posinf=0.0,
+                              neginf=0.0)
+                db_ts_arr = np.array(
+                    [d_ts for _, d_ts, _ in db_frame_vecs], dtype=np.float64
+                )
                 # 幾何検証にはDB側のキーポイント座標付き生記述子が必要。ただし
                 # 実際に突き合わせるのは各クエリフレームのANN上位 _geom_top_k 件の
                 # DBフレームだけなので、その和集合に限定して整形する（未使用フレーム
                 # のuint8変換を省く）。
                 db_fidx_arr = [f for f, _, _ in db_frame_vecs]
-                top_k = self._geom_top_k
-                order = np.argsort(-sims, axis=1)[:, :top_k]
-                needed_j = np.unique(order)
-                needed_fidx = {db_fidx_arr[int(j)] for j in needed_j}
+                order = np.argsort(-sims, axis=1)[:, :self._geom_top_k]
+                needed_fidx = {
+                    db_fidx_arr[int(j)] for j in np.unique(order)
+                }
                 db_geom_by_fidx: Dict[
                     int, Tuple[np.ndarray, np.ndarray]
                 ] = {}
@@ -415,18 +419,58 @@ class VideoFingerprintDatabase:
                 # 再登録で生記述子は必ず保存される前提。無い映像は照合対象外。
                 if not db_geom_by_fidx:
                     continue
+                work.append({
+                    "vid_id": vid_id,
+                    "db_frame_vecs": db_frame_vecs,
+                    "db_ts_arr": db_ts_arr,
+                    "sims": sims,
+                    "db_geom_by_fidx": db_geom_by_fidx,
+                })
 
-                frame_matches, geom_scores = self._build_geometric_matches(
-                    geom_query_fps, db_frame_vecs, db_ts_arr, sims,
-                    query_geom_by_fidx, db_geom_by_fidx, geom_matcher,
+            def _verify(item: dict):
+                return self._verify_geometric_candidate(
+                    item, geom_query_fps, query_geom_by_fidx,
+                    threshold, query_duration,
                 )
-                # 幾何検証済み候補の代表スコア（インライア正規化）を採否に使う
-                max_sim = max(geom_scores) if geom_scores else 0.0
-                median_sim = (
-                    float(np.median(geom_scores)) if geom_scores else 0.0
-                )
-                region_threshold = 0.0
+
+            n_work = len(work)
+            if self._geom_max_workers > 0:
+                max_workers = self._geom_max_workers
             else:
+                max_workers = os.cpu_count() or 4
+            max_workers = max(1, min(max_workers, n_work))
+            if max_workers <= 1 or n_work <= 1:
+                verified = (_verify(it) for it in work)
+            else:
+                with ThreadPoolExecutor(max_workers=max_workers) as ex:
+                    verified = list(ex.map(_verify, work))
+            for res in verified:
+                if res is not None:
+                    results.append(res)
+        else:
+            for vid_id in candidate_video_ids:
+                raw_frames = frames_by_video.get(vid_id, [])
+                if not raw_frames:
+                    continue
+
+                db_frame_vecs = [
+                    (fidx, ts, np.frombuffer(fp_blob, dtype=np.float32).copy())
+                    for fidx, ts, fp_blob in raw_frames
+                ]
+
+                # クエリ×DBのフレーム類似度を行列積で一括計算
+                # （Python二重ループを回避し、BLASによる高速化を図る）
+                d_mat = np.stack([d_fp for _, _, d_fp in db_frame_vecs])
+                # 非有限値（NaN/inf）混入時の行列積警告を抑止し0類似度化
+                with np.errstate(all="ignore"):
+                    sims = q_mat @ d_mat.T  # (クエリフレーム数, DBフレーム数)
+                np.nan_to_num(sims, copy=False, nan=0.0, posinf=0.0,
+                              neginf=0.0)
+
+                db_ts_arr = np.array(
+                    [d_ts for _, d_ts, _ in db_frame_vecs], dtype=np.float64
+                )
+
                 # 各クエリフレームで「最類似の1件」だけを残すと、似た画が反復する
                 # 映像（OP等）で真に時間整列するDBフレームが僅差の偶発一致に負けて
                 # 捨てられ、整列が散る。候補は「上位1件」ではなく閾値(cand_threshold)
@@ -457,44 +501,18 @@ class VideoFingerprintDatabase:
                     })
                 max_sim = float(np.max(best_per_query))
                 median_sim = float(np.median(best_per_query))
-                region_threshold = 0.4
 
-            if max_sim >= threshold:
-                q_timestamps = [q_ts for _, q_ts, _ in query_frame_fps]
-                query_duration = max(q_timestamps) if q_timestamps else 0.0
-                if use_geometric:
-                    # 各クエリフレームが幾何一致したDB候補のDB時刻を集約し、
-                    # DB時刻が集中する塊を一致区間とする（時間オフセット非依存）。
-                    match_details = self._compute_geometric_regions(
-                        frame_matches,
-                        db_gap_merge=self._geom_region_db_gap,
-                        query_duration=query_duration,
-                    )
-                else:
-                    match_details = self._compute_match_regions(
-                        frame_matches, threshold=region_threshold,
-                        query_duration=query_duration,
-                    )
+                if max_sim < threshold:
+                    continue
+                match_details = self._compute_match_regions(
+                    frame_matches, threshold=0.4,
+                    query_duration=query_duration,
+                )
                 db_timestamps = [d_ts for _, d_ts, _ in db_frame_vecs]
                 match_details["db_duration"] = (
                     max(db_timestamps) if db_timestamps else 0.0
                 )
                 match_details["query_duration"] = query_duration
-
-                if use_geometric:
-                    # 幾何検証の内訳を可視化する。verified=RANSAC検証を通った
-                    # クエリフレーム数、aligned=DB時刻クラスタに束ねられた一致
-                    # フレーム数（相異なるquery）、coverage=クエリ時間の被覆率。
-                    self.logger.info(
-                        "[geom] %s: verified=%d aligned=%d coverage=%.2f "
-                        "max_inl=%d median_inl=%d",
-                        vid_id,
-                        len(geom_scores),
-                        match_details.get("matched_frames", 0),
-                        match_details.get("coverage", 0.0),
-                        int(round(max_sim * self._geom_inlier_saturation)),
-                        int(round(median_sim * self._geom_inlier_saturation)),
-                    )
 
                 # 時間的一貫性のある区間がなければ偶然の類似として除外
                 if not match_details.get("regions"):
@@ -509,6 +527,82 @@ class VideoFingerprintDatabase:
 
         results.sort(key=lambda r: r["frame_similarity"], reverse=True)
         return results
+
+    def _verify_geometric_candidate(
+        self,
+        item: dict,
+        geom_query_fps: List[Tuple[int, float, np.ndarray]],
+        query_geom_by_fidx: Dict[int, Tuple[np.ndarray, np.ndarray]],
+        threshold: float,
+        query_duration: float,
+    ) -> Optional[dict]:
+        """1候補の幾何検証・区間算出を行う（候補間で並列実行される単位）
+
+        BFマッチ/RANSACはCPU律速でGILを解放するため、この関数を候補ごとに
+        スレッドで並列実行して総検索時間を短縮する。DBアクセスは呼び出し前に
+        済ませてある（item に必要なデータが入っている）ため、ここではDBに触れない。
+        BFMatcherはスレッド安全でないので候補ごとに生成する。
+
+        Args:
+            item: 前処理済み候補データ（vid_id/db_frame_vecs/db_ts_arr/sims/
+                db_geom_by_fidx）
+            geom_query_fps: 幾何検証対象のクエリフレーム (fidx, ts, vec)
+            query_geom_by_fidx: クエリfidx→(座標, 記述子uint8)
+            threshold: 採否のインライア正規化スコア閾値
+            query_duration: クエリ全体長（被覆率算出用）
+
+        Returns:
+            マッチ結果dict。閾値未満や区間なしなら None。
+        """
+        matcher = cv2.BFMatcher(cv2.NORM_HAMMING)
+        frame_matches, geom_scores = self._build_geometric_matches(
+            geom_query_fps, item["db_frame_vecs"], item["db_ts_arr"],
+            item["sims"], query_geom_by_fidx, item["db_geom_by_fidx"],
+            matcher,
+        )
+        # 幾何検証済み候補の代表スコア（インライア正規化）を採否に使う
+        max_sim = max(geom_scores) if geom_scores else 0.0
+        if max_sim < threshold:
+            return None
+        median_sim = float(np.median(geom_scores)) if geom_scores else 0.0
+
+        # 各クエリフレームが幾何一致したDB候補のDB時刻を集約し、DB時刻が集中する
+        # 塊を一致区間とする（時間オフセット非依存）。
+        match_details = self._compute_geometric_regions(
+            frame_matches,
+            db_gap_merge=self._geom_region_db_gap,
+            query_duration=query_duration,
+        )
+        db_timestamps = [d_ts for _, d_ts, _ in item["db_frame_vecs"]]
+        match_details["db_duration"] = (
+            max(db_timestamps) if db_timestamps else 0.0
+        )
+        match_details["query_duration"] = query_duration
+
+        # 幾何検証の内訳を可視化する。verified=RANSAC検証を通ったクエリフレーム数、
+        # aligned=DB時刻クラスタに束ねられた一致フレーム数（相異なるquery）、
+        # coverage=クエリ時間の被覆率。
+        self.logger.info(
+            "[geom] %s: verified=%d aligned=%d coverage=%.2f "
+            "max_inl=%d median_inl=%d",
+            item["vid_id"],
+            len(geom_scores),
+            match_details.get("matched_frames", 0),
+            match_details.get("coverage", 0.0),
+            int(round(max_sim * self._geom_inlier_saturation)),
+            int(round(median_sim * self._geom_inlier_saturation)),
+        )
+
+        # 時間的一貫性のある区間がなければ偶然の類似として除外
+        if not match_details.get("regions"):
+            return None
+
+        return {
+            "video_id": item["vid_id"],
+            "frame_similarity": max_sim,
+            "median_similarity": median_sim,
+            "match_details": match_details,
+        }
 
     @staticmethod
     def _subsample_indices(n: int, cap: int) -> List[int]:
