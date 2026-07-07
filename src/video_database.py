@@ -403,6 +403,21 @@ class VideoFingerprintDatabase:
                 )
                 match_details["query_duration"] = query_duration
 
+                if use_geometric:
+                    # 幾何検証の内訳を可視化して「どこでフレームが失われるか」を
+                    # 切り分ける。verified=RANSAC検証を通ったクエリフレーム数、
+                    # aligned=支配直線に乗ったインライア数、coverage=連続被覆率。
+                    self.logger.info(
+                        "[geom] %s: verified=%d aligned=%d coverage=%.2f "
+                        "max_inl=%d median_inl=%d",
+                        vid_id,
+                        len(geom_scores),
+                        match_details.get("matched_frames", 0),
+                        match_details.get("coverage", 0.0),
+                        int(round(max_sim * self._geom_inlier_saturation)),
+                        int(round(median_sim * self._geom_inlier_saturation)),
+                    )
+
                 # 時間的一貫性のある区間がなければ偶然の類似として除外
                 if not match_details.get("regions"):
                     continue
