@@ -558,29 +558,37 @@ class VideoFingerprintDatabase:
         residual_tolerance: float,
         slope_range: Tuple[float, float],
         min_query_gap: float,
-    ) -> Tuple[float, float, List[Tuple[float, float, float]]]:
-        """支配直線 db≈slope·query+offset を頑健推定しインライアを返す
+        min_cluster_frames: int,
+    ) -> Tuple[float, List[Tuple[float, List[Tuple[float, float, float]]]]]:
+        """支配傾き db≈slope·query+offset を頑健推定し複数オフセット列を返す
 
         音声側の頑健直線フィットと同型の考え方を映像フレームに適用する（Java実装
-        等の外部コードは参照せず独自実装）。各クエリフレームは複数のDB候補
-        (db_ts, similarity) を持ちうる。ペア間の傾きをlog2空間で投票して傾き候補を
-        得て、各候補についてオフセット最頻ビン近傍のインライアを数え、整列する
-        「クエリフレーム数」が最大の傾きを採用する。1クエリフレームにつき直線に乗る
-        候補のうち最も類似度が高い1件を代表として採用するため、最類似候補が別箇所の
-        偶発一致でも、整列側の次点候補があれば取りこぼさない。
+        等の外部コードは参照せず独自実装）。傾き（=再生速度）は素材が同一なら区間に
+        依らず共通だが、OP/ED/アイキャッチなどシリーズ共通の区間は各話の別々の時刻
+        （＝別々のオフセット）に現れる。そこで支配傾きは1つ推定しつつ、その傾きの下で
+        オフセットを複数のクラスタに分け、各クラスタを個別の整列列として返す。
+        これにより1本の直線に乗らない複数の共通区間を取りこぼさない。
+
+        各クエリフレームは複数のDB候補 (db_ts, similarity) を持ちうる。ペア間の傾きを
+        log2空間で投票して傾き候補を得て、各傾きでオフセットクラスタを抽出し、採用
+        クラスタの合計整列フレーム数が最大の傾きを選ぶ。各クラスタでは、クエリフレーム
+        ごとに直線±tolに乗る候補のうち最類似の1件を採用するため、最類似候補が別箇所の
+        偶発一致でも整列側の次点候補があれば取りこぼさない。
 
         Args:
             per_query: [(query_ts, [(db_ts, similarity), ...]), ...]
             residual_tolerance: 直線からの残差をインライアとみなす許容（秒）
             slope_range: 妥当な傾き（=time_scale）の範囲
             min_query_gap: 傾き算出に使うペアの最小 query 時間差（秒）
+            min_cluster_frames: 整列列として採用する最小インライア数
 
         Returns:
-            (slope, offset, inliers) inliers=[(query_ts, db_ts, similarity), ...]
+            (slope, clusters) clusters=[(offset, [(query_ts, db_ts, sim), ...]),]
+            offsetの大きいクラスタ順ではなくフィット順。呼び出し側で整形する。
         """
         n = len(per_query)
         if n == 0:
-            return 1.0, 0.0, []
+            return 1.0, []
 
         lo, hi = slope_range
 
@@ -615,10 +623,11 @@ class VideoFingerprintDatabase:
 
         tol = residual_tolerance
 
-        def evaluate(slope: float
-                     ) -> Tuple[float, List[Tuple[float, float, float]]]:
-            # 全候補のオフセットを (クエリ添字ごとに) 集計し、
-            # 整列するクエリフレーム数が最大のオフセットビンを選ぶ
+        def extract_clusters(
+            slope: float,
+        ) -> List[Tuple[float, List[Tuple[float, float, float]]]]:
+            # オフセットをtol幅でビンに投票し、点数の多いビンを中心にクラスタを立てる。
+            # 既存中心から 2*tol 以内の中心は同一列とみなし新設しない（ドリフト吸収）。
             bin_qs: Dict[int, set] = {}
             bin_offs: Dict[int, List[float]] = {}
             for qi, (q, cands) in enumerate(per_query):
@@ -628,30 +637,41 @@ class VideoFingerprintDatabase:
                     bin_qs.setdefault(b, set()).add(qi)
                     bin_offs.setdefault(b, []).append(off)
             if not bin_qs:
-                return 0.0, []
-            best_b = max(bin_qs, key=lambda b: len(bin_qs[b]))
-            offset = float(np.median(bin_offs[best_b]))
-            # 各クエリフレームで直線±tolに乗る候補のうち最類似の1件を採用
-            inliers: List[Tuple[float, float, float]] = []
-            for q, cands in per_query:
-                on_line = [
-                    (d, s) for d, s in cands
-                    if abs((d - slope * q) - offset) <= tol
-                ]
-                if on_line:
-                    d, s = max(on_line, key=lambda c: c[1])
-                    inliers.append((q, d, s))
-            return offset, inliers
+                return []
+            centers: List[float] = []
+            for b in sorted(bin_qs, key=lambda b: len(bin_qs[b]), reverse=True):
+                off_b = float(np.median(bin_offs[b]))
+                if all(abs(off_b - c) > 2 * tol for c in centers):
+                    centers.append(off_b)
+            clusters: List[Tuple[float, List[Tuple[float, float, float]]]] = []
+            for offset in centers:
+                pts: List[Tuple[float, float, float]] = []
+                for q, cands in per_query:
+                    on_line = [
+                        (d, s) for d, s in cands
+                        if abs((d - slope * q) - offset) <= tol
+                    ]
+                    if on_line:
+                        d, s = max(on_line, key=lambda c: c[1])
+                        pts.append((q, d, s))
+                if len(pts) >= min_cluster_frames:
+                    clusters.append((offset, pts))
+            return clusters
 
-        best: Tuple[float, float, List[Tuple[float, float, float]]] = (
-            1.0, 0.0, []
-        )
+        best_slope = 1.0
+        best_clusters: List[
+            Tuple[float, List[Tuple[float, float, float]]]
+        ] = []
+        best_total = -1
         for cand in candidates:
             slope = min(max(cand, lo), hi)
-            offset, inliers = evaluate(slope)
-            if len(inliers) > len(best[2]):
-                best = (slope, offset, inliers)
-        return best
+            clusters = extract_clusters(slope)
+            total = sum(len(pts) for _, pts in clusters)
+            if total > best_total:
+                best_total = total
+                best_slope = slope
+                best_clusters = clusters
+        return best_slope, best_clusters
 
     @staticmethod
     def _compute_match_regions(
@@ -717,69 +737,104 @@ class VideoFingerprintDatabase:
         if len(per_query) < min_region_frames:
             return empty
 
-        slope, offset, inlier_pts = VideoFingerprintDatabase._fit_dominant_alignment(
-            per_query, residual_tolerance, slope_range, min_query_gap
+        slope, clusters = VideoFingerprintDatabase._fit_dominant_alignment(
+            per_query, residual_tolerance, slope_range, min_query_gap,
+            min_region_frames,
         )
-        if len(inlier_pts) < min_region_frames:
-            # 支配直線に整合するフレームが足りない＝時間的に一貫しない偶発一致
+        if not clusters:
+            # 採用に足る整列列が無い＝時間的に一貫しない偶発一致
             return empty
 
-        inliers = [
-            {"query_ts": q, "db_ts": d, "similarity": s}
-            for q, d, s in sorted(inlier_pts, key=lambda t: t[0])
-        ]
+        # 各オフセット列（クラスタ）を、さらにクエリ時間の空きで連続区間に分割する。
+        # OP/ED等の共通区間は別々のオフセット列として全て採用し、被覆はクエリ時間軸
+        # 上の区間和集合で測る（列がクエリ時間で重なっても二重計上しない）。
+        region_infos: List[Dict] = []
+        q_intervals: List[Tuple[float, float]] = []
+        all_inliers: List[Tuple[float, float, float]] = []
+        primary_offset = 0.0
+        primary_size = -1
+        for offset, pts in clusters:
+            pts_sorted = sorted(pts, key=lambda t: t[0])
+            all_inliers.extend(pts_sorted)
+            if len(pts_sorted) > primary_size:
+                primary_size = len(pts_sorted)
+                primary_offset = offset
 
-        # 支配直線上のインライアをクエリ時間の空きで連続区間に分割する
-        regions = []
-        cur = [inliers[0]]
-        for m in inliers[1:]:
-            if m["query_ts"] - cur[-1]["query_ts"] <= query_gap_merge:
-                cur.append(m)
-            else:
-                regions.append(cur)
-                cur = [m]
-        regions.append(cur)
+            cur = [pts_sorted[0]]
+            subregions = []
+            for p in pts_sorted[1:]:
+                if p[0] - cur[-1][0] <= query_gap_merge:
+                    cur.append(p)
+                else:
+                    subregions.append(cur)
+                    cur = [p]
+            subregions.append(cur)
 
-        region_infos = []
-        covered = 0.0
-        for cluster in regions:
-            q_times = [m["query_ts"] for m in cluster]
-            d_times = [m["db_ts"] for m in cluster]
-            avg_sim = sum(m["similarity"] for m in cluster) / len(cluster)
-            q_start, q_end = min(q_times), max(q_times)
-            covered += q_end - q_start
-            region_infos.append({
-                "query_start": q_start,
-                "query_end": q_end,
-                "db_start": min(d_times),
-                "db_end": max(d_times),
-                "frame_count": len(cluster),
-                "avg_similarity": round(avg_sim, 3),
-            })
+            for cluster in subregions:
+                q_times = [p[0] for p in cluster]
+                d_times = [p[1] for p in cluster]
+                avg_sim = sum(p[2] for p in cluster) / len(cluster)
+                q_start, q_end = min(q_times), max(q_times)
+                q_intervals.append((q_start, q_end))
+                region_infos.append({
+                    "query_start": q_start,
+                    "query_end": q_end,
+                    "db_start": min(d_times),
+                    "db_end": max(d_times),
+                    "frame_count": len(cluster),
+                    "avg_similarity": round(avg_sim, 3),
+                })
         region_infos.sort(key=lambda r: r["query_start"])
 
-        # 被覆率: 整列がクエリ時間軸を連続的にどれだけ覆うか
+        # 被覆率: 全整列列のクエリ区間の和集合長 / クエリ長
+        covered = VideoFingerprintDatabase._union_length(q_intervals)
+        q_all = [p[0] for p in all_inliers]
         span = query_duration if query_duration > 0 else (
-            max(m["query_ts"] for m in inliers)
-            - min(m["query_ts"] for m in inliers)
+            max(q_all) - min(q_all)
         )
         coverage = min(1.0, covered / span) if span > 0 else 0.0
-        median_sim = float(np.median([m["similarity"] for m in inliers]))
+        median_sim = float(np.median([p[2] for p in all_inliers]))
+        matched = len(all_inliers)
 
         return {
-            # 支配整列に乗ったインライア数（従来のmatched_framesを置換）
-            "matched_frames": len(inliers),
-            "aligned_frames": len(inliers),
+            # 全整列列に乗ったインライア数の合計
+            "matched_frames": matched,
+            "aligned_frames": matched,
             "total_frames": total,
             # 従来互換: 全フレームに対するインライアの割合
-            "match_ratio": len(inliers) / total if total else 0.0,
+            "match_ratio": matched / total if total else 0.0,
             # 連続被覆率（スコアの主指標）
             "coverage": coverage,
             "time_scale": slope,
-            "time_offset": offset,
+            # 代表オフセット（最大クラスタ）。列は複数あり得る
+            "time_offset": primary_offset,
             "median_similarity": median_sim,
             "regions": region_infos,
         }
+
+    @staticmethod
+    def _union_length(intervals: List[Tuple[float, float]]) -> float:
+        """区間リストの和集合の総長を返す（重なりは二重計上しない）
+
+        Args:
+            intervals: [(start, end), ...]（start<=end）
+
+        Returns:
+            和集合の長さ
+        """
+        if not intervals:
+            return 0.0
+        ordered = sorted(intervals)
+        total = 0.0
+        cur_s, cur_e = ordered[0]
+        for s, e in ordered[1:]:
+            if s <= cur_e:
+                cur_e = max(cur_e, e)
+            else:
+                total += cur_e - cur_s
+                cur_s, cur_e = s, e
+        total += cur_e - cur_s
+        return total
 
     # ===== 統計 =====
 

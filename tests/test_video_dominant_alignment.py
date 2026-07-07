@@ -90,6 +90,25 @@ class TestDominantAlignment(unittest.TestCase):
         for r in md["regions"]:
             self.assertLess(r["db_end"], 400.0)
 
+    def test_multiple_offset_segments_all_recovered(self):
+        """同一傾きで別オフセットの複数共通区間（OP/ED等）を全て整列に採る"""
+        # OP: query 0〜54s が db 300+（offset300）、ED: query 120〜174s が
+        # db 900+（offset780）。傾きは共通(≈1)だがオフセットが異なる2列。
+        matches = []
+        for q in range(0, 55, 6):          # 10フレーム（OP）
+            matches.append(_fm(q, q + 300, 0.6))
+        for q in range(120, 175, 6):        # 10フレーム（ED）
+            matches.append(_fm(q, q + 780, 0.6))
+        md = VDB._compute_match_regions(matches, threshold=0.4,
+                                        query_duration=200.0)
+        # 両区間の全20フレームが整列に採用される
+        self.assertEqual(md["aligned_frames"], 20)
+        # 別オフセットなので2区間に分かれる
+        self.assertEqual(len(md["regions"]), 2)
+        self.assertAlmostEqual(md["time_scale"], 1.0, delta=0.05)
+        # 被覆はクエリ時間軸の和集合（54+54=108s / 200s ≈ 0.54）
+        self.assertAlmostEqual(md["coverage"], 108.0 / 200.0, delta=0.05)
+
     def test_coverage_reflects_continuous_span(self):
         """被覆率は連続一致のクエリ時間スパン/クエリ長で算出する"""
         # クエリ 0〜100s のうち 0〜60s を連続一致（slope1, offset300）
