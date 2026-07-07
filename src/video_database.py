@@ -107,6 +107,22 @@ class VideoFingerprintDatabase:
         self._geom_diag = os.environ.get("MIMIZAM_GEOM_DIAG", "") not in (
             "", "0", "false", "False",
         )
+        # 調査用の環境変数オーバーライド。recall（短い一致断片の取りこぼし）が
+        # 間引き・候補数のどちらに起因するかを切り分けるため、コード変更なしで
+        # 主要ノブを差し替えられるようにする。未設定なら既定値のまま。
+        #   MIMIZAM_GEOM_MAX_QUERY_FRAMES=0  … 間引き無効（全フレーム検証）
+        #   MIMIZAM_GEOM_TOP_K=10            … ANN上位候補数を増やす
+        #   MIMIZAM_GEOM_MAX_DESC=400        … 1フレーム記述子上限
+        self._geom_max_query_frames = self._env_int(
+            "MIMIZAM_GEOM_MAX_QUERY_FRAMES", self._geom_max_query_frames
+        )
+        self._geom_top_k = self._env_int(
+            "MIMIZAM_GEOM_TOP_K", self._geom_top_k
+        )
+        self._geom_max_desc = self._env_int(
+            "MIMIZAM_GEOM_MAX_DESC", self._geom_max_desc
+        )
+        self._geom_inlier_saturation = 0.25 * self._geom_max_desc
         self.backend: DatabaseBackend = create_database_backend(config)
 
         if not self.backend.connect():
@@ -791,6 +807,17 @@ class VideoFingerprintDatabase:
                 geom_scores.append(best_score)
 
         return frame_matches, geom_scores
+
+    @staticmethod
+    def _env_int(name: str, default: int) -> int:
+        """環境変数を整数として読む。未設定・不正値なら default を返す（調査用）"""
+        raw = os.environ.get(name)
+        if raw is None or raw == "":
+            return default
+        try:
+            return int(raw)
+        except ValueError:
+            return default
 
     def _log_geom_diagnostics(
         self, vid_id: str, frame_matches: List[Dict]
