@@ -255,6 +255,13 @@ class Mimizam:
             )
         self.logger.info(f"Generated {len(query_fingerprints)} query fingerprints")
 
+        # クエリ全長（=最大 time_offset）。search_movie の映像側 query_duration と
+        # 同じく「クエリ指紋の最大タイムスタンプ」を全長として結果に載せ、表示側で
+        # 被覆区間バーの基準に使う。
+        query_duration = max(
+            (fp.time_offset for fp in query_fingerprints), default=0.0
+        )
+
         self.matcher.min_confidence = min_confidence
         self.matcher.max_results = top_k
 
@@ -274,6 +281,7 @@ class Mimizam:
                     'song': song,
                     'confidence': match.get('confidence', 0.0),
                     'match_count': match.get('match_count', 0),
+                    'query_duration': query_duration,
                     'details': match,
                 })
 

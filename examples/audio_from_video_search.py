@@ -225,288 +225,102 @@ def _print_match_results(matches: List[Dict[str, Any]], file_name: str,
             print()
 
 
+def _render_bar(total_duration: float, regions: list,
+                bar_width: int = 60, key: str = "query") -> str:
+    """一致区間をバーで可視化する（movie_search と同方式）"""
+    if total_duration <= 0:
+        return "|" + "-" * bar_width + "|"
+
+    bar = ["-"] * bar_width
+    start_key = f"{key}_start"
+    end_key = f"{key}_end"
+
+    for region in regions:
+        s = region.get(start_key, 0)
+        e = region.get(end_key, 0)
+        i_start = int(s / total_duration * bar_width)
+        i_end = int(e / total_duration * bar_width) + 1
+        i_start = max(0, min(i_start, bar_width - 1))
+        i_end = max(i_start + 1, min(i_end, bar_width))
+        for i in range(i_start, i_end):
+            bar[i] = "█"
+
+    return "|" + "".join(bar) + "|"
+
+
 def _print_detailed_match_info_from_result(match_result: Dict[str, Any]) -> None:
-    """マッチ結果から詳細情報を表示"""
+    """マッチ結果の詳細情報を movie_search と同じレイアウト（英語）で表示する"""
     if 'detailed_info' not in match_result:
-        print("      ⚠️  No detailed information available")
+        print("   ⚠️  No detailed information available")
         return
-    
+
     details = match_result['detailed_info']
-    stats = details['statistics']
-    match_positions = details['match_positions']
-    
-    print("   📊 Detailed Match Analysis:")
-    print(f"      Total fingerprint matches: {stats['total_matches']}")
-    print(f"      Time-aligned matches: {stats['aligned_matches']} ({stats['alignment_ratio']:.1%})")
-    
-    if not match_positions:
-        print("      ⚠️  No match positions available")
+    stats = details.get('statistics', {})
+    positions = details.get('match_positions', [])
+
+    aligned = stats.get('aligned_matches', 0)
+    total = stats.get('total_matches', 0)
+    ratio = stats.get('alignment_ratio', 0)
+
+    print("   --- Audio Match ---")
+    print(f"   Time-aligned matches: {aligned}/{total} ({ratio:.1%})")
+
+    if not positions:
         return
-    
-    # 時間差から最頻オフセット（最大整列クラスタの中心）を求める
-    # 全マッチの中央値はノイズに引かれてズレるため最頻ビンを採用
-    time_diffs = [pos['time_diff'] for pos in match_positions]
+
+    # 全マッチの中央値はノイズに引かれてズレるため、最頻ビン（最大整列クラスタ）の
+    # 中心を代表オフセットに採り、その±2秒に整列する一致だけで区間を決める。
+    time_diffs = [pos['time_diff'] for pos in positions]
     dominant_offset = dominant_time_offset(time_diffs)
-    
-    # クエリとDBの時間範囲
-    query_times = [pos['query_time'] for pos in match_positions]
-    db_times = [pos['db_time'] for pos in match_positions]
-    
-    query_start, query_end = min(query_times), max(query_times)
+    consistent = [
+        p for p in positions
+        if abs(p['time_diff'] - dominant_offset) < 2.0
+    ]
+    if not consistent:
+        return
+
+    q_times = [p['query_time'] for p in consistent]
+    db_times = [p['db_time'] for p in consistent]
+    q_start, q_end = min(q_times), max(q_times)
     db_start, db_end = min(db_times), max(db_times)
-    
-    print(f"      Best time alignment: {_format_time_offset(dominant_offset)}")
-    print(f"      Query audio: {query_start:.1f}s - {query_end:.1f}s ({query_end-query_start:.1f}s)")
-    print(f"      Database audio: {db_start:.1f}s - {db_end:.1f}s ({db_end-db_start:.1f}s)")
-    
-    # どの部分が一致しているかを分析
-    est_query_start_in_db = query_start + dominant_offset
-    est_query_end_in_db = query_end + dominant_offset
-    
-    print("   🎯 Match Location Analysis:")
-    if dominant_offset < 0:
-        # より厳しいフィルタリングで正確なマッチクラスターを特定
-        consistent_matches = [pos for pos in match_positions 
-                            if abs(pos['time_diff'] - dominant_offset) < 0.5]  # 0.5秒以内の誤差に厳格化
-        
-        if consistent_matches:
-            consistent_db_times = [pos['db_time'] for pos in consistent_matches]
-            consistent_query_times = [pos['query_time'] for pos in consistent_matches]
-            
-            actual_match_start = min(consistent_db_times)
-            actual_match_end = max(consistent_db_times)
-            actual_match_duration = actual_match_end - actual_match_start
-            
-            # クエリ側の対応する範囲も計算
-            query_match_start = min(consistent_query_times)
-            query_match_end = max(consistent_query_times)
-            query_match_duration = query_match_end - query_match_start
-            
-            print(f"      • Query matches database from {_format_time_range(actual_match_start, actual_match_end)}")
-            print(f"      • Actual match duration: {actual_match_duration:.1f}s (DB) / {query_match_duration:.1f}s (Query)")
-            
-            # より正確なカバレッジ情報
-            if actual_match_duration < (query_end - query_start) * 0.5:  # 50%未満で部分マッチ
-                coverage_pct = (query_match_duration / (query_end - query_start)) * 100
-                print(f"      • Coverage: {coverage_pct:.1f}% of query audio matched (partial match)")
-            else:
-                print("      • Strong match coverage detected")
-        else:
-            print("      • No consistent match cluster found")
-    else:
-        print(f"      • Query appears to match DB at: {_format_time_range(est_query_start_in_db, est_query_end_in_db)}")
-    
-    # DB内での相対位置
-    if db_end > db_start:
-        relative_start = ((est_query_start_in_db - db_start) / (db_end - db_start)) * 100
-        coverage = ((query_end - query_start) / (db_end - db_start)) * 100
-        print(f"      • Query starts at {relative_start:.1f}% into database audio")
-        print(f"      • Query covers {coverage:.1f}% of database duration")
-    
-    # 視覚化の追加 - マッチデータを使用
-    if dominant_offset < 0:
-        # より厳しいフィルタリングでマッチクラスターを再取得
-        consistent_matches = [pos for pos in match_positions 
-                            if abs(pos['time_diff'] - dominant_offset) < 0.5]
-        
-        if consistent_matches:
-            consistent_db_times = [pos['db_time'] for pos in consistent_matches]
-            consistent_query_times = [pos['query_time'] for pos in consistent_matches]
-            
-            actual_match_start = min(consistent_db_times)
-            actual_match_end = max(consistent_db_times)
-            query_match_start = min(consistent_query_times)
-            query_match_end = max(consistent_query_times)
-            
-            _print_match_visualization(query_start, query_end, db_start, db_end,
-                                     est_query_start_in_db, est_query_end_in_db,
-                                     actual_match_start, actual_match_end,
-                                     query_match_start, query_match_end, dominant_offset)
-        else:
-            _print_match_visualization(query_start, query_end, db_start, db_end, 
-                                     est_query_start_in_db, est_query_end_in_db,
-                                     offset=dominant_offset)
-    else:
-        _print_match_visualization(query_start, query_end, db_start, db_end, 
-                                 est_query_start_in_db, est_query_end_in_db,
-                                 offset=dominant_offset)
+    span_q = q_end - q_start
+    span_db = db_end - db_start
 
+    print(
+        f"   Match region: Query "
+        f"{_format_time_mmss(q_start)} - {_format_time_mmss(q_end)} "
+        f"({span_q:.1f}s) -> DB "
+        f"{_format_time_mmss(db_start)} - {_format_time_mmss(db_end)} "
+        f"({span_db:.1f}s)"
+    )
 
-def _print_match_visualization(query_start: float, query_end: float,
-                             db_start: float, db_end: float,
-                             est_query_start_in_db: float = None, est_query_end_in_db: float = None,
-                             actual_match_start: float = None, actual_match_end: float = None,
-                             query_match_start: float = None, query_match_end: float = None,
-                             offset: float = 0) -> None:
-    """クエリとDBの対応関係を視覚化 - 実測データ優先、ない場合推定データ"""
-    
-    width = 60
-    
-    # 実測データがある場合は優先使用
-    if (actual_match_start is not None and actual_match_end is not None and 
-        query_match_start is not None and query_match_end is not None):
-        print("   🎯 Audio Match Visualization (using measured data):")
-        # 実測データを使用
-        _print_accurate_visualization(query_start, query_end, db_start, db_end,
-                                    actual_match_start, actual_match_end,
-                                    query_match_start, query_match_end, width)
-    else:
-        print("   🎯 Audio Match Visualization (using estimated data):")
-        # 推定データを使用
-        _print_estimated_visualization(query_start, query_end, db_start, db_end,
-                                     est_query_start_in_db, est_query_end_in_db,
-                                     offset, width)
+    regions = [{
+        "query_start": q_start,
+        "query_end": max(q_end, q_start + 0.5),
+        "db_start": db_start,
+        "db_end": max(db_end, db_start + 0.5),
+    }]
 
+    # クエリ全長は search_song が付与（=クエリ指紋の最大 time_offset）。
+    query_duration = match_result.get('query_duration', 0.0) or 0.0
+    # DB全長は楽曲の実長。無ければ一致した db_time の最大値で代替する。
+    song_info = match_result.get('song_info', {})
+    db_duration = song_info.get('duration') or 0.0
+    if db_duration <= 0:
+        db_range = stats.get('db_time_range', (0.0, 0.0))
+        db_duration = db_range[1] if db_range and db_range[1] > 0 else 0.0
 
-def _print_accurate_visualization(query_start: float, query_end: float,
-                                db_start: float, db_end: float,
-                                actual_match_start: float, actual_match_end: float,
-                                query_match_start: float, query_match_end: float,
-                                width: int) -> None:
-    """実測データを使用した正確な視覚化"""
-    # クエリ側の表示
-    query_total_duration = query_end - query_start
-    query_match_duration = query_match_end - query_match_start
-    
-    print(f"      Query Audio (total {query_total_duration:.0f}s) ✅ Measured:")
-    
-    query_timeline = ['-'] * width
-    if query_total_duration > 0:
-        # クエリでのマッチ開始・終了位置
-        match_start_ratio = query_match_start / query_total_duration
-        match_end_ratio = query_match_end / query_total_duration
-        
-        match_start_pos = max(0, int(width * match_start_ratio))
-        match_end_pos = min(width-1, int(width * match_end_ratio))
-        
-        for i in range(match_start_pos, match_end_pos + 1):
-            if 0 <= i < width:
-                query_timeline[i] = '█'
-    
-    print(f"      |{''.join(query_timeline)}|")
-    
-    query_total_formatted = _format_time_mmss(query_total_duration)
-    print(f"       0:00{' ' * (width-10)}{query_total_formatted}")
-    print(f"       └─ Match: {_format_time_mmss(query_match_start)} - {_format_time_mmss(query_match_end)} ({query_match_duration:.0f}s)")
-    
-    # DB側の表示
-    db_total_duration = db_end - db_start
-    actual_match_duration = actual_match_end - actual_match_start
-    
-    print(f"       ↓ Matches DB at {actual_match_start/60:.0f}:{int(actual_match_start%60):02d}")
-    print(f"      Database Audio (total {db_total_duration:.0f}s) ✅ Measured:")
-    
-    db_timeline = ['-'] * width
-    if db_total_duration > 0:
-        # DB内でのマッチ位置
-        match_start_ratio = actual_match_start / db_total_duration
-        match_end_ratio = actual_match_end / db_total_duration
-        
-        match_start_pos = max(0, int(width * match_start_ratio))
-        match_end_pos = min(width-1, int(width * match_end_ratio))
-        
-        for i in range(match_start_pos, match_end_pos + 1):
-            if 0 <= i < width:
-                db_timeline[i] = '█'
-    
-    print(f"      |{''.join(db_timeline)}|")
-    
-    db_total_formatted = _format_time_mmss(db_total_duration)
-    print(f"       0:00{' ' * (width-10)}{db_total_formatted}")
-    print(f"       └─ Match: {_format_time_mmss(actual_match_start)} - {_format_time_mmss(actual_match_end)} ({actual_match_duration:.0f}s)")
-    print("      📍 Legend:")
-    print("         █ = Matching audio region (accurate position based on measured data)")
-    print("         - = Non-matching audio")
+    if query_duration > 0:
+        print(f"   Query Audio ({_format_time_mmss(query_duration)}):")
+        bar = _render_bar(query_duration, regions, key="query")
+        print(f"    {bar}")
+        print(f"     0:00{' ' * 48}{_format_time_mmss(query_duration)}")
 
-
-def _print_estimated_visualization(query_start: float, query_end: float,
-                                 db_start: float, db_end: float,
-                                 est_query_start_in_db: float, est_query_end_in_db: float,
-                                 offset: float, width: int) -> None:
-    """推定データを使用した視覚化"""
-    # Offsetが負の場合（consistent_matchesと同じロジック）
-    if offset < 0:
-        # 実際のマッチした範囲を計算
-        actual_match_start_db = abs(offset)
-        actual_match_end_db = actual_match_start_db + (query_end - query_start)
-        
-        # クエリ側のマッチ範囲（常に0から始まると仮定）
-        query_match_start = 0.0
-        query_match_end = query_end - query_start
-        
-        # クエリ全体の長さを推定（マッチした部分が全体のどの部分かを表示）
-        query_total_duration = query_match_end * 1.6  # 推定：マッチ部分が全体の約60%
-        
-        print(f"      Query Audio (total ~{query_total_duration:.0f}s) ⚠️ Estimated:")
-        
-        # クエリのタイムライン表示 - 前半部分がマッチ
-        query_timeline = ['-'] * width
-        match_ratio = query_match_end / query_total_duration
-        match_width = max(1, int(width * match_ratio))
-        
-        for i in range(match_width):
-            if i < width:
-                query_timeline[i] = '█'
-        
-        print(f"      |{''.join(query_timeline)}|")
-        
-        query_total_formatted = _format_time_mmss(query_total_duration)
-        print(f"       0:00{' ' * (width-10)}{query_total_formatted}")
-        print(f"       └─ Match: {_format_time_mmss(query_match_start)} - {_format_time_mmss(query_match_end)} ({query_match_end:.0f}s)")
-        
-        # DB側の表示
-        print(f"       ↓ Query start matches DB at {_format_time_mmss(actual_match_start_db)}")
-        
-        # Database timeline - 全DB中のマッチ位置を表示
-        db_duration = db_end - db_start
-        print(f"      Database Audio (total {db_duration:.0f}s) ⚠️ Estimated:")
-        
-        db_timeline = ['-'] * width
-        
-        if db_duration > 0:
-            # DBでのマッチ位置を計算
-            match_start_pos = max(0, min(width-1, int(actual_match_start_db / db_duration * width)))
-            match_end_pos = max(match_start_pos, min(width-1, int(actual_match_end_db / db_duration * width)))
-            
-            for i in range(match_start_pos, match_end_pos + 1):
-                if 0 <= i < width:
-                    db_timeline[i] = '█'
-        
-        print(f"      |{''.join(db_timeline)}|")
-        
-        db_total_formatted = _format_time_mmss(db_duration)
-        print(f"       0:00{' ' * (width-10)}{db_total_formatted}")
-        print(f"       └─ Match: {_format_time_mmss(actual_match_start_db)} - {_format_time_mmss(actual_match_end_db)}")
-        
-    else:
-        # 正のオフセットの場合
-        query_duration = query_end - query_start
-        print(f"      Query Audio ({query_duration:.1f}s) ⚠️ Estimated:")
-        query_bar = "█" * width
-        print(f"      |{query_bar}|")
-        
-        query_total_formatted = _format_time_mmss(query_duration)
-        print(f"       0:00{' ' * (width-10)}{query_total_formatted}")
-        
-        db_duration = db_end - db_start
-        print(f"      Database Audio ({db_duration:.1f}s) ⚠️ Estimated:")
-        db_timeline = ['-'] * width
-        if est_query_end_in_db > db_start:
-            end_pos = min(width-1, int((est_query_end_in_db - db_start) / db_duration * width))
-
-            for i in range(0, end_pos + 1):
-                if 0 <= i < width:
-                    db_timeline[i] = '█'
-        print(f"      |{''.join(db_timeline)}|")
-        
-        db_total_formatted = _format_time_mmss(db_duration)
-        print(f"       0:00{' ' * (width-10)}{db_total_formatted}")
-    
-    print(f"      ⏰ Technical: Query matches DB at {_format_time_mmss(est_query_start_in_db)} - {_format_time_mmss(est_query_end_in_db)}")
-    print("      📍 Legend:")
-    print("         █ = Matching audio region (estimated position based on calculated data)")
-    print("         - = Non-matching audio")
-    print("      ⚠️  Note: Using estimated data, actual position may differ slightly")
+    if db_duration > 0:
+        print(f"   Database Audio ({_format_time_mmss(db_duration)}):")
+        bar = _render_bar(db_duration, regions, key="db")
+        print(f"    {bar}")
+        print(f"     0:00{' ' * 48}{_format_time_mmss(db_duration)}")
 
 
 def search_single_file(file_path: str,
@@ -549,10 +363,12 @@ def search_single_file(file_path: str,
                 'song_info': {
                     'title': song.title,
                     'artist': song.artist,
-                    'file_path': song.file_path
+                    'file_path': song.file_path,
+                    'duration': song.duration,
                 },
                 'confidence': match['confidence'],
                 'match_count': match['match_count'],
+                'query_duration': match.get('query_duration', 0.0),
                 'time_offset': details.get('time_offset', 0),
                 'time_scale': details.get('time_scale', 1.0),
                 'freq_scale': details.get('freq_scale', 1.0)
