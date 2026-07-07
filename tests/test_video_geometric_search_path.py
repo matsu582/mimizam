@@ -67,6 +67,7 @@ class TestGeometricSearchPath(unittest.TestCase):
         db._geom_max_desc = 400
         db._geom_region_db_gap = 45.0
         db._geom_max_workers = 1
+        db._geom_max_candidates = 0
         import logging
         db.logger = logging.getLogger("test.vdb")
         return db
@@ -173,6 +174,43 @@ class TestGeometricSearchPath(unittest.TestCase):
             self.assertIsNotNone(fidxs)
             # 4クエリ×top_k3 の和集合 ≤ 12 < 20（全件）
             self.assertLessEqual(len(fidxs), n_query * db._geom_top_k)
+
+    def test_geom_max_candidates_limits_verified_videos(self):
+        """_geom_max_candidates で幾何検証する候補数（＝DB読み込み対象）を絞る"""
+        n_query = 4
+        query_frame_fps = [(i, float(i), _vlad(i)) for i in range(n_query)]
+        query_raw = [
+            (i, float(i), _packed_desc(10 + i, 100 + i))
+            for i in range(n_query)
+        ]
+        frame_fps = {}
+        frame_descs = {}
+        vids = ["v1", "v2", "v3", "v4", "v5"]
+        for k, vid in enumerate(vids):
+            db_frames = []
+            db_descs = []
+            for j in range(4):
+                db_frames.append(
+                    (j, float(300 + j), _vlad(500 + 10 * k + j).tobytes())
+                )
+                arr = _packed_desc(12, 700 + 10 * k + j)
+                db_descs.append(
+                    (j, float(300 + j), arr.astype(np.float32).tobytes(),
+                     arr.shape[0])
+                )
+            frame_fps[vid] = db_frames
+            frame_descs[vid] = db_descs
+
+        db = self._make_db()
+        db._geom_max_candidates = 2
+        backend = _FakeBackend(frame_fps, frame_descs)
+        db.backend = backend
+        db.search_video_with_frame_matching(
+            query_frame_fps, vids, threshold=0.0, query_raw=query_raw,
+        )
+        # 生記述子の読み込みは上位2候補だけに限定される
+        read_vids = {v for v, _ in backend.desc_calls}
+        self.assertEqual(read_vids, {"v1", "v2"})
 
     def test_subsample_limits_geometric_query_frames(self):
         """_geom_max_query_frames で幾何検証するクエリ数を頭打ちにする"""

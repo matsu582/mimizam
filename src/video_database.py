@@ -89,6 +89,11 @@ class VideoFingerprintDatabase:
         # スレッドで並列化できる。DB読み込み（生記述子取得）は直列で先に済ませ、
         # CPU律速の検証だけを並列化する。0以下でCPU数、1で並列無効（直列）。
         self._geom_max_workers = 0
+        # 幾何検証する候補数の上限。総検索時間は「候補数 × 1候補の生記述子読み込み
+        # ＋幾何検証」に比例するため、ANN得票上位 _geom_max_candidates 件だけを幾何
+        # 検証すると、DBの映像数が増えても検索時間を一定に保てる。0以下で無制限
+        # （全候補を検証）。上位候補はANN得票順で選ぶ。
+        self._geom_max_candidates = 0
         self.backend: DatabaseBackend = create_database_backend(config)
 
         if not self.backend.connect():
@@ -389,8 +394,15 @@ class VideoFingerprintDatabase:
             # 幾何検証パス。BFマッチ/RANSACはCPU律速でGILを解放するため、候補ごとの
             # 検証をスレッドで並列化する。ただしDB読み込み（生記述子取得）はバックエンド
             # 接続がスレッド安全とは限らないので、直列で先に済ませてから並列化する。
+            # ANN得票上位の候補だけを幾何検証してDBの映像数増加に対する検索時間を
+            # 一定に保つ（candidate_video_ids は得票順で渡される前提）。
+            geom_candidates = candidate_video_ids
+            if self._geom_max_candidates > 0:
+                geom_candidates = candidate_video_ids[
+                    :self._geom_max_candidates
+                ]
             work: List[dict] = []
-            for vid_id in candidate_video_ids:
+            for vid_id in geom_candidates:
                 raw_frames = frames_by_video.get(vid_id, [])
                 if not raw_frames:
                     continue
