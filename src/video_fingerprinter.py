@@ -82,6 +82,139 @@ def normalize_frame(
     return cv2.resize(frame, (new_w, new_h), interpolation=interp)
 
 
+# 幾何検証用にキーポイント座標(x,y)を記述子の先頭に結合する際の列数
+KEYPOINT_COLS = 2
+
+
+def pack_raw_descriptors(
+    per_frame: List[Tuple[int, float, np.ndarray]],
+    per_frame_kpts: List[Tuple[int, float, np.ndarray]],
+) -> List[Tuple[int, float, np.ndarray]]:
+    """記述子(N×D)とキーポイント座標(N×2)を1配列(N×(2+D))へ結合する
+
+    幾何検証(RANSAC)で対応点座標が必要になるため、キーポイント座標を先頭2列へ
+    結合し、生記述子と同じ経路で永続化する。保存レイヤ(add_frame_descriptors)は
+    列数を問わず ``reshape(count, -1)`` で復元するため列追加をそのまま扱える。
+    フレーム順・行数は両リストで一致している前提（同一のdetectAndCompute由来）。
+
+    Args:
+        per_frame: [(fidx, ts, 記述子(N×D)), ...]
+        per_frame_kpts: [(fidx, ts, キーポイント座標(N×2)), ...]
+
+    Returns:
+        [(fidx, ts, 結合配列(N×(2+D)) float32), ...]
+    """
+    packed: List[Tuple[int, float, np.ndarray]] = []
+    for (fidx, ts, desc), (_, _, kpts) in zip(per_frame, per_frame_kpts):
+        desc_f = desc.astype(np.float32)
+        kpts_f = kpts.astype(np.float32).reshape(-1, KEYPOINT_COLS)
+        packed.append((fidx, ts, np.hstack([kpts_f, desc_f])))
+    return packed
+
+
+def split_raw_descriptor(
+    arr: np.ndarray,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """結合配列(N×(2+D))をキーポイント座標(N×2)と記述子(N×D)へ分離する
+
+    先頭2列がキーポイント座標、残りがAKAZE記述子。
+
+    Args:
+        arr: 保存済みの結合記述子配列(N×(2+D))
+
+    Returns:
+        (キーポイント座標(N×2), 記述子(N×D))
+    """
+    return arr[:, :KEYPOINT_COLS], arr[:, KEYPOINT_COLS:]
+
+
+def to_hamming_uint8(desc: np.ndarray) -> np.ndarray:
+    """AKAZE記述子をBF(Hamming)照合用のC連続uint8配列へ変換する
+
+    既にuint8かつC連続なら再変換せずそのまま返す（幾何検証の反復呼び出しで
+    同一DB記述子を毎回丸め直す無駄を省くための高速パス）。
+
+    Args:
+        desc: AKAZE記述子(N×D)
+
+    Returns:
+        C連続uint8のN×D配列
+    """
+    if desc.dtype == np.uint8 and desc.flags["C_CONTIGUOUS"]:
+        return desc
+    return np.ascontiguousarray(np.rint(desc), dtype=np.uint8)
+
+
+# ホモグラフィ推定の既定手法。USAC_MAGSAC はRANSACより頑健かつ高速（実測で
+# findHomographyが約2.5倍速）なため、利用可能なら既定に使う。古いOpenCVで
+# 未対応の場合は通常のRANSACへフォールバックする。
+DEFAULT_HOMOGRAPHY_METHOD = getattr(cv2, "USAC_MAGSAC", cv2.RANSAC)
+
+
+def geometric_match(
+    desc_q: np.ndarray,
+    kpt_q: np.ndarray,
+    desc_d: np.ndarray,
+    kpt_d: np.ndarray,
+    ratio: float = 0.75,
+    ransac_thresh: float = 5.0,
+    matcher: Optional["cv2.BFMatcher"] = None,
+    min_good: int = 4,
+    homography_method: int = DEFAULT_HOMOGRAPHY_METHOD,
+) -> Tuple[int, int]:
+    """2フレームのAKAZE記述子を突き合わせ、良マッチ数と幾何インライア数を返す
+
+    BF(Hamming)最近傍→Loweの比率検定で良マッチを選び、RANSACでホモグラフィを
+    推定して幾何的に整合するインライアを数える。OpenCVの標準APIのみを用いた
+    独自実装。
+
+    Args:
+        desc_q, desc_d: AKAZE記述子(N×D)。float32でもuint8に丸めて突き合わせる。
+            事前にuint8化(C連続)しておくと丸め処理を省いて高速化できる。
+        kpt_q, kpt_d: キーポイント座標(N×2)
+        ratio: Loweの比率検定のしきい値
+        ransac_thresh: RANSACのインライア許容画素
+        matcher: 再利用するBFMatcher（Noneなら都度生成）。多数フレームを
+            突き合わせる際に生成コストを省くため共有インスタンスを渡せる。
+        min_good: RANSACを実行する最小良マッチ数。インライア数は良マッチ数を
+            超えないため、必要インライア数を渡せば見込みの無いペアの
+            findHomography計算を省ける（既定4はホモグラフィ推定の下限）。
+
+    Returns:
+        (良マッチ数, 幾何インライア数)
+    """
+    if len(desc_q) < 2 or len(desc_d) < 2:
+        return 0, 0
+
+    q8 = to_hamming_uint8(desc_q)
+    d8 = to_hamming_uint8(desc_d)
+
+    bf = matcher if matcher is not None else cv2.BFMatcher(cv2.NORM_HAMMING)
+    knn = bf.knnMatch(q8, d8, k=2)
+    good = [
+        pair[0] for pair in knn
+        if len(pair) == 2 and pair[0].distance < ratio * pair[1].distance
+    ]
+    if len(good) < max(4, min_good):
+        return len(good), 0
+
+    src = np.float32(
+        [kpt_q[m.queryIdx] for m in good]
+    ).reshape(-1, 1, 2)
+    dst = np.float32(
+        [kpt_d[m.trainIdx] for m in good]
+    ).reshape(-1, 1, 2)
+    try:
+        _, mask = cv2.findHomography(
+            src, dst, homography_method, ransac_thresh
+        )
+    except cv2.error:
+        # 指定手法が未対応の環境では通常のRANSACへフォールバック
+        _, mask = cv2.findHomography(src, dst, cv2.RANSAC, ransac_thresh)
+    inliers = int(mask.sum()) if mask is not None else 0
+    return len(good), inliers
+
+
 @dataclass
 class VideoFingerprintConfig:
     """映像指紋の設定パラメータ"""
@@ -375,7 +508,11 @@ class VLADEncoder:
 
     def extract_descriptors(
         self, frames: List[Tuple[int, float, np.ndarray]]
-    ) -> Tuple[List[np.ndarray], List[Tuple[int, float, np.ndarray]]]:
+    ) -> Tuple[
+        List[np.ndarray],
+        List[Tuple[int, float, np.ndarray]],
+        List[Tuple[int, float, np.ndarray]],
+    ]:
         """
         フレーム群からAKAZE記述子を抽出
 
@@ -387,7 +524,10 @@ class VLADEncoder:
             frames: [(フレームインデックス, タイムスタンプ, 画像), ...]
 
         Returns:
-            (全記述子リスト, [(インデックス, タイムスタンプ, 記述子), ...])
+            (全記述子リスト,
+             [(インデックス, タイムスタンプ, 記述子), ...],
+             [(インデックス, タイムスタンプ, キーポイント座標(N×2)), ...])
+            3つ目は幾何検証(RANSAC)用のキーポイント画素座標。
         """
         workers = self._resolve_workers(len(frames))
         if workers <= 1:
@@ -402,12 +542,15 @@ class VLADEncoder:
 
         all_descriptors = []
         per_frame = []
+        per_frame_kpts = []
         for res in results:
             if res is not None:
-                all_descriptors.append(res[2])
-                per_frame.append(res)
+                fidx, ts, desc, kpts = res
+                all_descriptors.append(desc)
+                per_frame.append((fidx, ts, desc))
+                per_frame_kpts.append((fidx, ts, kpts))
 
-        return all_descriptors, per_frame
+        return all_descriptors, per_frame, per_frame_kpts
 
     def _resolve_workers(self, num_frames: int) -> int:
         """並列ワーカー数を決定（0指定時はCPU数から自動算出）"""
@@ -426,8 +569,12 @@ class VLADEncoder:
 
     def _extract_frame_descriptor(
         self, frame: Tuple[int, float, np.ndarray]
-    ) -> Optional[Tuple[int, float, np.ndarray]]:
-        """1フレームからAKAZE記述子を抽出"""
+    ) -> Optional[Tuple[int, float, np.ndarray, np.ndarray]]:
+        """1フレームからAKAZE記述子とキーポイント座標を抽出
+
+        キーポイント座標(N×2)は幾何検証(RANSAC)で使う。正規化後の画素座標なので
+        DB側と同一の正規化長辺で抽出すれば、そのまま対応点の座標として使える。
+        """
         fidx, ts, img = frame
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
         if self.config.normalize_long_side > 0:
@@ -437,9 +584,12 @@ class VLADEncoder:
             gray = normalize_frame(
                 gray, self.config.normalize_long_side, allow_upscale=True
             )
-        _, desc = self._get_thread_akaze().detectAndCompute(gray, None)
+        kps, desc = self._get_thread_akaze().detectAndCompute(gray, None)
         if desc is not None and len(desc) > 0:
-            return (fidx, ts, desc)
+            kpts = np.array(
+                [kp.pt for kp in kps], dtype=np.float32
+            ).reshape(-1, 2)
+            return (fidx, ts, desc, kpts)
         return None
 
     def train(
@@ -725,6 +875,10 @@ class VLADEncoder:
         centers = self._codebook_centers
 
         desc_f = descriptors.astype(np.float32)
+        # 保存済みraw記述子はキーポイント座標を先頭2列に結合している場合がある。
+        # VLADは記述子本体のみで計算するため末尾d列（記述子次元）へ切り出す。
+        if desc_f.ndim == 2 and desc_f.shape[1] > d:
+            desc_f = desc_f[:, -d:]
         labels = self._codebook_predict(desc_f)
 
         # 各記述子の残差（desc - 割当クラスタ中心）をクラスタ単位で集約
@@ -846,7 +1000,7 @@ class VideoFingerprinter:
                 continue
 
             frames = self.frame_selector.select_keyframes(vpath)
-            desc_list, _ = self.encoder.extract_descriptors(frames)
+            desc_list, _, _ = self.encoder.extract_descriptors(frames)
             all_descriptors.extend(desc_list)
 
             n_desc = sum(d.shape[0] for d in desc_list)
@@ -893,7 +1047,9 @@ class VideoFingerprinter:
 
         prof_on = self.config.profile_frames
         _t = time.perf_counter() if prof_on else 0.0
-        _, per_frame = self.encoder.extract_descriptors(frames)
+        _, per_frame, per_frame_kpts = self.encoder.extract_descriptors(
+            frames
+        )
         if prof_on:
             logger.info(
                 f"Fingerprint aggregation breakdown[s]: akaze(descriptor extraction×{len(frames)}"
@@ -905,7 +1061,11 @@ class VideoFingerprinter:
 
         fp = self.encoder.encode_video(per_frame)
         if self.config.store_raw_descriptors:
-            fp.raw_descriptors = per_frame
+            # 幾何検証用にキーポイント座標を記述子の先頭2列へ結合して保持する
+            # （N×(2+D)）。保存レイヤは列数を問わないため後方互換。
+            fp.raw_descriptors = pack_raw_descriptors(
+                per_frame, per_frame_kpts
+            )
         dims = (
             fp.frame_fingerprints[0][2].shape[0]
             if fp.frame_fingerprints else 0

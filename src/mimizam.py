@@ -13,6 +13,7 @@ import shutil
 import logging
 import tempfile
 import subprocess
+import time
 from typing import List, Optional, Dict, Any, Tuple
 from pathlib import Path
 import json
@@ -501,7 +502,14 @@ class Mimizam:
                 )
                 vfp.train_from_videos([file_path])
 
-            fp = vfp.fingerprint_video(file_path)
+            # 幾何検証（RANSAC）に使うため、DB側も生AKAZE記述子＋キーポイント座標を
+            # 保存する。DBに座標が無いと検索時の幾何検証ができないため既定で有効化する。
+            prev_store_raw = vfp.config.store_raw_descriptors
+            vfp.config.store_raw_descriptors = True
+            try:
+                fp = vfp.fingerprint_video(file_path)
+            finally:
+                vfp.config.store_raw_descriptors = prev_store_raw
             if fp is None:
                 # 映像指紋の生成失敗を None に潰さず処理失敗として通知する
                 raise MimizamError(
@@ -558,14 +566,19 @@ class Mimizam:
 
         frame_similarity（最良フレームのピーク類似度）だけでは、ごく僅かな
         フレームが偶発的に高一致した候補（例: 4/84フレーム）が高評価に
-        なってしまう。クエリのどれだけが一致したかを表す被覆率(match_ratio)と
-        ANN得票率を反映し、薄い偶発一致を減点する。
+        なってしまう。逆にフレーム数の割合(match_ratio)だけだと、疎なキーフレーム
+        でも長く連続一致している真の一致が過小評価される。そこで支配整列が
+        クエリ時間軸を連続的にどれだけ覆うか（coverage）とANN得票率を反映する。
+        coverage は _compute_match_regions が支配直線インライアの連続被覆から算出
+        する（無い場合は従来の match_ratio で代替）。
 
-        strength = 0.5 * 被覆率 + 0.5 * 得票率  (いずれも0..1に正規化)
+        strength = 0.5 * 連続被覆率 + 0.5 * 得票率  (いずれも0..1に正規化)
         実効スコア = frame_similarity * (floor + (1 - floor) * strength)
         """
         total = match_details.get("total_frames", 0) or 0
-        coverage = match_details.get("match_ratio", 0.0) or 0.0
+        coverage = match_details.get("coverage")
+        if coverage is None:
+            coverage = match_details.get("match_ratio", 0.0) or 0.0
         vote_ratio = min(1.0, votes / total) if total > 0 else 0.0
         strength = 0.5 * coverage + 0.5 * vote_ratio
         return frame_similarity * (floor + (1.0 - floor) * strength)
@@ -619,7 +632,14 @@ class Mimizam:
                     context={'query_file_path': query_file_path},
                 )
 
-            fp = vfp.fingerprint_video(query_file_path)
+            # 幾何検証（RANSAC）のためクエリ側は生AKAZE記述子＋キーポイント座標を
+            # 保持する。VLAD/PCAコサインで候補を絞った後、最終判定を幾何整合で行う。
+            prev_store_raw = vfp.config.store_raw_descriptors
+            vfp.config.store_raw_descriptors = True
+            try:
+                fp = vfp.fingerprint_video(query_file_path)
+            finally:
+                vfp.config.store_raw_descriptors = prev_store_raw
             if fp is None:
                 # 映像指紋の生成失敗を「一致なし」に潰さず処理失敗として通知する
                 raise MimizamError(
@@ -628,17 +648,24 @@ class Mimizam:
                 )
 
             # Step 1: フレーム指紋のANN近傍投票で候補絞り込み
+            _t_ann = time.perf_counter()
             candidates = vdb.search_frame_candidates(
                 fp.frame_fingerprints, top_k=top_k * 2
+            )
+            self.logger.info(
+                "[geom-timing] ANN候補絞り込み(得票)=%.3fs, 候補=%d件",
+                time.perf_counter() - _t_ann, len(candidates),
             )
 
             if not use_frame_matching or not candidates:
                 results = candidates[:top_k]
             else:
                 # Step 2: フレーム単位マッチングで精密照合
+                # クエリに生記述子があればANN上位候補をRANSAC幾何検証で再判定する
                 candidate_ids = [c["video_id"] for c in candidates]
                 frame_results = vdb.search_video_with_frame_matching(
-                    fp.frame_fingerprints, candidate_ids
+                    fp.frame_fingerprints, candidate_ids,
+                    query_raw=fp.raw_descriptors,
                 )
 
                 # 結果を統合
