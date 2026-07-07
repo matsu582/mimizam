@@ -206,7 +206,10 @@ class SQLiteBackend(DatabaseBackend):
                     
         except Exception as e:
             self.logger.error(f"SQLite fingerprint search error: {e}")
-        
+            raise DatabaseError(
+                "Failed to search fingerprints", original_error=e,
+            ) from e
+
         return matches
     
     def get_song(self, song_id: str) -> Optional[Song]:
@@ -591,7 +594,10 @@ class SQLiteBackend(DatabaseBackend):
             ]
         except Exception as e:
             self.logger.error(f"SQLite frame fingerprint retrieval error: {e}")
-            return []
+            raise DatabaseError(
+                "Failed to get frame fingerprints", original_error=e,
+                context={'video_id': video_id},
+            ) from e
 
     def get_frame_fingerprints_batch(
         self, video_ids: List[str],
@@ -620,6 +626,9 @@ class SQLiteBackend(DatabaseBackend):
             self.logger.error(
                 f"SQLite frame fingerprint batch retrieval error: {e}"
             )
+            raise DatabaseError(
+                "Failed to get frame fingerprints batch", original_error=e,
+            ) from e
         return result
 
     def get_video(self, video_id: str) -> Optional[Video]:
@@ -642,6 +651,32 @@ class SQLiteBackend(DatabaseBackend):
         except Exception as e:
             self.logger.error(f"SQLite video retrieval error: {e}")
         return None
+
+    def get_videos(
+        self, video_ids: List[str]
+    ) -> Dict[str, Optional[Video]]:
+        """SQLiteから複数映像のメタデータを1クエリで一括取得（N+1回避）"""
+        result: Dict[str, Optional[Video]] = {vid: None for vid in video_ids}
+        if not video_ids:
+            return result
+        try:
+            self._create_video_tables()
+            cursor = self.connection.cursor()
+            placeholders = ",".join("?" for _ in video_ids)
+            cursor.execute(
+                f"""SELECT id, title, file_path, duration, frame_count,
+                          created_at
+                   FROM videos WHERE id IN ({placeholders})""",
+                tuple(video_ids),
+            )
+            for r in cursor.fetchall():
+                result[r[0]] = Video(
+                    id=r[0], title=r[1], file_path=r[2],
+                    duration=r[3], frame_count=r[4], created_at=r[5],
+                )
+        except Exception as e:
+            self.logger.error(f"SQLite video batch retrieval error: {e}")
+        return result
 
     def list_videos(self) -> List[Video]:
         """SQLiteから全映像をリスト取得"""
@@ -739,7 +774,10 @@ class SQLiteBackend(DatabaseBackend):
             self.logger.error(
                 f"SQLite frame descriptor retrieval error: {exc}"
             )
-            return []
+            raise DatabaseError(
+                "Failed to get frame descriptors", original_error=exc,
+                context={'video_id': video_id},
+            ) from exc
 
     def get_all_frame_descriptors(
         self,
@@ -765,6 +803,9 @@ class SQLiteBackend(DatabaseBackend):
             self.logger.error(
                 f"SQLite all frame descriptor retrieval error: {exc}"
             )
+            raise DatabaseError(
+                "Failed to get all frame descriptors", original_error=exc,
+            ) from exc
         return result
 
     def delete_video(self, video_id: str) -> bool:

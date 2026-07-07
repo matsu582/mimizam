@@ -225,6 +225,62 @@ class TestGeometricSearchPath(unittest.TestCase):
         self.assertEqual(sel[-1], 19)
 
 
+class TestNonGeometricFallback(unittest.TestCase):
+    """DB側に生記述子が無い候補（opt-out動画等）の非幾何フォールバック回帰テスト
+
+    store_raw_descriptors=False で登録した動画は DB に生記述子が無く幾何検証
+    できない。この候補を幾何検証パスで黙って落とすと use_frame_matching 既定
+    検索でヒットしなくなる。VLADフレーム一致による非幾何スコアリングへ
+    フォールバックして拾えることを固定する。
+    """
+
+    def _make_db(self):
+        db = object.__new__(VDB)
+        db._geom_top_k = 6
+        db._geom_min_inliers = 15
+        db._geom_ransac_thresh = 5.0
+        db._geom_inlier_saturation = 100.0
+        db._geom_max_hits = 3
+        db._geom_max_query_frames = 48
+        db._geom_max_desc = 400
+        db._geom_region_db_gap = 45.0
+        db._geom_max_workers = 1
+        db._geom_max_candidates = 0
+        db._geom_diag = False
+        db._geom_scene_gap_factor = 1.8
+        db._geom_uniform_subsample = False
+        db._frame_match_cand_threshold = 0.4
+        db._frame_match_cap = 50
+        import logging
+        db.logger = logging.getLogger("test.vdb")
+        return db
+
+    def test_candidate_without_db_descriptors_is_recovered(self):
+        """query_raw があっても DB記述子が空なら非幾何で拾う（幾何で落とさない）"""
+        vid = "opt_out_vid"
+        n = 8
+        # クエリとDBのVLADを同一シードで揃え、対角(=時間整列)が強一致するようにする
+        query_frame_fps = [(i, float(i), _vlad(i)) for i in range(n)]
+        query_raw = [
+            (i, float(i), _packed_desc(10 + i, 100 + i)) for i in range(n)
+        ]
+        db_frames = [(j, float(j), _vlad(j).tobytes()) for j in range(n)]
+
+        db = self._make_db()
+        # frame_descs は空＝opt-out動画（生記述子なし）
+        backend = _FakeBackend({vid: db_frames}, {vid: []})
+        db.backend = backend
+
+        results = db.search_video_with_frame_matching(
+            query_frame_fps, [vid], threshold=0.0, query_raw=query_raw,
+        )
+        # 幾何検証は不可能でも、非幾何フォールバックで候補が返ること
+        self.assertTrue(results)
+        self.assertEqual(results[0]["video_id"], vid)
+        # DB記述子の取得は試みられている（＝幾何経路に入った上でのフォールバック）
+        self.assertTrue(backend.desc_calls)
+
+
 class TestSceneAwareSelection(unittest.TestCase):
     """シーン境界優先の間引き（_select_geom_indices / _scene_groups）の回帰テスト"""
 

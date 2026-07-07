@@ -5,6 +5,11 @@
 add_video / add_frame_fingerprints / delete_video）は、失敗を bool(False) に
 潰さず DatabaseError を送出する契約であることを検証する。
 
+検索・取得系（search_fingerprints / get_frame_fingerprints /
+get_frame_descriptors / get_all_frame_descriptors）も、DB障害時の失敗を
+空結果に潰さず DatabaseError を送出する（search_movie の両モダリティ失敗検知を
+機能させるため。「検索失敗」と「一致なし」を区別する）。
+
 - 起動時のライフサイクル述語（connect / create_tables）は従来通り bool を返す。
 - 高レベルAPI（Mimizam.delete_song 等）は backend の例外を捕捉して従来の
   bool 契約を維持する（呼び出し側の後方互換）。
@@ -82,6 +87,29 @@ class TestSQLiteBackendRaisesOnFailure(unittest.TestCase):
         self._break_connection()
         with self.assertRaises(DatabaseError):
             self.backend.delete_video("v1")
+
+    def test_search_fingerprints_raises_on_failure(self):
+        """検索失敗を空結果に潰さず DatabaseError を送出する（両モダリティ失敗検知）"""
+        self._break_connection()
+        with self.assertRaises(DatabaseError):
+            self.backend.search_fingerprints(
+                [Fingerprint(hash_value=1, time_offset=0.0, song_id="s1")]
+            )
+
+    def test_get_frame_fingerprints_raises_on_failure(self):
+        self._break_connection()
+        with self.assertRaises(DatabaseError):
+            self.backend.get_frame_fingerprints("v1")
+
+    def test_get_frame_descriptors_raises_on_failure(self):
+        self._break_connection()
+        with self.assertRaises(DatabaseError):
+            self.backend.get_frame_descriptors("v1")
+
+    def test_get_all_frame_descriptors_raises_on_failure(self):
+        self._break_connection()
+        with self.assertRaises(DatabaseError):
+            self.backend.get_all_frame_descriptors()
 
     def test_success_returns_true(self):
         """成功時は従来通り True を返す（例外は送出しない）"""

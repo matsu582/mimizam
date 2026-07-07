@@ -360,6 +360,14 @@ class Mimizam:
             self._video_db = None
         if not hasattr(self, '_video_config'):
             self._video_config = None
+        # 生AKAZE記述子のDB保存をユーザが明示設定したか（未設定なら幾何検証の
+        # ため add_video 時に既定で保存する）。
+        if not hasattr(self, '_video_store_raw_explicit'):
+            self._video_store_raw_explicit = False
+        # 現在の _video_db を生成した接続パラメータ（後続呼び出しで別パスや別config
+        # が渡されたのに使い回してしまう誤接続を防ぐための識別子）。
+        if not hasattr(self, '_video_db_key'):
+            self._video_db_key = None
 
     def configure_video(
         self,
@@ -390,6 +398,7 @@ class Mimizam:
             self._video_config.profile_frames = profile_frames
         if store_raw_descriptors is not None:
             self._video_config.store_raw_descriptors = store_raw_descriptors
+            self._video_store_raw_explicit = True
         # 既に生成済みなら即反映（全クラスでconfigを共有）
         vfp = self._video_fingerprinter
         if vfp is not None:
@@ -417,10 +426,40 @@ class Mimizam:
         db_path: Optional[str] = None,
         config: Optional[DatabaseConfig] = None,
     ):
-        """映像指紋DBを取得（遅延インポート、音声と同じバックエンドを使用）"""
+        """映像指紋DBを取得（遅延インポート、音声と同じバックエンドを使用）
+
+        db_path / config を明示指定した呼び出しが、以前生成した _video_db と別の
+        接続先を指す場合は作り直す。キャッシュを無条件に使い回すと、後続で別DBを
+        指定しても無視され誤接続する（テストや1プロセス内でのDB切替で顕在化する）。
+        いずれも未指定（None）の場合は既存のキャッシュをそのまま使う。
+        """
         self._ensure_video_system()
+
+        requested_key = None
+        if config is not None:
+            # config のいずれかのフィールドが変われば別接続とみなして作り直す。
+            # 一部フィールドだけ比較すると password 変更等で誤って旧接続を再利用する。
+            requested_key = (
+                'config', config.backend, config.host, config.port,
+                config.database, config.username, config.password,
+                config.file_path, config.index_name,
+                config.ca_certs, config.verify_certs,
+                config.pool_size, config.pool_timeout,
+            )
+        elif db_path is not None:
+            requested_key = ('path', os.path.abspath(db_path))
+
+        if (self._video_db is not None and requested_key is not None
+                and requested_key != self._video_db_key):
+            try:
+                self._video_db.close()
+            except Exception:
+                pass
+            self._video_db = None
+
         if self._video_db is None:
             from .video_database import VideoFingerprintDatabase
+            self._video_db_key = requested_key
             if config is not None:
                 self._video_db = VideoFingerprintDatabase(config=config)
             elif hasattr(self.database, 'config') and self.database.config:
@@ -502,10 +541,16 @@ class Mimizam:
                 )
                 vfp.train_from_videos([file_path])
 
-            # 幾何検証（RANSAC）に使うため、DB側も生AKAZE記述子＋キーポイント座標を
-            # 保存する。DBに座標が無いと検索時の幾何検証ができないため既定で有効化する。
+            # 幾何検証（RANSAC）に使うため、DB側は生AKAZE記述子＋キーポイント座標を
+            # 保存する。DBに座標が無いと検索時の幾何検証ができない。既定では保存する
+            # が、configure_video(store_raw_descriptors=False) を明示した場合は容量
+            # 増加を避けるため保存しない（幾何検証は無効化される）。
+            store_raw = (
+                vfp.config.store_raw_descriptors
+                if self._video_store_raw_explicit else True
+            )
             prev_store_raw = vfp.config.store_raw_descriptors
-            vfp.config.store_raw_descriptors = True
+            vfp.config.store_raw_descriptors = store_raw
             try:
                 fp = vfp.fingerprint_video(file_path)
             finally:
@@ -537,9 +582,14 @@ class Mimizam:
                 video_id, fp.frame_fingerprints
             )
 
-            # AKAZE記述子を保存（指紋再生成用）
-            if fp.raw_descriptors:
-                vdb.add_frame_descriptors(video_id, fp.raw_descriptors)
+            # AKAZE記述子を保存（幾何検証・指紋再生成用）。保存失敗は戻り値Falseで
+            # 返るため、静かに握り潰さず処理失敗として通知する。
+            if store_raw and fp.raw_descriptors:
+                if not vdb.add_frame_descriptors(video_id, fp.raw_descriptors):
+                    raise MimizamError(
+                        "Failed to store frame descriptors",
+                        context={'file_path': file_path, 'video_id': video_id},
+                    )
 
             self.logger.info(
                 f"Video successfully added: {video_id} - {title}"
@@ -973,8 +1023,14 @@ class Mimizam:
 
         audio_results: List[Dict[str, Any]] = []
         visual_results: List[Dict[str, Any]] = []
+        # 実行したモダリティが「すべて例外で失敗」した場合を「一致なし（空結果）」
+        # と取り違えないよう、失敗を記録して両方失敗時はエラーとして通知する。
+        attempted = 0
+        audio_error: Optional[Exception] = None
+        visual_error: Optional[Exception] = None
 
         if not skip_audio:
+            attempted += 1
             try:
                 # ffmpegパイプでPCMを直接読み、一時WAVのI/Oを回避する
                 audio = self._decode_audio_from_media(query_file_path)
@@ -995,9 +1051,11 @@ class Mimizam:
                         "detailed_info": details.get("detailed_info"),
                     })
             except Exception as exc:
+                audio_error = exc
                 self.logger.warning(f"Audio search error during movie search: {exc}")
 
         if not skip_visual:
+            attempted += 1
             try:
                 visual_results = self.search_video(
                     query_file_path=query_file_path,
@@ -1007,7 +1065,22 @@ class Mimizam:
                     video_db_path=video_db_path,
                 )
             except Exception as exc:
+                visual_error = exc
                 self.logger.warning(f"Video search error during movie search: {exc}")
+
+        # 実行したモダリティが1つ以上あり、そのすべてが例外で失敗した場合は、
+        # 空の結果（＝一致なし）に潰さず処理失敗として通知する。
+        errors = [e for e in (audio_error, visual_error) if e is not None]
+        if attempted > 0 and len(errors) == attempted:
+            raise MimizamError(
+                "Movie search failed for all attempted modalities",
+                original_error=errors[0],
+                context={
+                    'file_path': query_file_path,
+                    'skip_audio': skip_audio,
+                    'skip_visual': skip_visual,
+                },
+            )
 
         merged = self._merge_movie_results(
             audio_results, visual_results, divergence_tolerance
