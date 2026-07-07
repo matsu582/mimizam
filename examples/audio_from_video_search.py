@@ -303,9 +303,7 @@ def _print_detailed_match_info_from_result(match_result: Dict[str, Any]) -> None
 
     # クエリ全長は search_song が付与（=クエリ指紋の最大 time_offset）。
     query_duration = match_result.get('query_duration', 0.0) or 0.0
-    # DB全長は楽曲の実長を使うが、音声 songs テーブルは duration を保持しないため
-    # 通常は未設定。その場合は一致した db_time の最大値で代替する（movie_search の
-    # 音声セクションが video.duration 不在時に取る挙動と同じ）。
+    # DB全長は楽曲の実長。無ければ一致した db_time の最大値で代替する。
     song_info = match_result.get('song_info', {})
     db_duration = song_info.get('duration') or 0.0
     if db_duration <= 0:
@@ -366,6 +364,7 @@ def search_single_file(file_path: str,
                     'title': song.title,
                     'artist': song.artist,
                     'file_path': song.file_path,
+                    'duration': song.duration,
                 },
                 'confidence': match['confidence'],
                 'match_count': match['match_count'],
