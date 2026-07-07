@@ -23,6 +23,7 @@ from mimizam.src.video_fingerprinter import (
     geometric_match,
     pack_raw_descriptors,
     split_raw_descriptor,
+    to_hamming_uint8,
 )
 
 DESC_DIM = 61
@@ -74,6 +75,37 @@ class TestGeometricMatch(unittest.TestCase):
             desc_d.astype(np.float32), kpt_d,
         )
         self.assertLess(inl, 20)
+
+    def test_uint8_fastpath_matches_float32(self):
+        """事前uint8化した記述子でもfloat32と同じインライア数になる"""
+        desc, kpts = _make_frame(n=80, seed=30)
+        good_f, inl_f = geometric_match(
+            desc.astype(np.float32), kpts,
+            desc.astype(np.float32), kpts,
+        )
+        u8 = to_hamming_uint8(desc.astype(np.float32))
+        self.assertEqual(u8.dtype, np.uint8)
+        # 既にuint8/C連続ならそのまま返す（無駄な再変換をしない）
+        self.assertIs(to_hamming_uint8(u8), u8)
+        good_u, inl_u = geometric_match(u8, kpts, u8, kpts)
+        self.assertEqual((good_f, inl_f), (good_u, inl_u))
+
+    def test_prep_geom_frame_caps_descriptors(self):
+        """_prep_geom_frame は記述子・座標を上限件数へ切り詰めuint8化する"""
+        fd, db_path = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
+        try:
+            vdb = VDB(db_path=db_path)
+            vdb._geom_max_desc = 50
+            desc, kpts = _make_frame(n=200, seed=40)
+            kpt_c, desc_c = vdb._prep_geom_frame(kpts, desc.astype(np.float32))
+            self.assertEqual(desc_c.shape[0], 50)
+            self.assertEqual(kpt_c.shape[0], 50)
+            self.assertEqual(desc_c.dtype, np.uint8)
+            self.assertEqual(kpt_c.dtype, np.float32)
+        finally:
+            if os.path.exists(db_path):
+                os.unlink(db_path)
 
 
 class TestBuildGeometricMatches(unittest.TestCase):

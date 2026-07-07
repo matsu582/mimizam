@@ -11,11 +11,16 @@ import logging
 import math
 from typing import List, Optional, Dict, Tuple
 
+import cv2
 import numpy as np
 
 from .database_base import Video, DatabaseConfig
 from .database_backends import DatabaseBackend, create_database_backend
-from .video_fingerprinter import geometric_match, split_raw_descriptor
+from .video_fingerprinter import (
+    geometric_match,
+    split_raw_descriptor,
+    to_hamming_uint8,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -56,6 +61,10 @@ class VideoFingerprintDatabase:
         self._geom_min_inliers = 15
         self._geom_ransac_thresh = 5.0
         self._geom_inlier_saturation = 100.0
+        # 幾何検証の速度対策。BFマッチはフレームあたり記述子数の二乗で重くなるため、
+        # 1フレームで突き合わせる記述子を _geom_max_desc 件（先頭N件）に制限する。
+        # 真の一致はインライアが100+と桁違いに多く、数百点でも十分に分離できる。
+        self._geom_max_desc = 400
         self.backend: DatabaseBackend = create_database_backend(config)
 
         if not self.backend.connect():
@@ -305,12 +314,19 @@ class VideoFingerprintDatabase:
             candidate_video_ids
         )
 
-        # 幾何検証を使うか（クエリ側の生記述子が揃っている場合のみ）
-        query_raw_by_fidx: Dict[int, Tuple[np.ndarray, np.ndarray]] = {}
+        # 幾何検証を使うか（クエリ側の生記述子が揃っている場合のみ）。
+        # クエリ側のキーポイント座標(float32)と記述子(uint8)は全候補で使い回すため
+        # ここで一度だけ整形・uint8化しておく（候補ごとの再変換を避ける）。
+        query_geom_by_fidx: Dict[int, Tuple[np.ndarray, np.ndarray]] = {}
         if query_raw:
             for fidx, _ts, arr in query_raw:
-                query_raw_by_fidx[fidx] = split_raw_descriptor(arr)
-        use_geometric = bool(query_raw_by_fidx)
+                kpt, desc = split_raw_descriptor(arr)
+                query_geom_by_fidx[fidx] = self._prep_geom_frame(kpt, desc)
+        use_geometric = bool(query_geom_by_fidx)
+        # 幾何検証のBFMatcherは1インスタンスを全ペアで共有する（生成コスト削減）。
+        geom_matcher = (
+            cv2.BFMatcher(cv2.NORM_HAMMING) if use_geometric else None
+        )
 
         for vid_id in candidate_video_ids:
             raw_frames = frames_by_video.get(vid_id, [])
@@ -340,18 +356,20 @@ class VideoFingerprintDatabase:
             best_per_query = sims[np.arange(sims.shape[0]), best_idx]
 
             # 幾何検証にはDB側のキーポイント座標付き生記述子が必要。
-            db_raw_by_fidx: Dict[int, Tuple[np.ndarray, np.ndarray]] = {}
+            # DB側も座標(float32)と記述子(uint8)へ一度だけ整形しておく。
+            db_geom_by_fidx: Dict[int, Tuple[np.ndarray, np.ndarray]] = {}
             if use_geometric:
                 for fidx, _ts, arr in self.get_frame_descriptors(vid_id):
-                    db_raw_by_fidx[fidx] = split_raw_descriptor(arr)
+                    kpt, desc = split_raw_descriptor(arr)
+                    db_geom_by_fidx[fidx] = self._prep_geom_frame(kpt, desc)
                 # 再登録で生記述子は必ず保存される前提。無い映像は照合対象外。
-                if not db_raw_by_fidx:
+                if not db_geom_by_fidx:
                     continue
 
             if use_geometric:
                 frame_matches, geom_scores = self._build_geometric_matches(
                     query_frame_fps, db_frame_vecs, db_ts_arr, sims,
-                    query_raw_by_fidx, db_raw_by_fidx,
+                    query_geom_by_fidx, db_geom_by_fidx, geom_matcher,
                 )
                 # 幾何検証済み候補の代表スコア（インライア正規化）を採否に使う
                 max_sim = max(geom_scores) if geom_scores else 0.0
@@ -432,14 +450,38 @@ class VideoFingerprintDatabase:
         results.sort(key=lambda r: r["frame_similarity"], reverse=True)
         return results
 
+    def _prep_geom_frame(
+        self, kpt: np.ndarray, desc: np.ndarray,
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """幾何検証用にキーポイント座標(float32)と記述子(uint8)へ整形する
+
+        BFマッチは記述子数の二乗で重くなるため、1フレームあたり _geom_max_desc 件
+        （先頭N件）に制限する。座標と記述子は同じ行で対応するため揃えて切り詰める。
+
+        Args:
+            kpt: キーポイント座標(N×2)
+            desc: AKAZE記述子(N×D)
+
+        Returns:
+            (座標float32(M×2), 記述子uint8(M×D)) M=min(N, _geom_max_desc)
+        """
+        cap = self._geom_max_desc
+        if cap and len(desc) > cap:
+            kpt = kpt[:cap]
+            desc = desc[:cap]
+        kpt_f = np.ascontiguousarray(kpt, dtype=np.float32)
+        desc_u8 = to_hamming_uint8(desc)
+        return kpt_f, desc_u8
+
     def _build_geometric_matches(
         self,
         query_frame_fps: List[Tuple[int, float, np.ndarray]],
         db_frame_vecs: List[Tuple[int, float, np.ndarray]],
         db_ts_arr: np.ndarray,
         sims: np.ndarray,
-        query_raw_by_fidx: Dict[int, Tuple[np.ndarray, np.ndarray]],
-        db_raw_by_fidx: Dict[int, Tuple[np.ndarray, np.ndarray]],
+        query_geom_by_fidx: Dict[int, Tuple[np.ndarray, np.ndarray]],
+        db_geom_by_fidx: Dict[int, Tuple[np.ndarray, np.ndarray]],
+        matcher: Optional["cv2.BFMatcher"] = None,
     ) -> Tuple[List[Dict], List[float]]:
         """ANN上位候補にRANSAC幾何検証を掛けフレーム一致候補を構築する
 
@@ -453,8 +495,9 @@ class VideoFingerprintDatabase:
             db_frame_vecs: DB側フレーム指紋 [(fidx, ts, vec), ...]
             db_ts_arr: DB側タイムスタンプ配列
             sims: クエリ×DBのコサイン類似度行列
-            query_raw_by_fidx: クエリfidx→(キーポイント座標, 記述子)
-            db_raw_by_fidx: DBフレームfidx→(キーポイント座標, 記述子)
+            query_geom_by_fidx: クエリfidx→(座標float32, 記述子uint8)(整形済み)
+            db_geom_by_fidx: DBフレームfidx→(座標float32, 記述子uint8)(整形済み)
+            matcher: 全ペアで共有するBFMatcher（Noneなら都度生成）
 
         Returns:
             (frame_matches, geom_scores)
@@ -467,7 +510,7 @@ class VideoFingerprintDatabase:
         frame_matches: List[Dict] = []
         geom_scores: List[float] = []
         for i, (q_fidx, q_ts, _) in enumerate(query_frame_fps):
-            qkd = query_raw_by_fidx.get(q_fidx)
+            qkd = query_geom_by_fidx.get(q_fidx)
             if qkd is None:
                 frame_matches.append({
                     "query_ts": q_ts, "db_ts": 0.0,
@@ -482,13 +525,14 @@ class VideoFingerprintDatabase:
             best_score = 0.0
             best_db_ts = 0.0
             for j in order:
-                dbkd = db_raw_by_fidx.get(db_fidx_arr[j])
+                dbkd = db_geom_by_fidx.get(db_fidx_arr[j])
                 if dbkd is None:
                     continue
                 kd, dd = dbkd
                 _good, inl = geometric_match(
                     dq, kq, dd, kd,
                     ransac_thresh=self._geom_ransac_thresh,
+                    matcher=matcher,
                 )
                 if inl >= min_inl:
                     score = min(1.0, inl / sat)

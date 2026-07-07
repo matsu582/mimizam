@@ -128,6 +128,23 @@ def split_raw_descriptor(
     return arr[:, :KEYPOINT_COLS], arr[:, KEYPOINT_COLS:]
 
 
+def to_hamming_uint8(desc: np.ndarray) -> np.ndarray:
+    """AKAZE記述子をBF(Hamming)照合用のC連続uint8配列へ変換する
+
+    既にuint8かつC連続なら再変換せずそのまま返す（幾何検証の反復呼び出しで
+    同一DB記述子を毎回丸め直す無駄を省くための高速パス）。
+
+    Args:
+        desc: AKAZE記述子(N×D)
+
+    Returns:
+        C連続uint8のN×D配列
+    """
+    if desc.dtype == np.uint8 and desc.flags["C_CONTIGUOUS"]:
+        return desc
+    return np.ascontiguousarray(np.rint(desc), dtype=np.uint8)
+
+
 def geometric_match(
     desc_q: np.ndarray,
     kpt_q: np.ndarray,
@@ -135,6 +152,7 @@ def geometric_match(
     kpt_d: np.ndarray,
     ratio: float = 0.75,
     ransac_thresh: float = 5.0,
+    matcher: Optional["cv2.BFMatcher"] = None,
 ) -> Tuple[int, int]:
     """2フレームのAKAZE記述子を突き合わせ、良マッチ数と幾何インライア数を返す
 
@@ -143,10 +161,13 @@ def geometric_match(
     独自実装。
 
     Args:
-        desc_q, desc_d: AKAZE記述子(N×D)。float32でもuint8に丸めて突き合わせる
+        desc_q, desc_d: AKAZE記述子(N×D)。float32でもuint8に丸めて突き合わせる。
+            事前にuint8化(C連続)しておくと丸め処理を省いて高速化できる。
         kpt_q, kpt_d: キーポイント座標(N×2)
         ratio: Loweの比率検定のしきい値
         ransac_thresh: RANSACのインライア許容画素
+        matcher: 再利用するBFMatcher（Noneなら都度生成）。多数フレームを
+            突き合わせる際に生成コストを省くため共有インスタンスを渡せる。
 
     Returns:
         (良マッチ数, 幾何インライア数)
@@ -154,10 +175,10 @@ def geometric_match(
     if len(desc_q) < 2 or len(desc_d) < 2:
         return 0, 0
 
-    q8 = np.ascontiguousarray(np.rint(desc_q), dtype=np.uint8)
-    d8 = np.ascontiguousarray(np.rint(desc_d), dtype=np.uint8)
+    q8 = to_hamming_uint8(desc_q)
+    d8 = to_hamming_uint8(desc_d)
 
-    bf = cv2.BFMatcher(cv2.NORM_HAMMING)
+    bf = matcher if matcher is not None else cv2.BFMatcher(cv2.NORM_HAMMING)
     knn = bf.knnMatch(q8, d8, k=2)
     good = [
         pair[0] for pair in knn
