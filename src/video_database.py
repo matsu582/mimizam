@@ -204,14 +204,21 @@ class VideoFingerprintDatabase:
 
     def get_frame_descriptors(
         self, video_id: str,
+        frame_indices: Optional[List[int]] = None,
     ) -> List[Tuple[int, float, np.ndarray]]:
         """
         保存済みフレーム記述子を取得
 
+        Args:
+            video_id: 映像ID
+            frame_indices: 取得するフレームインデックス（None で全件）。幾何検証は
+                ANN上位候補のDBフレームのみ突き合わせるため、必要フレームに限定すると
+                生記述子の読み込みI/Oを大幅に削減できる。
+
         Returns:
             [(フレームインデックス, タイムスタンプ, 記述子配列), ...]
         """
-        raw = self.backend.get_frame_descriptors(video_id)
+        raw = self.backend.get_frame_descriptors(video_id, frame_indices)
         result = []
         for fidx, ts, desc_blob, desc_count in raw:
             desc = np.frombuffer(desc_blob, dtype=np.float32).copy()
@@ -405,15 +412,17 @@ class VideoFingerprintDatabase:
                 # のuint8変換を省く）。
                 db_fidx_arr = [f for f, _, _ in db_frame_vecs]
                 order = np.argsort(-sims, axis=1)[:, :self._geom_top_k]
-                needed_fidx = {
-                    db_fidx_arr[int(j)] for j in np.unique(order)
-                }
+                needed_fidx = sorted(
+                    {db_fidx_arr[int(j)] for j in np.unique(order)}
+                )
                 db_geom_by_fidx: Dict[
                     int, Tuple[np.ndarray, np.ndarray]
                 ] = {}
-                for fidx, _ts, arr in self.get_frame_descriptors(vid_id):
-                    if fidx not in needed_fidx:
-                        continue
+                # 必要なフレームの生記述子だけをDBから読み込む（無関係フレームの
+                # 数百KB×多数の読み込みを避ける）。
+                for fidx, _ts, arr in self.get_frame_descriptors(
+                    vid_id, needed_fidx,
+                ):
                     kpt, desc = split_raw_descriptor(arr)
                     db_geom_by_fidx[fidx] = self._prep_geom_frame(kpt, desc)
                 # 再登録で生記述子は必ず保存される前提。無い映像は照合対象外。

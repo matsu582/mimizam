@@ -698,18 +698,39 @@ class SQLiteBackend(DatabaseBackend):
 
     def get_frame_descriptors(
         self, video_id: str,
+        frame_indices: Optional[List[int]] = None,
     ) -> List[Tuple[int, float, bytes, int]]:
-        """SQLiteから指定映像のフレーム記述子を取得"""
+        """SQLiteから指定映像のフレーム記述子を取得
+
+        frame_indices を渡すと、そのフレームインデックスの記述子だけを取得する。
+        幾何検証はANN上位候補のDBフレームしか突き合わせないため、必要なフレームに
+        限定して読み込むことで生記述子（1フレーム数百KB）の無駄なI/Oを避ける。
+        None（既定）なら全フレームを取得する。
+        """
         try:
             self._create_video_tables()
             cursor = self.connection.cursor()
-            cursor.execute(
-                """SELECT frame_index, timestamp,
-                          descriptors, descriptor_count
-                   FROM frame_descriptors WHERE video_id = ?
-                   ORDER BY frame_index""",
-                (video_id,),
-            )
+            if frame_indices is not None:
+                if not frame_indices:
+                    return []
+                placeholders = ",".join("?" for _ in frame_indices)
+                cursor.execute(
+                    f"""SELECT frame_index, timestamp,
+                              descriptors, descriptor_count
+                       FROM frame_descriptors
+                       WHERE video_id = ?
+                         AND frame_index IN ({placeholders})
+                       ORDER BY frame_index""",
+                    (video_id, *[int(f) for f in frame_indices]),
+                )
+            else:
+                cursor.execute(
+                    """SELECT frame_index, timestamp,
+                              descriptors, descriptor_count
+                       FROM frame_descriptors WHERE video_id = ?
+                       ORDER BY frame_index""",
+                    (video_id,),
+                )
             return [
                 (int(fidx), float(ts), bytes(desc), int(cnt))
                 for fidx, ts, desc, cnt in cursor.fetchall()

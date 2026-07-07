@@ -281,8 +281,13 @@ class DatabaseBackend(ABC):
 
     def get_frame_descriptors(
         self, video_id: str,
+        frame_indices: Optional[List[int]] = None,
     ) -> List[Tuple[int, float, bytes, int]]:
-        """指定映像のフレーム記述子を取得"""
+        """指定映像のフレーム記述子を取得
+
+        frame_indices を渡すと、そのフレームインデックスの記述子だけを返す
+        （幾何検証で必要なフレームに限定した読み込み高速化用）。None なら全件。
+        """
         raise NotImplementedError("This backend does not support video fingerprinting")
 
     def get_all_frame_descriptors(

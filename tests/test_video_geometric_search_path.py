@@ -26,12 +26,18 @@ class _FakeBackend:
         # frame_descs: {vid: [(fidx, ts, desc_blob, desc_count), ...]}
         self._frame_fps = frame_fps
         self._frame_descs = frame_descs
+        self.desc_calls = []
 
     def get_frame_fingerprints_batch(self, video_ids):
         return {v: self._frame_fps.get(v, []) for v in video_ids}
 
-    def get_frame_descriptors(self, video_id):
-        return self._frame_descs.get(video_id, [])
+    def get_frame_descriptors(self, video_id, frame_indices=None):
+        self.desc_calls.append((video_id, frame_indices))
+        rows = self._frame_descs.get(video_id, [])
+        if frame_indices is not None:
+            wanted = set(frame_indices)
+            rows = [r for r in rows if r[0] in wanted]
+        return rows
 
 
 def _vlad(seed):
@@ -133,6 +139,40 @@ class TestGeometricSearchPath(unittest.TestCase):
             query_frame_fps, vids, threshold=0.0, query_raw=query_raw,
         )
         self.assertIsInstance(results, list)
+
+    def test_only_needed_frames_are_read(self):
+        """DB生記述子は必要フレームに限定して取得する（無駄なI/O回避）"""
+        vid = "vid1"
+        n_query = 4
+        query_frame_fps = [(i, float(i), _vlad(i)) for i in range(n_query)]
+        query_raw = [
+            (i, float(i), _packed_desc(10 + i, 100 + i))
+            for i in range(n_query)
+        ]
+        # DBフレームを多めに用意し、top_k で一部だけが必要になるようにする
+        db_frames = []
+        db_descs = []
+        for j in range(20):
+            db_frames.append((j, float(300 + j), _vlad(500 + j).tobytes()))
+            arr = _packed_desc(12, 700 + j)
+            db_descs.append(
+                (j, float(300 + j), arr.astype(np.float32).tobytes(),
+                 arr.shape[0])
+            )
+
+        db = self._make_db()
+        db._geom_top_k = 3
+        backend = _FakeBackend({vid: db_frames}, {vid: db_descs})
+        db.backend = backend
+        db.search_video_with_frame_matching(
+            query_frame_fps, [vid], threshold=0.0, query_raw=query_raw,
+        )
+        # frame_indices=None（全件読み）ではなく、必要フレームに限定されていること
+        self.assertTrue(backend.desc_calls)
+        for _vid, fidxs in backend.desc_calls:
+            self.assertIsNotNone(fidxs)
+            # 4クエリ×top_k3 の和集合 ≤ 12 < 20（全件）
+            self.assertLessEqual(len(fidxs), n_query * db._geom_top_k)
 
     def test_subsample_limits_geometric_query_frames(self):
         """_geom_max_query_frames で幾何検証するクエリ数を頭打ちにする"""
