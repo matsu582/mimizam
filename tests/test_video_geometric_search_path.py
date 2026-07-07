@@ -1,0 +1,112 @@
+"""
+search_video_with_frame_matching の幾何検証経路（間引き・行列外出し）の回帰テスト
+
+クエリの間引き高速化を入れた際、類似度行列を「VLADベクトル(512次元)」ではなく
+「生記述子(フレーム毎に行数が異なるN×D)」から作ってしまい、np.stack が
+"all input arrays must have the same shape" で落ちる不具合が入った。フレーム毎に
+行数が異なる生記述子を与え、検索が例外なく最後まで通ることを固定する。
+"""
+
+import unittest
+
+import numpy as np
+
+from mimizam.src.video_database import VideoFingerprintDatabase as VDB
+from mimizam.src.video_fingerprinter import KEYPOINT_COLS
+
+DESC_DIM = 61  # AKAZE(MLDB)記述子の次元
+VLAD_DIM = 512
+
+
+class _FakeBackend:
+    """search_video_with_frame_matching が呼ぶ最小限のバックエンド"""
+
+    def __init__(self, frame_fps, frame_descs):
+        # frame_fps: {vid: [(fidx, ts, fp_blob), ...]}
+        # frame_descs: {vid: [(fidx, ts, desc_blob, desc_count), ...]}
+        self._frame_fps = frame_fps
+        self._frame_descs = frame_descs
+
+    def get_frame_fingerprints_batch(self, video_ids):
+        return {v: self._frame_fps.get(v, []) for v in video_ids}
+
+    def get_frame_descriptors(self, video_id):
+        return self._frame_descs.get(video_id, [])
+
+
+def _vlad(seed):
+    rng = np.random.default_rng(seed)
+    v = rng.standard_normal(VLAD_DIM).astype(np.float32)
+    return v / (np.linalg.norm(v) + 1e-8)
+
+
+def _packed_desc(n_rows, seed):
+    """結合記述子(N×(2+D)) float32 を作る（先頭2列が座標）"""
+    rng = np.random.default_rng(seed)
+    kpts = rng.uniform(0, 100, size=(n_rows, KEYPOINT_COLS)).astype(np.float32)
+    desc = rng.integers(0, 256, size=(n_rows, DESC_DIM)).astype(np.float32)
+    return np.hstack([kpts, desc])
+
+
+class TestGeometricSearchPath(unittest.TestCase):
+
+    def _make_db(self):
+        db = object.__new__(VDB)
+        db._geom_top_k = 6
+        db._geom_min_inliers = 15
+        db._geom_ransac_thresh = 5.0
+        db._geom_inlier_saturation = 100.0
+        db._geom_max_hits = 3
+        db._geom_max_query_frames = 48
+        db._geom_max_desc = 400
+        db._geom_region_db_gap = 45.0
+        import logging
+        db.logger = logging.getLogger("test.vdb")
+        return db
+
+    def test_search_runs_with_ragged_raw_descriptors(self):
+        """フレーム毎に生記述子の行数が異なっても例外なく検索できる"""
+        vid = "vid1"
+        n_query = 8
+        query_frame_fps = [
+            (i, float(i), _vlad(i)) for i in range(n_query)
+        ]
+        # 生記述子の行数はフレーム毎にバラバラ（旧実装だと np.stack が落ちる）
+        row_counts = [10, 13, 7, 21, 9, 15, 6, 18]
+        query_raw = [
+            (i, float(i), _packed_desc(row_counts[i], 100 + i))
+            for i in range(n_query)
+        ]
+
+        # DB側フレーム指紋(VLADブロブ)と生記述子
+        db_frames = []
+        db_descs = []
+        for j in range(4):
+            db_frames.append((j, float(300 + j), _vlad(500 + j).tobytes()))
+            arr = _packed_desc(12 + j, 700 + j)
+            db_descs.append(
+                (j, float(300 + j), arr.astype(np.float32).tobytes(),
+                 arr.shape[0])
+            )
+
+        db = self._make_db()
+        db.backend = _FakeBackend({vid: db_frames}, {vid: db_descs})
+
+        # 例外が出ないこと（＝行列形状不一致の回帰）。結果はリストで返る。
+        results = db.search_video_with_frame_matching(
+            query_frame_fps, [vid], threshold=0.0, query_raw=query_raw,
+        )
+        self.assertIsInstance(results, list)
+
+    def test_subsample_limits_geometric_query_frames(self):
+        """_geom_max_query_frames で幾何検証するクエリ数を頭打ちにする"""
+        db = self._make_db()
+        db._geom_max_query_frames = 4
+        sel = db._subsample_indices(20, db._geom_max_query_frames)
+        self.assertLessEqual(len(sel), 4)
+        self.assertEqual(sel[0], 0)
+        self.assertEqual(sel[-1], 19)
+
+
+if __name__ == "__main__":
+    unittest.main()

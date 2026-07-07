@@ -337,16 +337,22 @@ class VideoFingerprintDatabase:
         query_geom_by_fidx: Dict[int, Tuple[np.ndarray, np.ndarray]] = {}
         # 幾何検証するクエリフレームは時間軸で均等に間引く。全候補で同じ集合を
         # 使い回すため、間引きとクエリ側の座標・記述子整形はここで一度だけ行う。
+        # geom_query_fps はVLADベクトル付きの (fidx, ts, vec) を保持し（類似度行列
+        # 用）、生記述子は fidx で対応付けて整形する。
         geom_query_fps: List[Tuple[int, float, np.ndarray]] = []
         if query_raw:
+            raw_by_fidx = {fidx: arr for fidx, _ts, arr in query_raw}
             geom_sel = self._subsample_indices(
-                len(query_raw), self._geom_max_query_frames
+                len(query_frame_fps), self._geom_max_query_frames
             )
             for i in geom_sel:
-                fidx, ts, arr = query_raw[i]
+                fidx, ts, vec = query_frame_fps[i]
+                arr = raw_by_fidx.get(fidx)
+                if arr is None:
+                    continue
                 kpt, desc = split_raw_descriptor(arr)
                 query_geom_by_fidx[fidx] = self._prep_geom_frame(kpt, desc)
-                geom_query_fps.append((fidx, ts, arr))
+                geom_query_fps.append((fidx, ts, vec))
         use_geometric = bool(query_geom_by_fidx)
         # 幾何検証のBFMatcherは1インスタンスを全ペアで共有する（生成コスト削減）。
         geom_matcher = (
