@@ -192,6 +192,11 @@ class TestMimizamSQLite(unittest.TestCase):
         self.assertEqual(best_match['song'].id, song_id)
         self.assertGreater(best_match['confidence'], 0.5, "信頼度が低すぎます")
         self.assertGreater(best_match['match_count'], 0)
+
+        # クエリ全長（=クエリ指紋の最大 time_offset）が結果に載ること。
+        # 表示側（audio_from_video_search）が被覆区間バーの基準に使う。
+        self.assertIn('query_duration', best_match)
+        self.assertGreater(best_match['query_duration'], 0.0)
     
     def test_identify_audio(self):
         """音声識別テスト"""
