@@ -77,6 +77,12 @@ class VideoFingerprintDatabase:
         # 精度を保てる範囲に留める。候補間の並列化（_verify_geometric_candidate を
         # スレッドプールで実行）で速度を稼ぐ。0以下で無効（全フレーム検証）。
         self._geom_max_query_frames = 128
+        # 間引きの選別方式。時間軸で一様に間引くと、短い一致断片（数フレームの
+        # 塊）の途中フレームが等間隔サンプルから漏れ、断片を密に拾えない。そこで
+        # 隣接フレームの時間差からシーン境界を推定し、各シーンの代表フレームを必ず
+        # 残したうえで、残予算をシーン内で均等配分する。境界判定はギャップが
+        # 「中央値ギャップ × _geom_scene_gap_factor」を超えた所を新シーンとみなす。
+        self._geom_scene_gap_factor = 1.8
         # 幾何検証の速度対策。BFマッチはフレームあたり記述子数の二乗で重くなるため、
         # 1フレームで突き合わせる記述子を _geom_max_desc 件（先頭N件）に制限する。
         # 真の一致はインライアが100+と桁違いに多く、数百点でも十分に分離できる。
@@ -125,6 +131,11 @@ class VideoFingerprintDatabase:
             "MIMIZAM_GEOM_MAX_DESC", self._geom_max_desc
         )
         self._geom_inlier_saturation = 0.25 * self._geom_max_desc
+        # 一様間引きへ戻す調査用スイッチ（MIMIZAM_GEOM_UNIFORM_SUBSAMPLE=1）。
+        # 既定はシーン境界優先の選別。
+        self._geom_uniform_subsample = os.environ.get(
+            "MIMIZAM_GEOM_UNIFORM_SUBSAMPLE", ""
+        ) not in ("", "0", "false", "False")
         self.backend: DatabaseBackend = create_database_backend(config)
 
         if not self.backend.connect():
@@ -392,8 +403,9 @@ class VideoFingerprintDatabase:
         geom_query_fps: List[Tuple[int, float, np.ndarray]] = []
         if query_raw:
             raw_by_fidx = {fidx: arr for fidx, _ts, arr in query_raw}
-            geom_sel = self._subsample_indices(
-                len(query_frame_fps), self._geom_max_query_frames
+            q_ts_all = [ts for _fidx, ts, _vec in query_frame_fps]
+            geom_sel = self._select_geom_indices(
+                q_ts_all, self._geom_max_query_frames
             )
             for i in geom_sel:
                 fidx, ts, vec = query_frame_fps[i]
@@ -702,6 +714,116 @@ class VideoFingerprintDatabase:
             return [0]
         idx = np.linspace(0, n - 1, cap)
         return sorted(set(int(round(v)) for v in idx))
+
+    @staticmethod
+    def _median(values: List[float]) -> float:
+        """中央値を返す（空なら0.0）"""
+        if not values:
+            return 0.0
+        s = sorted(values)
+        m = len(s)
+        mid = m // 2
+        if m % 2:
+            return float(s[mid])
+        return 0.5 * (float(s[mid - 1]) + float(s[mid]))
+
+    def _scene_groups(self, timestamps: List[float]) -> List[List[int]]:
+        """タイムスタンプ列をシーン（隣接フレーム群）に分割する
+
+        隣接フレームの時間差が「中央値ギャップ × _geom_scene_gap_factor」を超えた
+        位置を新しいシーンの先頭とみなし、連続する添字をまとめて返す。ギャップの
+        中央値を基準にするため、フレーム間隔が可変でもカット切替を境界として拾える。
+
+        Args:
+            timestamps: フレームのタイムスタンプ（昇順想定）
+
+        Returns:
+            シーンごとの昇順インデックス列のリスト
+        """
+        n = len(timestamps)
+        if n == 0:
+            return []
+        gaps = [
+            timestamps[i] - timestamps[i - 1]
+            for i in range(1, n)
+            if timestamps[i] - timestamps[i - 1] >= 0
+        ]
+        med = self._median(gaps)
+        thr = med * self._geom_scene_gap_factor
+        scenes: List[List[int]] = []
+        cur: List[int] = [0]
+        for i in range(1, n):
+            gap = timestamps[i] - timestamps[i - 1]
+            if med > 0 and gap > thr:
+                scenes.append(cur)
+                cur = [i]
+            else:
+                cur.append(i)
+        scenes.append(cur)
+        return scenes
+
+    def _select_geom_indices(
+        self, timestamps: List[float], cap: int
+    ) -> List[int]:
+        """幾何検証するクエリフレームを選ぶ（シーン境界優先の間引き）
+
+        時間軸で一様に間引くと、短い一致断片の途中フレームが等間隔サンプルから
+        漏れて断片を密に拾えない。そこで各シーンの代表（先頭）フレームを必ず残し、
+        残りの予算をシーン内フレーム数に比例して均等配分する。これにより「別カット
+        （シーン境界）を必ず1枚以上検証する」ことを保証しつつ、短いシーンの隣接
+        フレームを丸ごと残しやすくなる。cap<=0 または n<=cap は全件（間引き無効）。
+        調査用に _geom_uniform_subsample=True で従来の一様間引きへ戻せる。
+
+        Args:
+            timestamps: クエリフレームのタイムスタンプ（昇順想定）
+            cap: 選ぶ最大件数
+
+        Returns:
+            昇順のインデックス列
+        """
+        n = len(timestamps)
+        if cap <= 0 or n <= cap:
+            return list(range(n))
+        if cap == 1:
+            return [0]
+        if self._geom_uniform_subsample:
+            return self._subsample_indices(n, cap)
+
+        scenes = self._scene_groups(timestamps)
+        # シーン数が予算を超える場合は、代表フレームを一様に間引いて cap 件に収める。
+        if len(scenes) >= cap:
+            boundaries = [s[0] for s in scenes]
+            keep = self._subsample_indices(len(boundaries), cap)
+            return sorted(boundaries[k] for k in keep)
+
+        # 各シーンの代表（先頭）を必ず確保し、残予算をシーン内で均等配分する。
+        selected = set(s[0] for s in scenes)
+        remaining = cap - len(selected)
+        leftover = [s for s in scenes if len(s) > 1]
+        total_left = sum(len(s) - 1 for s in leftover)
+        added = 0
+        if total_left > 0 and remaining > 0:
+            for s in leftover:
+                if added >= remaining:
+                    break
+                c = len(s) - 1
+                quota = int(round(remaining * c / total_left))
+                quota = min(quota, c, remaining - added)
+                if quota <= 0:
+                    continue
+                rest = s[1:]
+                for k in self._subsample_indices(len(rest), quota):
+                    if rest[k] not in selected:
+                        selected.add(rest[k])
+                        added += 1
+        # 端数で予算が余ったら未選択フレームで昇順に埋める。
+        if len(selected) < cap:
+            for i in range(n):
+                if i not in selected:
+                    selected.add(i)
+                    if len(selected) >= cap:
+                        break
+        return sorted(selected)
 
     def _prep_geom_frame(
         self, kpt: np.ndarray, desc: np.ndarray,

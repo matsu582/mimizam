@@ -69,6 +69,8 @@ class TestGeometricSearchPath(unittest.TestCase):
         db._geom_max_workers = 1
         db._geom_max_candidates = 0
         db._geom_diag = False
+        db._geom_scene_gap_factor = 1.8
+        db._geom_uniform_subsample = False
         import logging
         db.logger = logging.getLogger("test.vdb")
         return db
@@ -221,6 +223,94 @@ class TestGeometricSearchPath(unittest.TestCase):
         self.assertLessEqual(len(sel), 4)
         self.assertEqual(sel[0], 0)
         self.assertEqual(sel[-1], 19)
+
+
+class TestSceneAwareSelection(unittest.TestCase):
+    """シーン境界優先の間引き（_select_geom_indices / _scene_groups）の回帰テスト"""
+
+    def _make_db(self):
+        db = object.__new__(VDB)
+        db._geom_scene_gap_factor = 1.8
+        db._geom_uniform_subsample = False
+        return db
+
+    def test_scene_groups_splits_on_large_gap(self):
+        """中央値ギャップを大きく超える所でシーンが分割される"""
+        db = self._make_db()
+        # 0,1,2,3 は等間隔(1s)、10で大ギャップ、11,12 が別シーン
+        ts = [0.0, 1.0, 2.0, 3.0, 10.0, 11.0, 12.0]
+        scenes = db._scene_groups(ts)
+        self.assertEqual(scenes, [[0, 1, 2, 3], [4, 5, 6]])
+
+    def test_scene_groups_single_scene_when_uniform(self):
+        """等間隔なら分割されず1シーン"""
+        db = self._make_db()
+        ts = [float(i) for i in range(6)]
+        self.assertEqual(db._scene_groups(ts), [[0, 1, 2, 3, 4, 5]])
+
+    def test_select_keeps_every_scene_boundary(self):
+        """各シーンの代表（先頭）フレームは必ず選ばれる（別カットの取りこぼし防止）"""
+        db = self._make_db()
+        # 5シーン×各3フレーム（シーン間は大ギャップ）
+        ts = []
+        t = 0.0
+        for s in range(5):
+            for _ in range(3):
+                ts.append(t)
+                t += 1.0
+            t += 20.0  # シーン境界
+        boundaries = [i for i in range(len(ts)) if i % 3 == 0]
+        sel = db._select_geom_indices(ts, cap=6)
+        for b in boundaries:
+            self.assertIn(b, sel)
+
+    def test_select_recovers_short_fragment_vs_uniform(self):
+        """一様間引きでは落ちる短い断片フレームを、シーン優先だと拾える
+
+        末尾に3フレームの短いシーン（別カット）を置き、一様間引きでは境界が
+        取りこぼされる状況で、シーン優先だと代表が残ることを固定する。
+        """
+        # 前半は密な1シーン(30フレーム, 1s間隔)、末尾に大ギャップ後の短いシーン3枚
+        ts = [float(i) for i in range(30)]
+        base = ts[-1] + 20.0
+        ts += [base, base + 1.0, base + 2.0]  # index 30,31,32（短い別シーン）
+        db = self._make_db()
+        cap = 16
+        sel = db._select_geom_indices(ts, cap)
+        # 短いシーンの先頭(index30)がシーン優先では必ず残る
+        self.assertIn(30, sel)
+        self.assertLessEqual(len(sel), cap)
+        # 一様間引きだと同じ末尾シーンの中間フレームは落ちやすい（対照）
+        uni = db._subsample_indices(len(ts), cap)
+        # シーン優先は末尾シーンから一様間引きより多く残す
+        tail_scene = {30, 31, 32}
+        self.assertGreaterEqual(
+            len(tail_scene & set(sel)), len(tail_scene & set(uni))
+        )
+
+    def test_select_respects_cap(self):
+        """cap を超えて選ばない"""
+        db = self._make_db()
+        ts = [float(i) for i in range(200)]
+        for cap in (1, 5, 50, 128):
+            sel = db._select_geom_indices(ts, cap)
+            self.assertLessEqual(len(sel), cap)
+            self.assertEqual(sel, sorted(sel))
+
+    def test_select_returns_all_when_under_cap(self):
+        """n<=cap は全件（間引き無効）"""
+        db = self._make_db()
+        ts = [0.0, 1.0, 2.0]
+        self.assertEqual(db._select_geom_indices(ts, 10), [0, 1, 2])
+
+    def test_uniform_switch_falls_back(self):
+        """_geom_uniform_subsample=True で従来の一様間引きへ戻る"""
+        db = self._make_db()
+        db._geom_uniform_subsample = True
+        ts = [float(i) for i in range(20)]
+        self.assertEqual(
+            db._select_geom_indices(ts, 5), db._subsample_indices(20, 5)
+        )
 
 
 if __name__ == "__main__":
