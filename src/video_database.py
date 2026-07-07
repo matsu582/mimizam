@@ -65,6 +65,12 @@ class VideoFingerprintDatabase:
         # 1フレームで突き合わせる記述子を _geom_max_desc 件（先頭N件）に制限する。
         # 真の一致はインライアが100+と桁違いに多く、数百点でも十分に分離できる。
         self._geom_max_desc = 400
+        # 幾何検証済みマッチの一致区間はDB時刻クラスタで導く。各クエリフレームが
+        # 幾何一致したDB候補のDB時刻を集め、DB時刻が近いもの同士（間隔
+        # _geom_region_db_gap 秒以内）を1つの区間に束ねる。OPは似たカットが多く
+        # クエリ各フレームが同一OP内の別カットに一致するため時間オフセットは一定に
+        # ならないが、DB時刻はOP区間（例 340〜427s）に集中するので塊として拾える。
+        self._geom_region_db_gap = 45.0
         self.backend: DatabaseBackend = create_database_backend(config)
 
         if not self.backend.connect():
@@ -411,10 +417,19 @@ class VideoFingerprintDatabase:
             if max_sim >= threshold:
                 q_timestamps = [q_ts for _, q_ts, _ in query_frame_fps]
                 query_duration = max(q_timestamps) if q_timestamps else 0.0
-                match_details = self._compute_match_regions(
-                    frame_matches, threshold=region_threshold,
-                    query_duration=query_duration,
-                )
+                if use_geometric:
+                    # 各クエリフレームが幾何一致したDB候補のDB時刻を集約し、
+                    # DB時刻が集中する塊を一致区間とする（時間オフセット非依存）。
+                    match_details = self._compute_geometric_regions(
+                        frame_matches,
+                        db_gap_merge=self._geom_region_db_gap,
+                        query_duration=query_duration,
+                    )
+                else:
+                    match_details = self._compute_match_regions(
+                        frame_matches, threshold=region_threshold,
+                        query_duration=query_duration,
+                    )
                 db_timestamps = [d_ts for _, d_ts, _ in db_frame_vecs]
                 match_details["db_duration"] = (
                     max(db_timestamps) if db_timestamps else 0.0
@@ -422,9 +437,9 @@ class VideoFingerprintDatabase:
                 match_details["query_duration"] = query_duration
 
                 if use_geometric:
-                    # 幾何検証の内訳を可視化して「どこでフレームが失われるか」を
-                    # 切り分ける。verified=RANSAC検証を通ったクエリフレーム数、
-                    # aligned=支配直線に乗ったインライア数、coverage=連続被覆率。
+                    # 幾何検証の内訳を可視化する。verified=RANSAC検証を通った
+                    # クエリフレーム数、aligned=DB時刻クラスタに束ねられた一致
+                    # フレーム数（相異なるquery）、coverage=クエリ時間の被覆率。
                     self.logger.info(
                         "[geom] %s: verified=%d aligned=%d coverage=%.2f "
                         "max_inl=%d median_inl=%d",
@@ -835,6 +850,127 @@ class VideoFingerprintDatabase:
                 cur_s, cur_e = s, e
         total += cur_e - cur_s
         return total
+
+    @staticmethod
+    def _compute_geometric_regions(
+        frame_matches: List[Dict],
+        min_region_frames: int = 3,
+        db_gap_merge: float = 45.0,
+        query_duration: float = 0.0,
+    ) -> Dict:
+        """幾何検証済みマッチをDB時刻でクラスタして一致区間を導く
+
+        支配整列（単一の時間オフセット直線）とは別方式。各クエリフレームが幾何一致
+        （RANSACインライア数が閾値以上）したDB候補は既に「同一画」であることが
+        保証されている。OPは似たカットが多く、クエリ各フレームが同一OP内の別カットに
+        一致するため時間オフセット(db−query)はフレーム毎にバラつくが、一致先のDB時刻は
+        OP区間（例 340〜427s）に集中する。そこで検証済み候補のDB時刻を集め、近いもの
+        同士（間隔 db_gap_merge 秒以内）を1区間に束ねて一致区間とする。
+
+        Args:
+            frame_matches: [{"query_ts": q, "candidates": [(db_ts, score), ...]}]
+                candidates は幾何検証を通過した (DB時刻, 正規化スコア) の並び
+            min_region_frames: 区間として採用する最小クエリフレーム数（相異なるq）
+            db_gap_merge: 同一区間とみなすDB時刻の最大空き（秒）
+            query_duration: クエリ全体の長さ（被覆率算出に使用、0なら整列範囲で代替）
+
+        Returns:
+            match_details 辞書（_compute_match_regions と同じキー構成）
+        """
+        total = len(frame_matches)
+        empty = {
+            "matched_frames": 0,
+            "aligned_frames": 0,
+            "total_frames": total,
+            "match_ratio": 0.0,
+            "coverage": 0.0,
+            "time_scale": 1.0,
+            "time_offset": 0.0,
+            "median_similarity": 0.0,
+            "regions": [],
+        }
+
+        # 検証済みの (db時刻, クエリ時刻, スコア) を全て集める（多重度を潰さない）
+        pts: List[Tuple[float, float, float]] = []
+        for fm in frame_matches:
+            q = fm.get("query_ts", 0.0)
+            for d, s in fm.get("candidates", []):
+                pts.append((float(d), float(q), float(s)))
+        if not pts:
+            return empty
+
+        # DB時刻で並べ、間隔が db_gap_merge を超えたら別クラスタに分ける
+        pts.sort(key=lambda t: t[0])
+        clusters: List[List[Tuple[float, float, float]]] = []
+        cur = [pts[0]]
+        for p in pts[1:]:
+            if p[0] - cur[-1][0] <= db_gap_merge:
+                cur.append(p)
+            else:
+                clusters.append(cur)
+                cur = [p]
+        clusters.append(cur)
+
+        region_infos: List[Dict] = []
+        q_intervals: List[Tuple[float, float]] = []
+        matched_qs: set = set()
+        all_scores: List[float] = []
+        primary_size = -1
+        primary_offset = 0.0
+        for cl in clusters:
+            # 区間の代表は相異なるクエリフレーム数（同一qの複数候補は1つに数える）
+            q_best: Dict[float, float] = {}
+            for d, q, s in cl:
+                if q not in q_best or s > q_best[q]:
+                    q_best[q] = s
+            if len(q_best) < min_region_frames:
+                continue
+            db_times = [d for d, _q, _s in cl]
+            q_times = list(q_best.keys())
+            db_start, db_end = min(db_times), max(db_times)
+            q_start, q_end = min(q_times), max(q_times)
+            avg_sim = sum(q_best.values()) / len(q_best)
+            q_intervals.append((q_start, q_end))
+            matched_qs.update(q_times)
+            all_scores.extend(q_best.values())
+            if len(q_best) > primary_size:
+                primary_size = len(q_best)
+                # 代表オフセットは最大クラスタのDB時刻中央値−クエリ時刻中央値
+                primary_offset = float(
+                    np.median(db_times) - np.median(q_times)
+                )
+            region_infos.append({
+                "query_start": q_start,
+                "query_end": q_end,
+                "db_start": db_start,
+                "db_end": db_end,
+                "frame_count": len(q_best),
+                "avg_similarity": round(avg_sim, 3),
+            })
+
+        if not region_infos:
+            return empty
+        region_infos.sort(key=lambda r: r["query_start"])
+
+        covered = VideoFingerprintDatabase._union_length(q_intervals)
+        span = query_duration if query_duration > 0 else (
+            max(q for _d, q, _s in pts) - min(q for _d, q, _s in pts)
+        )
+        coverage = min(1.0, covered / span) if span > 0 else 0.0
+        matched = len(matched_qs)
+        median_sim = float(np.median(all_scores)) if all_scores else 0.0
+
+        return {
+            "matched_frames": matched,
+            "aligned_frames": matched,
+            "total_frames": total,
+            "match_ratio": matched / total if total else 0.0,
+            "coverage": coverage,
+            "time_scale": 1.0,
+            "time_offset": primary_offset,
+            "median_similarity": median_sim,
+            "regions": region_infos,
+        }
 
     # ===== 統計 =====
 
