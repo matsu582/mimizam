@@ -295,13 +295,11 @@ def _print_detail_section(result: Dict[str, Any]) -> None:
         details = audio.get("detailed_info")
         if details:
             q_dur = result.get("query_duration", 0)
-            # DB曲の長さを推定
+            # DB曲の長さは登録時に保存した楽曲長（Song.duration）を使う。
             db_dur = 0.0
-            v_match = result.get("visual_match")
-            if v_match:
-                video = v_match.get("video")
-                if video and hasattr(video, "duration"):
-                    db_dur = video.duration
+            song = audio.get("song")
+            if song is not None and getattr(song, "duration", None):
+                db_dur = song.duration
             if db_dur <= 0:
                 st = details.get("statistics", {})
                 db_range = st.get(

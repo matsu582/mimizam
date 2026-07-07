@@ -106,6 +106,7 @@ class PostgreSQLBackend(DatabaseBackend):
                     title TEXT NOT NULL,
                     artist TEXT NOT NULL,
                     file_path TEXT NOT NULL,
+                    duration DOUBLE PRECISION,
                     meta TEXT,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
@@ -169,14 +170,15 @@ class PostgreSQLBackend(DatabaseBackend):
             cursor = self.connection.cursor()
             meta_json = json.dumps(song.meta, ensure_ascii=False) if song.meta else None
             cursor.execute("""
-                INSERT INTO songs (id, title, artist, file_path, meta)
-                VALUES (%s, %s, %s, %s, %s)
+                INSERT INTO songs (id, title, artist, file_path, meta, duration)
+                VALUES (%s, %s, %s, %s, %s, %s)
                 ON CONFLICT (id) DO UPDATE SET
                 title = EXCLUDED.title,
                 artist = EXCLUDED.artist,
                 file_path = EXCLUDED.file_path,
-                meta = EXCLUDED.meta
-            """, (song.id, song.title, song.artist, song.file_path, meta_json))
+                meta = EXCLUDED.meta,
+                duration = EXCLUDED.duration
+            """, (song.id, song.title, song.artist, song.file_path, meta_json, song.duration))
             return True
         except PostgresError as e:
             self.logger.error(f"PostgreSQL song addition error: {e} | Context: {{'song_id': song.id}}")
@@ -256,7 +258,7 @@ class PostgreSQLBackend(DatabaseBackend):
         try:
             cursor = self.connection.cursor()
             cursor.execute("""
-                SELECT id, title, artist, file_path, created_at, meta
+                SELECT id, title, artist, file_path, created_at, meta, duration
                 FROM songs
                 WHERE id = %s
             """, (song_id,))
@@ -269,7 +271,7 @@ class PostgreSQLBackend(DatabaseBackend):
                         meta = json.loads(row[5])
                     except Exception:
                         meta = None
-                return Song(id=row[0], title=row[1], artist=row[2], file_path=row[3], created_at=row[4], meta=meta)
+                return Song(id=row[0], title=row[1], artist=row[2], file_path=row[3], created_at=row[4], meta=meta, duration=row[6])
         except PostgresError as e:
             self.logger.error(f"PostgreSQL song retrieval error: {e}")
         
@@ -284,7 +286,7 @@ class PostgreSQLBackend(DatabaseBackend):
         try:
             cursor = self.connection.cursor()
             cursor.execute("""
-                SELECT id, title, artist, file_path, created_at, meta
+                SELECT id, title, artist, file_path, created_at, meta, duration
                 FROM songs
                 WHERE id = ANY(%s)
             """, (unique_ids,))
@@ -298,6 +300,7 @@ class PostgreSQLBackend(DatabaseBackend):
                 song_map[row[0]] = Song(
                     id=row[0], title=row[1], artist=row[2],
                     file_path=row[3], created_at=row[4], meta=meta,
+                    duration=row[6],
                 )
         except PostgresError as e:
             self.logger.error(f"PostgreSQL batch song retrieval error: {e}")
@@ -309,7 +312,7 @@ class PostgreSQLBackend(DatabaseBackend):
         try:
             cursor = self.connection.cursor()
             cursor.execute("""
-                SELECT id, title, artist, file_path, created_at, meta
+                SELECT id, title, artist, file_path, created_at, meta, duration
                 FROM songs
                 ORDER BY title, artist
             """)
@@ -321,7 +324,7 @@ class PostgreSQLBackend(DatabaseBackend):
                         meta = json.loads(row[5])
                     except Exception:
                         meta = None
-                songs.append(Song(id=row[0], title=row[1], artist=row[2], file_path=row[3], created_at=row[4], meta=meta))
+                songs.append(Song(id=row[0], title=row[1], artist=row[2], file_path=row[3], created_at=row[4], meta=meta, duration=row[6]))
         except PostgresError as e:
             self.logger.error(f"PostgreSQL song list retrieval error: {e}")
         

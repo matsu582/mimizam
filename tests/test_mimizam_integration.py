@@ -166,6 +166,9 @@ class TestMimizamSQLite(unittest.TestCase):
         self.assertEqual(retrieved_song.title, title)
         self.assertEqual(retrieved_song.artist, artist)
         self.assertEqual(retrieved_song.file_path, self.test_audio_file)
+        # 楽曲長（duration）が登録・取得で往復すること（テスト音声は約3.0秒）
+        self.assertIsNotNone(retrieved_song.duration)
+        self.assertAlmostEqual(retrieved_song.duration, 3.0, delta=0.5)
     
     def test_search_song_exact_match(self):
         """完全一致での楽曲検索テスト"""

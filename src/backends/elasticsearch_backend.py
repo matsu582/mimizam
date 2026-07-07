@@ -155,6 +155,7 @@ class ElasticsearchBackend(DatabaseBackend):
                             }
                         },
                         "file_path": {"type": "keyword"},
+                        "duration": {"type": "double"},
                         "meta": {"type": "object", "enabled": True},
                         "created_at": {"type": "date"}
                     }
@@ -244,6 +245,7 @@ class ElasticsearchBackend(DatabaseBackend):
                 "title": song.title,
                 "artist": song.artist,
                 "file_path": song.file_path,
+                "duration": song.duration,
                 "meta": song.meta if song.meta else None,
                 "created_at": datetime.now().isoformat()
             }
@@ -434,6 +436,7 @@ class ElasticsearchBackend(DatabaseBackend):
                 title=source['title'],
                 artist=source['artist'],
                 file_path=source['file_path'],
+                duration=source.get('duration'),
                 meta=meta,
                 created_at=source.get('created_at')
             )
@@ -463,6 +466,7 @@ class ElasticsearchBackend(DatabaseBackend):
                     title=source['title'],
                     artist=source['artist'],
                     file_path=source['file_path'],
+                    duration=source.get('duration'),
                     meta=meta,
                     created_at=source.get('created_at'),
                 )
@@ -494,6 +498,7 @@ class ElasticsearchBackend(DatabaseBackend):
                     title=source['title'],
                     artist=source['artist'],
                     file_path=source['file_path'],
+                    duration=source.get('duration'),
                     meta=meta,
                     created_at=source.get('created_at')
                 ))

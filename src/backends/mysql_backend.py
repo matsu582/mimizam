@@ -92,6 +92,7 @@ class MySQLBackend(DatabaseBackend):
                     title VARCHAR(500) NOT NULL,
                     artist VARCHAR(500) NOT NULL,
                     file_path TEXT NOT NULL,
+                    duration DOUBLE,
                     meta TEXT,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 ) ENGINE=InnoDB CHARACTER SET=utf8mb4 COLLATE=utf8mb4_unicode_ci
@@ -147,14 +148,15 @@ class MySQLBackend(DatabaseBackend):
             cursor = self.connection.cursor()
             meta_json = json.dumps(song.meta, ensure_ascii=False) if song.meta else None
             cursor.execute("""
-                INSERT INTO songs (id, title, artist, file_path, meta)
-                VALUES (%s, %s, %s, %s, %s)
+                INSERT INTO songs (id, title, artist, file_path, meta, duration)
+                VALUES (%s, %s, %s, %s, %s, %s)
                 ON DUPLICATE KEY UPDATE
                 title = VALUES(title),
                 artist = VALUES(artist),
                 file_path = VALUES(file_path),
-                meta = VALUES(meta)
-            """, (song.id, song.title, song.artist, song.file_path, meta_json))
+                meta = VALUES(meta),
+                duration = VALUES(duration)
+            """, (song.id, song.title, song.artist, song.file_path, meta_json, song.duration))
             return True
         except MySQLError as e:
             self.logger.error(f"MySQL song addition error: {e} | Context: {{'song_id': song.id}}")
@@ -234,7 +236,7 @@ class MySQLBackend(DatabaseBackend):
         try:
             cursor = self.connection.cursor()
             cursor.execute("""
-                SELECT id, title, artist, file_path, created_at, meta
+                SELECT id, title, artist, file_path, created_at, meta, duration
                 FROM songs
                 WHERE id = %s
             """, (song_id,))
@@ -246,7 +248,7 @@ class MySQLBackend(DatabaseBackend):
                         meta = json.loads(row[5])
                     except Exception:
                         meta = None
-                return Song(id=row[0], title=row[1], artist=row[2], file_path=row[3], created_at=row[4], meta=meta)
+                return Song(id=row[0], title=row[1], artist=row[2], file_path=row[3], created_at=row[4], meta=meta, duration=row[6])
         except MySQLError as e:
             self.logger.error(f"MySQL song retrieval error: {e}")
         
@@ -265,7 +267,7 @@ class MySQLBackend(DatabaseBackend):
                 batch = unique_ids[i:i + batch_size]
                 placeholders = ','.join(['%s'] * len(batch))
                 cursor.execute(f"""
-                    SELECT id, title, artist, file_path, created_at, meta
+                    SELECT id, title, artist, file_path, created_at, meta, duration
                     FROM songs
                     WHERE id IN ({placeholders})
                 """, batch)
@@ -279,6 +281,7 @@ class MySQLBackend(DatabaseBackend):
                     song_map[row[0]] = Song(
                         id=row[0], title=row[1], artist=row[2],
                         file_path=row[3], created_at=row[4], meta=meta,
+                        duration=row[6],
                     )
         except MySQLError as e:
             self.logger.error(f"MySQL batch song retrieval error: {e}")
@@ -290,7 +293,7 @@ class MySQLBackend(DatabaseBackend):
         try:
             cursor = self.connection.cursor()
             cursor.execute("""
-                SELECT id, title, artist, file_path, created_at, meta
+                SELECT id, title, artist, file_path, created_at, meta, duration
                 FROM songs
                 ORDER BY title, artist
             """)
@@ -302,7 +305,7 @@ class MySQLBackend(DatabaseBackend):
                         meta = json.loads(row[5])
                     except Exception:
                         meta = None
-                songs.append(Song(id=row[0], title=row[1], artist=row[2], file_path=row[3], created_at=row[4], meta=meta))
+                songs.append(Song(id=row[0], title=row[1], artist=row[2], file_path=row[3], created_at=row[4], meta=meta, duration=row[6]))
         except MySQLError as e:
             self.logger.error(f"MySQL song list retrieval error: {e}")
         

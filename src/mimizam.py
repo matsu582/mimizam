@@ -120,12 +120,17 @@ class Mimizam:
             
             # 音声フィンガープリントを生成
             self.logger.debug("Generating audio fingerprints...")
-            fingerprints = self.fingerprinter.fingerprint_file(file_path)
-            
+            audio = self.fingerprinter.load_audio(file_path)
+            fingerprints = self.fingerprinter.fingerprint_audio(audio)
+
+            # 楽曲長は読み込んだ音声サンプル数／サンプルレートから算出する。
+            sr = int(getattr(self.fingerprinter, 'sr', 22050))
+            duration = len(audio) / sr if sr > 0 else None
+
             return self._register_fingerprints(
                 fingerprints, title, artist,
                 stored_path=file_path, song_id=song_id, meta_json=meta_json,
-                source=file_path,
+                source=file_path, duration=duration,
             )
             
         except (FileNotFoundError, MimizamError):
@@ -143,7 +148,8 @@ class Mimizam:
                                title: str, artist: str, stored_path: str,
                                song_id: Optional[str] = None,
                                meta_json: Optional[str] = None,
-                               source: Optional[str] = None) -> str:
+                               source: Optional[str] = None,
+                               duration: Optional[float] = None) -> str:
         """生成済みフィンガープリントを楽曲として永続化する共通処理
 
         add_song（ファイル経由）と add_movie（ffmpegパイプ経由）で共有し、
@@ -169,6 +175,7 @@ class Mimizam:
             title=title,
             artist=artist,
             file_path=stored_path,
+            duration=duration,
             meta=meta_dict if meta_dict else None,
         )
 
@@ -781,9 +788,13 @@ class Mimizam:
                 # 保存する file_path は元の動画パス（旧実装は削除される一時WAVを保存していた）。
                 audio = self._decode_audio_from_media(file_path)
                 fingerprints = self.fingerprinter.fingerprint_audio(audio)
+                # 楽曲長は復号した音声サンプル数／サンプルレートから算出する。
+                sr = int(getattr(self.fingerprinter, 'sr', 22050))
+                duration = len(audio) / sr if sr > 0 else None
                 result_id = self._register_fingerprints(
                     fingerprints, title, artist,
                     stored_path=file_path, song_id=movie_id, source=file_path,
+                    duration=duration,
                 )
                 audio_registered = bool(result_id)
             except Exception as exc:
