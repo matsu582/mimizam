@@ -15,6 +15,7 @@ from dataclasses import dataclass
 import pickle
 
 import logging
+import math
 import time
 from .adaptive_parameters import AdaptiveParameterTuner, PerformanceMonitor
 from .database_base import Fingerprint
@@ -218,10 +219,13 @@ class SpectrogramAnalyzer:
             magnitude, mask, peak_neighborhood_size
         )
 
+        n_freq = magnitude.shape[0]
         peaks = [
             Peak(
                 time=np.float64(times[t_idx]),
-                frequency=np.float64(frequencies[f_idx]),
+                frequency=self._interpolate_peak_frequency(
+                    magnitude, frequencies, f_idx, t_idx, n_freq
+                ),
                 amplitude=np.float64(magnitude[f_idx, t_idx])
             )
             for f_idx, t_idx in zip(peak_f_indices, peak_t_indices)
@@ -234,6 +238,33 @@ class SpectrogramAnalyzer:
                 logger.info(f"Peak amplitude range: {np.min(amplitudes):.2f} to {np.max(amplitudes):.2f} dB")
         return peaks
     
+    @staticmethod
+    def _interpolate_peak_frequency(magnitude: np.ndarray, frequencies: np.ndarray,
+                                    f_idx: int, t_idx: int, n_freq: int) -> np.float64:
+        """放物線補間でピーク周波数をサブビン精度に補正する
+
+        線形周波数グリッド(約10.8Hz刻み)ではピークの真の周波数がビン中央から
+        ずれ、尺度不変ハッシュの周波数比が量子化境界で跨りやすい。隣接3点の
+        dB値で放物線を当て、サブビンのずれ delta∈[-0.5,0.5] を推定して補正する。
+        端(0/n-1)は補間不能なのでビン中央を返す。
+        """
+        if f_idx <= 0 or f_idx >= n_freq - 1:
+            return np.float64(frequencies[f_idx])
+        a = float(magnitude[f_idx - 1, t_idx])
+        b = float(magnitude[f_idx, t_idx])
+        c = float(magnitude[f_idx + 1, t_idx])
+        denom = a - 2.0 * b + c
+        if abs(denom) < 1e-12:
+            return np.float64(frequencies[f_idx])
+        delta = 0.5 * (a - c) / denom
+        # 数値誤差でサブビン範囲を超える場合はクランプ
+        if delta > 0.5:
+            delta = 0.5
+        elif delta < -0.5:
+            delta = -0.5
+        bin_width = float(frequencies[f_idx + 1] - frequencies[f_idx])
+        return np.float64(frequencies[f_idx] + delta * bin_width)
+
     def detect_peaks(self, 
                     magnitude: np.ndarray, 
                     frequencies: np.ndarray, 
@@ -314,31 +345,49 @@ class SpectrogramAnalyzer:
 class HashGenerator:
     """スペクトルピークからハッシュベースのフィンガープリントを作成"""
 
-    # ハッシュのビットパックレイアウト: [f1ビン:11bit][f2ビン:11bit][Δtビン:10bit]
-    FREQ_BIN_HZ = 30          # 周波数量子化ビン幅（Hz）
-    _F1_SHIFT = 21
-    _F2_SHIFT = 10
-    _FREQ_MASK = 0x7FF        # 11bit
-    _DT_MASK = 0x3FF          # 10bit
+    # 尺度不変ハッシュ（Panako系）のビットパックレイアウト:
+    #   [時間比ビン:8bit][周波数比1ビン:12bit][周波数比2ビン:12bit]
+    # アンカーA・2ターゲットT1,T2（時間昇順 tA<t1<t2）の三つ組から、
+    #   時間比 r_t = (t1-tA)/(t2-tA)          … 時間伸縮(速度変化)に不変
+    #   周波数比 log2(f1/fA), log2(f2/fA)     … 乗法的ピッチ変化に不変
+    # を量子化して詰める。ハッシュ自体が速度・ピッチに不変なため、
+    # 照合側で time_scale/freq_scale をブルートフォース列挙する必要がない。
+    _RT_BITS = 8
+    _RT_SHIFT = 24
+    _RT_MASK = 0xFF           # 8bit
+    _FR_BITS = 12
+    _FR_MASK = 0xFFF          # 12bit
+    _FR1_SHIFT = 12
+    _FR2_SHIFT = 0
+    # 量子化粒度は STFT 分解能（n_fft=2048, sr=22050 → 約10.8Hz, hop=512 → 約23ms）
+    # に合わせて粗くする。細かすぎるとピーク周波数/時刻の微小変動でビンが跨り、
+    # 速度・ピッチ変化版がヒットしなくなるため。
+    _RT_LEVELS = 48          # 時間比 r∈(0,1) を 48 段階に量子化（≒0.02刻み）
+    _FR_STEP_OCT = 0.1       # 周波数比 log2 の量子化刻み（オクターブ, ≒1.2半音）
+    _FR_MAX_OCT = 4.0        # 周波数比のクランプ範囲（±4オクターブ）
+    _FR_CENTER = 0x800       # 12bit中央（符号付き比の0点）
 
     def __init__(self, 
-                 target_zone_size: int = 5,  # 8から5に削減
-                 time_delta_range: Tuple[float, float] = (0.1, 2.0),  # 範囲を狭める
-                 max_peaks_per_second: int = 15,  # 新規: 1秒あたりの最大ピーク数
-                 min_peak_separation: float = 0.02):  # 新規: ピーク間の最小時間間隔
+                 target_zone_size: int = 5,
+                 time_delta_range: Tuple[float, float] = (0.1, 2.0),
+                 max_peaks_per_second: int = 30,  # 1秒あたりの最大ピーク数（密度制御）
+                 min_peak_separation: float = 0.02,  # 後方互換のため受理（現方式では未使用）
+                 density_time_window: float = 0.1):  # 定数マップの時間窓（秒）
         """
         ハッシュジェネレータを初期化
         
         Args:
             target_zone_size: 各アンカーに対して考慮するターゲットピーク数
-            time_delta_range: 考慮する時間差の範囲（秒）
+            time_delta_range: 考慮する時間差の範囲（秒、現方式では選択は件数ベース）
             max_peaks_per_second: 1秒あたりの最大ピーク数（密度制御）
-            min_peak_separation: ピーク間の最小時間間隔（秒）
+            min_peak_separation: 後方互換用（旧・時間方向潰し込みは廃止）
+            density_time_window: 定数マップ密度制御の時間窓幅（秒）
         """
         self.target_zone_size = target_zone_size
         self.time_delta_range = time_delta_range
         self.max_peaks_per_second = max_peaks_per_second
         self.min_peak_separation = min_peak_separation
+        self.density_time_window = density_time_window
     
     def generate_hashes(self, peaks: List[Peak], debug: bool = False) -> List[Fingerprint]:
         """
@@ -417,23 +466,36 @@ class HashGenerator:
     
     def _create_fingerprints_from_targets(self, anchor_peak: Peak, target_peaks: List[Peak],
                                         seen_hashes: set, valid_time_deltas: List[float]) -> List[Fingerprint]:
-        """ターゲットピークからフィンガープリントを作成"""
+        """ターゲットピークから尺度不変フィンガープリントを作成する
+
+        アンカーと2つのターゲット（時間昇順の三つ組）から、時間比・周波数比を
+        量子化した尺度不変ハッシュを生成する。time_offset にはアンカー時刻を
+        保持し、照合時の頑健直線回帰（db_time≈s·query_time+c）で速度変化(s)と
+        オフセット(c)を推定できるようにする。
+        """
         fingerprints = []
-        
-        for target_peak in target_peaks:
-            time_delta = target_peak.time - anchor_peak.time
-            valid_time_deltas.append(time_delta)
-            
-            hash_value = self._create_hash(anchor_peak, target_peak)
-            
-            if hash_value not in seen_hashes:
-                seen_hashes.add(hash_value)
-                fingerprint = Fingerprint(
-                    hash_value=hash_value,
-                    time_offset=anchor_peak.time
-                )
-                fingerprints.append(fingerprint)
-        
+
+        for j in range(len(target_peaks)):
+            t1 = target_peaks[j]
+            dt1 = t1.time - anchor_peak.time
+            if dt1 <= 0:
+                continue
+            valid_time_deltas.append(dt1)
+            for k in range(j + 1, len(target_peaks)):
+                t2 = target_peaks[k]
+                dt2 = t2.time - anchor_peak.time
+                # 三つ組は tA < t1 < t2 を要求（時間比を (0,1) に収める）
+                if dt2 <= dt1:
+                    continue
+
+                for hash_value in self._create_triplet_hashes(anchor_peak, t1, t2):
+                    if hash_value not in seen_hashes:
+                        seen_hashes.add(hash_value)
+                        fingerprints.append(Fingerprint(
+                            hash_value=hash_value,
+                            time_offset=anchor_peak.time
+                        ))
+
         return fingerprints
     
     def _log_generation_summary(self, pairs_checked: int, anchor_count: int, total_peaks: int,
@@ -456,148 +518,147 @@ class HashGenerator:
         Returns:
             有効なターゲットピークのリスト
 
-        candidate_peaks は時間昇順であることを前提とする。先に件数で
-        切ると先頭が時間窓(time_delta_range)より手前に密集した場合に
-        有効なターゲットを取りこぼすため、時間窓で絞ってから
-        target_zone_size 件に制限する。
+        candidate_peaks は時間昇順であることを前提とする。
+
+        尺度不変ハッシュでは「絶対時間窓(time_delta_range)」でターゲットを選ぶと、
+        速度変化で同じ窓内に入るピーク集合が変わり、三つ組が別物になって不変性が
+        崩れる。そこで選択は件数（ランク）ベースにする: アンカー直後の
+        target_zone_size 件を採る。一様な時間伸縮では「直後のN件」は同じピーク集合
+        （時刻が伸縮されただけ）になるため、時間比が保存される。
         """
-        min_delta, max_delta = self.time_delta_range
         target_peaks = []
 
         for peak in candidate_peaks:
             time_delta = peak.time - anchor.time
-
-            # 時間昇順のため、上限を超えたらそれ以降も全て範囲外
-            if time_delta > max_delta:
+            # 同一/直前フレームの重なりだけ除外（微小ε）。上限窓は設けない。
+            if time_delta <= 1e-6:
+                continue
+            target_peaks.append(peak)
+            if len(target_peaks) >= self.target_zone_size:
                 break
-
-            if time_delta >= min_delta:
-                target_peaks.append(peak)
-                if len(target_peaks) >= self.target_zone_size:
-                    break
 
         return target_peaks
     
-    def _create_hash(self, anchor: Peak, target: Peak) -> int:
+    @classmethod
+    def _quantize_time_ratio(cls, r_t: float) -> int:
+        """時間比 r_t=(t1-tA)/(t2-tA) ∈ (0,1) を粗く量子化する
+
+        STFT時間分解能に対して過剰に細かいと速度変化版が跨ってしまうため、
+        _RT_LEVELS 段階の粗いビンに丸める。
         """
-        広い速度変化に対する改良されたロバスト性を持つアンカー-ターゲットピークペアからハッシュを作成
-
-        Args:
-            anchor: アンカーピーク
-            target: ターゲットピーク
-
-        Returns:
-            32bit符号なし整数のハッシュ値
-
-        f1ビン・f2ビン・Δtビンを可逆にビットパックして32bit整数に収める。
-        crc32のような非可逆ハッシュは量子化空間内でも衝突し、別ピーク対が
-        同一一致として扱われて誤ヒット要因になるため使用しない。
-        レイアウト: [f1ビン:11bit][f2ビン:11bit][Δtビン:10bit]
-        可聴域(≤20kHz→666ビン)・Δt≤2.0s(40ビン)は各フィールド幅に収まり、
-        通常入力では飽和が発生しないため衝突しない。
-        """
-        # 周波数量子化（0.5x-2x速度変化対応のため30Hzビン）
-        f1_bin = int(anchor.frequency // self.FREQ_BIN_HZ)
-        f2_bin = int(target.frequency // self.FREQ_BIN_HZ)
-
-        # 時間差の量子化（50msビン: 1/20秒刻み）
-        time_delta_raw = target.time - anchor.time
-        dt_bin = int(time_delta_raw * 20) if time_delta_raw > 0 else 0
-
-        # フィールド幅への飽和クランプ（範囲外は端に丸める＝決定的）
-        f1_bin = min(max(f1_bin, 0), self._FREQ_MASK)   # 11bit
-        f2_bin = min(max(f2_bin, 0), self._FREQ_MASK)   # 11bit
-        dt_bin = min(max(dt_bin, 0), self._DT_MASK)     # 10bit
-
-        # 可逆ビットパック（32bit符号なし整数）
-        return (f1_bin << self._F1_SHIFT) | (f2_bin << self._F2_SHIFT) | dt_bin
+        idx = int(round(r_t * cls._RT_LEVELS))
+        return min(max(idx, 0), cls._RT_MASK)
 
     @classmethod
-    def rescale_hash_frequency(cls, hash_value: int, freq_scale: float) -> int:
-        """ハッシュの周波数ビン(f1, f2)を freq_scale 倍して再パックする
+    def _freq_ratio_bins(cls, f_target: float, f_anchor: float) -> List[int]:
+        """周波数比 log2(f_target/f_anchor) を近傍2ビンへソフト量子化する
 
-        ピッチ変化した音源に対応するためのヘルパ。ハッシュは
-        ``[f1ビン:11bit][f2ビン:11bit][Δtビン:10bit]`` の可逆ビットパックなので、
-        周波数側のビンだけを freq_scale で再スケールし、Δtビンは保持したまま
-        32bit整数へ詰め直す。これにより「周波数ビンを変換した実ハッシュ」を生成でき、
-        DB側の候補集合（ハッシュ完全一致で引く）にピッチシフト音源がヒットする。
+        乗法的ピッチ変化 f→p·f では log2 比が不変になる。ピーク周波数の微小な
+        ブレや量子化境界跨ぎに強くするため、連続位置を挟む下側/上側の2ビンを
+        両方返す（両者の真値が1ビン以内なら少なくとも一方のビンが一致する）。
+        _FR_STEP_OCT オクターブ刻み、中央値 _FR_CENTER を0点として詰める。
+        """
+        ratio = math.log2(f_target / f_anchor)
+        ratio = min(max(ratio, -cls._FR_MAX_OCT), cls._FR_MAX_OCT)
+        pos = ratio / cls._FR_STEP_OCT + cls._FR_CENTER
+        lo = int(math.floor(pos))
+        bins = []
+        for b in (lo, lo + 1):
+            b = min(max(b, 0), cls._FR_MASK)
+            if b not in bins:
+                bins.append(b)
+        return bins
+
+    def _create_triplet_hashes(self, anchor: Peak, t1: Peak, t2: Peak) -> List[int]:
+        """アンカー＋2ターゲットの三つ組から尺度不変ハッシュ群を作成する
+
+        時間比（速度変化に不変）と2つの周波数比（ピッチ変化に不変）を量子化して
+        32bitにビットパックする。ハッシュ自体が速度・ピッチに不変なため、照合側で
+        time_scale/freq_scale を列挙する必要がない。周波数比は近傍2ビンへソフト
+        量子化するため、1三つ組あたり最大4個のハッシュを返す（境界跨ぎに頑健）。
 
         Args:
-            hash_value: 元のハッシュ値（32bit符号なし整数）
-            freq_scale: 周波数スケール係数（1.0は恒等変換）
+            anchor: アンカーピーク（三つ組の基準、時間最小）
+            t1: 中間ターゲット（tA < t1）
+            t2: 後方ターゲット（t1 < t2）
 
         Returns:
-            周波数ビンを再スケールした新しいハッシュ値
+            32bit符号なし整数のハッシュ値リスト
+
+        レイアウト: [時間比:8bit][周波数比1:12bit][周波数比2:12bit]
         """
-        if freq_scale == 1.0:
-            return hash_value
+        dt1 = float(t1.time - anchor.time)
+        dt2 = float(t2.time - anchor.time)
+        # 呼び出し側で dt2>dt1>0 を保証済み。ゼロ割回避のため下限を敷く。
+        r_t = dt1 / dt2 if dt2 > 0 else 0.0
 
-        f1_bin = (hash_value >> cls._F1_SHIFT) & cls._FREQ_MASK
-        f2_bin = (hash_value >> cls._F2_SHIFT) & cls._FREQ_MASK
-        dt_bin = hash_value & cls._DT_MASK
+        fa = float(anchor.frequency)
+        f1 = float(t1.frequency)
+        f2 = float(t2.frequency)
+        # 周波数が非正の場合は比が定義できないため 0 ビンへ丸める（決定的）
+        fr1_bins = self._freq_ratio_bins(f1, fa) if (fa > 0 and f1 > 0) else [0]
+        fr2_bins = self._freq_ratio_bins(f2, fa) if (fa > 0 and f2 > 0) else [0]
 
-        f1_bin = min(max(int(round(f1_bin * freq_scale)), 0), cls._FREQ_MASK)
-        f2_bin = min(max(int(round(f2_bin * freq_scale)), 0), cls._FREQ_MASK)
+        rt_bin = self._quantize_time_ratio(r_t)
 
-        return (f1_bin << cls._F1_SHIFT) | (f2_bin << cls._F2_SHIFT) | dt_bin
+        hashes = []
+        for b1 in fr1_bins:
+            for b2 in fr2_bins:
+                hashes.append(
+                    (rt_bin << self._RT_SHIFT)
+                    | (b1 << self._FR1_SHIFT)
+                    | (b2 << self._FR2_SHIFT)
+                )
+        return hashes
     
     def _filter_peaks_by_density(self, peaks: List[Peak], debug: bool = False) -> List[Peak]:
-        """
-        ピーク密度に基づいてピークをフィルタリング
-        
+        """周波数を考慮した定数マップ方式でピーク密度を制御する
+
+        尺度不変ハッシュでは「時間方向のみで1ピークに潰す」旧方式が致命的だった。
+        速度・ピッチ変化で"生き残るピーク"が変わり三つ組が対応しなくなるためである
+        （同時刻の複数周波数ピークを潰すと、変化後に別の周波数が選ばれてしまう）。
+
+        そこで時間窓ごとに振幅上位K件を"周波数をまたいで"保持する定数マップ方式に
+        する。窓内の強いピークは尺度変化しても概ね強いまま残るため、選択が安定し、
+        変換版でも同じ三つ組が再現されやすい。1秒あたりのピーク数は
+        max_peaks_per_second で概ね一定に保つ（K = 窓幅 × max_peaks_per_second）。
+
         Args:
             peaks: 検出されたスペクトルピークのリスト
             debug: デバッグログを有効にする
-            
+
         Returns:
             フィルタリングされたピークのリスト
         """
         logger = logging.getLogger(__name__)
-        
+
         if len(peaks) == 0:
             return peaks
-        
+
         if debug:
             logger.info(f"Peak count before density filtering: {len(peaks)}")
-        
-        # ピークを時間順にソート
-        sorted_peaks = sorted(peaks, key=lambda p: float(p.time))
-        
-        # 最小間隔に基づくフィルタリング
-        filtered_peaks = []
-        last_time = -float('inf')
-        
-        for peak in sorted_peaks:
-            if peak.time - last_time >= self.min_peak_separation:
-                filtered_peaks.append(peak)
-                last_time = peak.time
-        
-        if debug:
-            logger.info(f"After minimum interval filtering: {len(filtered_peaks)} peaks")
-        
-        # 1秒あたりの最大ピーク数制限
-        if len(filtered_peaks) == 0:
-            return filtered_peaks
-        
-        duration = filtered_peaks[-1].time - filtered_peaks[0].time
-        if duration > 0:
-            current_density = len(filtered_peaks) / duration
-            
-            if current_density > self.max_peaks_per_second:
-                # 振幅の高いピークを優先して選択
-                target_count = int(duration * self.max_peaks_per_second)
-                filtered_peaks.sort(key=lambda p: p.amplitude, reverse=True)
-                filtered_peaks = filtered_peaks[:target_count]
-                
-                # 再度時間順にソート
-                filtered_peaks.sort(key=lambda p: p.time)
-                
-                if debug:
-                    logger.info(f"After density limit: {len(filtered_peaks)} peaks")
-        
+
+        window = self.density_time_window
+        peaks_per_window = max(1, int(round(self.max_peaks_per_second * window)))
+
+        # 時間窓ごとに振幅上位K件を保持（周波数をまたいで選択）
+        buckets: dict = {}
+        for peak in peaks:
+            b = int(float(peak.time) / window)
+            buckets.setdefault(b, []).append(peak)
+
+        filtered_peaks: List[Peak] = []
+        for bucket_peaks in buckets.values():
+            if len(bucket_peaks) > peaks_per_window:
+                bucket_peaks.sort(key=lambda p: p.amplitude, reverse=True)
+                bucket_peaks = bucket_peaks[:peaks_per_window]
+            filtered_peaks.extend(bucket_peaks)
+
+        filtered_peaks.sort(key=lambda p: float(p.time))
+
         if debug:
             logger.info(f"Final filtered peak count: {len(filtered_peaks)}")
-        
+
         return filtered_peaks
 
 

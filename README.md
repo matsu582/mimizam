@@ -119,8 +119,8 @@ python examples/mimizam_demo.py
 
 1. **Spectrogram Generation**: Time-frequency analysis using Short-Time Fourier Transform (STFT)
 2. **Adaptive Peak Detection**: Dynamic threshold-based spectral peak extraction based on audio characteristics
-3. **Hash-based Fingerprinting**: Reversible 32-bit bit-packed hash generation from anchor-target peak pairs (frequency/time-delta bins packed into a single integer; not a cryptographic hash)
-4. **Intelligent Matching**: Time alignment and confidence scoring
+3. **Scale-invariant Fingerprinting**: 32-bit bit-packed hashes derived from anchor + two-target peak triplets. Each hash encodes a time ratio `(t1-tA)/(t2-tA)` and frequency ratios `log2(f1/fA)`, `log2(f2/fA)`, making it inherently invariant to speed (time-stretch) and pitch (frequency-scale) changes. Not a cryptographic hash. (Replaces the former absolute `[f1][f2][Δt]` scheme; existing databases must be re-fingerprinted.)
+4. **Single-search Matching**: One database lookup (no time/freq scale brute-force), followed by robust line-fit regression `db ≈ slope·query + offset` via Hough voting to recover the time scale/offset and score confidence from aligned inliers
 
 ### Video Fingerprinting
 
