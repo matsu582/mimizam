@@ -30,7 +30,7 @@ from ..exceptions import ConnectionError, QueryError, DatabaseError
 try:
     from elasticsearch import Elasticsearch
     from elasticsearch.exceptions import TransportError, ApiError
-    from elasticsearch.helpers import bulk
+    from elasticsearch.helpers import bulk, scan
     # elasticsearch 8.xではApiErrorとTransportErrorが別階層
     ElasticsearchException = (TransportError, ApiError)
     ELASTICSEARCH_AVAILABLE = True
@@ -627,9 +627,11 @@ class ElasticsearchBackend(DatabaseBackend):
         """映像指紋用インデックスを作成（存在しない場合のみ）"""
         videos_idx = f"{self.songs_index.rsplit('_', 1)[0]}_videos"
         ffp_idx = f"{self.songs_index.rsplit('_', 1)[0]}_frame_fingerprints"
+        fdesc_idx = f"{self.songs_index.rsplit('_', 1)[0]}_frame_descriptors"
 
         self._videos_index = videos_idx
         self._frame_fp_index = ffp_idx
+        self._frame_desc_index = fdesc_idx
 
         videos_body = {
             "settings": {
@@ -665,9 +667,24 @@ class ElasticsearchBackend(DatabaseBackend):
             }},
         }
 
+        fdesc_body = {
+            "settings": {
+                "number_of_shards": 1,
+                "number_of_replicas": 0,
+            },
+            "mappings": {"properties": {
+                "video_id": {"type": "keyword"},
+                "frame_index": {"type": "integer"},
+                "timestamp": {"type": "double"},
+                "descriptors": {"type": "binary"},
+                "descriptor_count": {"type": "integer"},
+            }},
+        }
+
         try:
             self._create_index_if_missing(videos_idx, videos_body)
             self._create_index_if_missing(ffp_idx, ffp_body)
+            self._create_index_if_missing(fdesc_idx, fdesc_body)
 
             # 既存フレームインデックスにもembeddingフィールドを追加
             try:
@@ -824,6 +841,21 @@ class ElasticsearchBackend(DatabaseBackend):
             self.logger.error(f"ES frame kNN search error: {e}")
             return agg
 
+    def _scan_sources(
+        self, index: str, query: Dict[str, Any], page_size: int = 5000,
+    ):
+        """指定クエリに一致する全ドキュメントの _source を段階取得で列挙する
+
+        固定 size での一括取得は上限（10000等）を超えるとヒットが黙って欠落する。
+        scroll ベースの scan で全件を漏れなく走査し、大規模データでも取りこぼさない。
+        """
+        for hit in scan(
+            self.client, index=index,
+            query={"query": query}, size=page_size,
+            preserve_order=False,
+        ):
+            yield hit["_source"]
+
     def get_frame_fingerprints(
         self, video_id: str,
     ) -> List[Tuple[int, float, bytes]]:
@@ -835,22 +867,15 @@ class ElasticsearchBackend(DatabaseBackend):
             self._ensure_video_indices()
             self._maybe_refresh_for_search(self._frame_fp_index)
 
-            resp = self.client.search(
-                index=self._frame_fp_index,
-                body={
-                    "query": {"term": {"video_id": video_id}},
-                    "size": 50000,
-                    "sort": [{"frame_index": {"order": "asc"}}],
-                },
-            )
-            for hit in resp["hits"]["hits"]:
-                src = hit["_source"]
-                fp_bytes = base64.b64decode(src["fingerprint"])
+            for src in self._scan_sources(
+                self._frame_fp_index, {"term": {"video_id": video_id}}
+            ):
                 results.append((
                     int(src["frame_index"]),
                     float(src["timestamp"]),
-                    fp_bytes,
+                    base64.b64decode(src["fingerprint"]),
                 ))
+            results.sort(key=lambda r: r[0])
         except ElasticsearchException as e:
             self.logger.error(
                 f"Elasticsearch frame fingerprint retrieval error: {e}"
@@ -872,16 +897,10 @@ class ElasticsearchBackend(DatabaseBackend):
             self._ensure_video_indices()
             self._maybe_refresh_for_search(self._frame_fp_index)
 
-            resp = self.client.search(
-                index=self._frame_fp_index,
-                body={
-                    "query": {"terms": {"video_id": list(video_ids)}},
-                    "size": 50000,
-                    "sort": [{"frame_index": {"order": "asc"}}],
-                },
-            )
-            for hit in resp["hits"]["hits"]:
-                src = hit["_source"]
+            for src in self._scan_sources(
+                self._frame_fp_index,
+                {"terms": {"video_id": list(video_ids)}},
+            ):
                 vid = src["video_id"]
                 if vid not in result:
                     continue
@@ -890,6 +909,8 @@ class ElasticsearchBackend(DatabaseBackend):
                     float(src["timestamp"]),
                     base64.b64decode(src["fingerprint"]),
                 ))
+            for vid in result:
+                result[vid].sort(key=lambda r: r[0])
         except ElasticsearchException as e:
             self.logger.error(
                 f"Elasticsearch frame fingerprint batch retrieval error: {e}"
@@ -914,6 +935,38 @@ class ElasticsearchBackend(DatabaseBackend):
             )
         except ElasticsearchException:
             return None
+
+    def get_videos(
+        self, video_ids: List[str]
+    ) -> Dict[str, Optional[Video]]:
+        """Elasticsearchから複数映像のメタデータをterms1クエリで一括取得（N+1回避）"""
+        result: Dict[str, Optional[Video]] = {vid: None for vid in video_ids}
+        if not video_ids:
+            return result
+        try:
+            self._ensure_video_indices()
+            self._maybe_refresh_for_search(self._videos_index)
+            resp = self.client.search(
+                index=self._videos_index,
+                body={
+                    "query": {"terms": {"id": list(video_ids)}},
+                    "size": len(video_ids),
+                },
+            )
+            for h in resp["hits"]["hits"]:
+                src = h["_source"]
+                result[src["id"]] = Video(
+                    id=src["id"], title=src["title"],
+                    file_path=src["file_path"],
+                    duration=src.get("duration"),
+                    frame_count=src.get("frame_count"),
+                    created_at=src.get("created_at"),
+                )
+        except ElasticsearchException as e:
+            self.logger.error(
+                f"Elasticsearch video batch retrieval error: {e}"
+            )
+        return result
 
     def list_videos(self) -> List[Video]:
         """Elasticsearchから全映像をリスト取得"""
@@ -956,6 +1009,10 @@ class ElasticsearchBackend(DatabaseBackend):
                 index=self._frame_fp_index,
                 body={"query": {"term": {"video_id": video_id}}},
             )
+            self.client.delete_by_query(
+                index=self._frame_desc_index,
+                body={"query": {"term": {"video_id": video_id}}},
+            )
             return True
         except ElasticsearchException as e:
             self.logger.error(
@@ -965,6 +1022,120 @@ class ElasticsearchBackend(DatabaseBackend):
                 "Failed to delete video", original_error=e,
                 context={'video_id': video_id},
             ) from e
+
+    def add_frame_descriptors(
+        self, video_id: str,
+        frames: List[Tuple[int, float, bytes, int]],
+    ) -> bool:
+        """Elasticsearchにフレーム単位AKAZE記述子を一括保存（幾何検証・再生成用）"""
+        import base64
+        try:
+            self._ensure_video_indices()
+            self.client.delete_by_query(
+                index=self._frame_desc_index,
+                body={"query": {"term": {"video_id": video_id}}},
+            )
+            actions = []
+            for fidx, ts, desc_blob, desc_count in frames:
+                actions.append({
+                    "_index": self._frame_desc_index,
+                    "_source": {
+                        "video_id": video_id,
+                        "frame_index": int(fidx),
+                        "timestamp": float(ts),
+                        "descriptors": base64.b64encode(desc_blob).decode(),
+                        "descriptor_count": int(desc_count),
+                    },
+                })
+            if actions:
+                _, failed = bulk(self.client, actions, chunk_size=1000,
+                                 refresh=self.config.es_refresh_on_write)
+                if failed:
+                    self.logger.error(
+                        f"Bulk frame descriptor index failed: "
+                        f"{len(failed)} items"
+                    )
+                    raise DatabaseError(
+                        "Failed to add frame descriptors (bulk index failure)",
+                        context={'video_id': video_id, 'failed': len(failed)},
+                    )
+            return True
+        except DatabaseError:
+            raise
+        except Exception as e:
+            self.logger.error(
+                f"Elasticsearch frame descriptor save error: {e}"
+            )
+            raise DatabaseError(
+                "Failed to add frame descriptors", original_error=e,
+                context={'video_id': video_id, 'count': len(frames)},
+            ) from e
+
+    def get_frame_descriptors(
+        self, video_id: str,
+        frame_indices: Optional[List[int]] = None,
+    ) -> List[Tuple[int, float, bytes, int]]:
+        """Elasticsearchから指定映像のフレーム記述子を取得
+
+        frame_indices を渡すと、そのフレームインデックスの記述子だけを取得する。
+        幾何検証はANN上位候補のDBフレームしか突き合わせないため、必要なフレームに
+        限定して読み込むことで生記述子の無駄なI/Oを避ける。None なら全件取得。
+        """
+        import base64
+
+        results: List[Tuple[int, float, bytes, int]] = []
+        try:
+            self._ensure_video_indices()
+            self._maybe_refresh_for_search(self._frame_desc_index)
+            must: List[Dict[str, Any]] = [{"term": {"video_id": video_id}}]
+            if frame_indices is not None:
+                if not frame_indices:
+                    return []
+                must.append({
+                    "terms": {"frame_index": [int(f) for f in frame_indices]}
+                })
+            for src in self._scan_sources(
+                self._frame_desc_index, {"bool": {"filter": must}}
+            ):
+                results.append((
+                    int(src["frame_index"]),
+                    float(src["timestamp"]),
+                    base64.b64decode(src["descriptors"]),
+                    int(src["descriptor_count"]),
+                ))
+            results.sort(key=lambda r: r[0])
+        except ElasticsearchException as e:
+            self.logger.error(
+                f"Elasticsearch frame descriptor retrieval error: {e}"
+            )
+        return results
+
+    def get_all_frame_descriptors(
+        self,
+    ) -> Dict[str, List[Tuple[int, float, bytes, int]]]:
+        """Elasticsearchから全映像のフレーム記述子を取得"""
+        import base64
+
+        result: Dict[str, List[Tuple[int, float, bytes, int]]] = {}
+        try:
+            self._ensure_video_indices()
+            self._maybe_refresh_for_search(self._frame_desc_index)
+            for src in self._scan_sources(
+                self._frame_desc_index, {"match_all": {}}
+            ):
+                result.setdefault(src["video_id"], []).append((
+                    int(src["frame_index"]),
+                    float(src["timestamp"]),
+                    base64.b64decode(src["descriptors"]),
+                    int(src["descriptor_count"]),
+                ))
+            for vid in result:
+                result[vid].sort(key=lambda r: r[0])
+        except ElasticsearchException as e:
+            self.logger.error(
+                f"Elasticsearch all frame descriptor retrieval error: {e}"
+            )
+        return result
 
     def get_video_stats(self) -> Dict[str, int]:
         """Elasticsearchの映像指紋統計を取得"""

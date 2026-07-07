@@ -508,6 +508,24 @@ class PostgreSQLBackend(DatabaseBackend):
                 ON frame_fingerprints (video_id)
             """)
 
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS frame_descriptors (
+                    id BIGSERIAL PRIMARY KEY,
+                    video_id VARCHAR(255) NOT NULL,
+                    frame_index INTEGER NOT NULL,
+                    timestamp DOUBLE PRECISION NOT NULL,
+                    descriptors BYTEA NOT NULL,
+                    descriptor_count INTEGER NOT NULL,
+                    FOREIGN KEY (video_id) REFERENCES videos (id)
+                        ON DELETE CASCADE
+                )
+            """)
+
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_frame_desc_video
+                ON frame_descriptors (video_id)
+            """)
+
             return True
         except PostgresError as e:
             self.logger.error(f"PostgreSQL video table creation error: {e}")
@@ -648,6 +666,32 @@ class PostgreSQLBackend(DatabaseBackend):
             self.logger.error(f"PostgreSQL video retrieval error: {e}")
         return None
 
+    def get_videos(
+        self, video_ids: List[str]
+    ) -> Dict[str, Optional[Video]]:
+        """PostgreSQLから複数映像のメタデータを1クエリで一括取得（N+1回避）"""
+        result: Dict[str, Optional[Video]] = {vid: None for vid in video_ids}
+        if not video_ids:
+            return result
+        try:
+            self._create_video_tables()
+            cursor = self.connection.cursor()
+            cursor.execute(
+                """SELECT id, title, file_path, duration, frame_count,
+                          created_at
+                   FROM videos WHERE id = ANY(%s)""",
+                (list(video_ids),),
+            )
+            for r in cursor.fetchall():
+                result[r[0]] = Video(
+                    id=r[0], title=r[1], file_path=r[2],
+                    duration=r[3], frame_count=r[4],
+                    created_at=str(r[5]) if r[5] else None,
+                )
+        except PostgresError as e:
+            self.logger.error(f"PostgreSQL video batch retrieval error: {e}")
+        return result
+
     def list_videos(self) -> List[Video]:
         """PostgreSQLから全映像をリスト取得"""
         try:
@@ -685,6 +729,105 @@ class PostgreSQLBackend(DatabaseBackend):
                 "Failed to delete video", original_error=e,
                 context={'video_id': video_id},
             ) from e
+
+    def add_frame_descriptors(
+        self, video_id: str,
+        frames: List[Tuple[int, float, bytes, int]],
+    ) -> bool:
+        """PostgreSQLにフレーム単位AKAZE記述子を一括保存（幾何検証・再生成用）"""
+        try:
+            self._create_video_tables()
+            cursor = self.connection.cursor()
+            cursor.execute(
+                "DELETE FROM frame_descriptors WHERE video_id = %s",
+                (video_id,),
+            )
+            rows = [
+                (video_id, int(fidx), float(ts),
+                 psycopg2.Binary(desc_blob), int(desc_count))
+                for fidx, ts, desc_blob, desc_count in frames
+            ]
+            if rows:
+                cursor.executemany(
+                    """INSERT INTO frame_descriptors
+                        (video_id, frame_index, timestamp,
+                         descriptors, descriptor_count)
+                    VALUES (%s, %s, %s, %s, %s)""",
+                    rows,
+                )
+            return True
+        except PostgresError as e:
+            self.logger.error(f"PostgreSQL frame descriptor save error: {e}")
+            raise DatabaseError(
+                "Failed to add frame descriptors", original_error=e,
+                context={'video_id': video_id, 'count': len(frames)},
+            ) from e
+
+    def get_frame_descriptors(
+        self, video_id: str,
+        frame_indices: Optional[List[int]] = None,
+    ) -> List[Tuple[int, float, bytes, int]]:
+        """PostgreSQLから指定映像のフレーム記述子を取得
+
+        frame_indices を渡すと、そのフレームインデックスの記述子だけを取得する。
+        幾何検証はANN上位候補のDBフレームしか突き合わせないため、必要なフレームに
+        限定して読み込むことで生記述子の無駄なI/Oを避ける。None なら全件取得。
+        """
+        try:
+            self._create_video_tables()
+            cursor = self.connection.cursor()
+            if frame_indices is not None:
+                if not frame_indices:
+                    return []
+                cursor.execute(
+                    """SELECT frame_index, timestamp,
+                              descriptors, descriptor_count
+                       FROM frame_descriptors
+                       WHERE video_id = %s AND frame_index = ANY(%s)
+                       ORDER BY frame_index""",
+                    (video_id, [int(f) for f in frame_indices]),
+                )
+            else:
+                cursor.execute(
+                    """SELECT frame_index, timestamp,
+                              descriptors, descriptor_count
+                       FROM frame_descriptors WHERE video_id = %s
+                       ORDER BY frame_index""",
+                    (video_id,),
+                )
+            return [
+                (int(fidx), float(ts), bytes(desc), int(cnt))
+                for fidx, ts, desc, cnt in cursor.fetchall()
+            ]
+        except PostgresError as e:
+            self.logger.error(
+                f"PostgreSQL frame descriptor retrieval error: {e}"
+            )
+            return []
+
+    def get_all_frame_descriptors(
+        self,
+    ) -> Dict[str, List[Tuple[int, float, bytes, int]]]:
+        """PostgreSQLから全映像のフレーム記述子を取得"""
+        result: Dict[str, List[Tuple[int, float, bytes, int]]] = {}
+        try:
+            self._create_video_tables()
+            cursor = self.connection.cursor()
+            cursor.execute(
+                """SELECT video_id, frame_index, timestamp,
+                          descriptors, descriptor_count
+                   FROM frame_descriptors
+                   ORDER BY video_id, frame_index"""
+            )
+            for vid, fidx, ts, desc, cnt in cursor.fetchall():
+                result.setdefault(vid, []).append(
+                    (int(fidx), float(ts), bytes(desc), int(cnt))
+                )
+        except PostgresError as e:
+            self.logger.error(
+                f"PostgreSQL all frame descriptor retrieval error: {e}"
+            )
+        return result
 
     def get_video_stats(self) -> Dict[str, int]:
         """PostgreSQLの映像指紋統計を取得"""

@@ -37,6 +37,7 @@ except ImportError as e:
 from mimizam import DatabaseConfig, Song
 from mimizam import FingerprintDatabase
 from mimizam import Fingerprint
+from mimizam import Video
 from mimizam import (
     Mimizam, create_mimizam_sqlite, create_mimizam_mysql,
     create_mimizam_postgresql, create_mimizam_elasticsearch
@@ -99,6 +100,50 @@ class TestCrossBackendConsistency(unittest.TestCase):
         matches = db.search_fingerprints(query_fps)
         self.assertIn(
             self.test_song.id, matches, f"{backend_name}での検索に失敗")
+
+        # 映像メタデータ・AKAZE記述子の往復（幾何検証経路の成立確認）。
+        # 非SQLiteバックエンドでも add_video / add_frame_descriptors /
+        # get_frame_descriptors / get_videos が動作することを検証する。
+        video = Video(
+            id="vid_container", title="Container Video",
+            file_path="/path/to/video.mp4", duration=1.0, frame_count=3,
+        )
+        self.assertTrue(
+            db.backend.add_video(video),
+            f"{backend_name}での映像追加に失敗")
+        desc_blob = (b"\x01\x02\x03\x04" * 8)
+        self.assertTrue(
+            db.backend.add_frame_descriptors(
+                video.id,
+                [(0, 0.0, desc_blob, 2), (1, 0.5, desc_blob, 2)],
+            ),
+            f"{backend_name}での記述子保存に失敗")
+
+        if backend_name == 'elasticsearch':
+            time.sleep(2)
+
+        got = db.backend.get_frame_descriptors(video.id)
+        self.assertEqual(
+            len(got), 2, f"{backend_name}での記述子取得件数が不一致")
+        self.assertEqual(
+            got[0][3], 2, f"{backend_name}でのdescriptor_countが不一致")
+        self.assertEqual(
+            got[0][2], desc_blob, f"{backend_name}での記述子blobが不一致")
+
+        limited = db.backend.get_frame_descriptors(
+            video.id, frame_indices=[1])
+        self.assertEqual(
+            [r[0] for r in limited], [1],
+            f"{backend_name}でのフレーム限定取得が不一致")
+
+        # get_videos は要求IDだけを1クエリで返し、未存在は None にする
+        vids = db.backend.get_videos([video.id, "missing_video_id"])
+        self.assertIsNotNone(
+            vids.get(video.id), f"{backend_name}でのget_videosに失敗")
+        self.assertEqual(vids[video.id].title, video.title)
+        self.assertIsNone(
+            vids.get("missing_video_id"),
+            f"{backend_name}で未存在IDがNoneでない")
 
         db.disconnect()
 

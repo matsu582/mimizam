@@ -643,6 +643,32 @@ class SQLiteBackend(DatabaseBackend):
             self.logger.error(f"SQLite video retrieval error: {e}")
         return None
 
+    def get_videos(
+        self, video_ids: List[str]
+    ) -> Dict[str, Optional[Video]]:
+        """SQLiteから複数映像のメタデータを1クエリで一括取得（N+1回避）"""
+        result: Dict[str, Optional[Video]] = {vid: None for vid in video_ids}
+        if not video_ids:
+            return result
+        try:
+            self._create_video_tables()
+            cursor = self.connection.cursor()
+            placeholders = ",".join("?" for _ in video_ids)
+            cursor.execute(
+                f"""SELECT id, title, file_path, duration, frame_count,
+                          created_at
+                   FROM videos WHERE id IN ({placeholders})""",
+                tuple(video_ids),
+            )
+            for r in cursor.fetchall():
+                result[r[0]] = Video(
+                    id=r[0], title=r[1], file_path=r[2],
+                    duration=r[3], frame_count=r[4], created_at=r[5],
+                )
+        except Exception as e:
+            self.logger.error(f"SQLite video batch retrieval error: {e}")
+        return result
+
     def list_videos(self) -> List[Video]:
         """SQLiteから全映像をリスト取得"""
         try:

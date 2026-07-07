@@ -313,13 +313,21 @@ class VideoFingerprintDatabase:
             query_blobs, dims, k_per_query, sim_threshold
         )
 
+        # 候補映像のメタデータは1クエリで一括取得し、候補ごとの get_video 往復
+        # （N+1）を避ける（top_k に比例したレイテンシ悪化を防ぐ）。
+        vid_ids = [
+            vid_id for vid_id, stats in agg.items()
+            if int(stats.get("votes", 0)) > 0
+        ]
+        videos = self.backend.get_videos(vid_ids)
+
         candidates: List[Dict] = []
         for vid_id, stats in agg.items():
             votes = int(stats.get("votes", 0))
             if votes <= 0:
                 continue
             avg_sim = stats.get("score_sum", 0.0) / max(votes, 1)
-            video = self.backend.get_video(vid_id)
+            video = videos.get(vid_id)
             candidates.append({
                 "video_id": vid_id,
                 "similarity": float(avg_sim),

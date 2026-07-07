@@ -268,6 +268,16 @@ class DatabaseBackend(ABC):
         """全映像をリスト取得"""
         raise NotImplementedError("This backend does not support video fingerprinting")
 
+    def get_videos(
+        self, video_ids: List[str]
+    ) -> Dict[str, Optional['Video']]:
+        """複数映像のメタデータをまとめて取得
+
+        デフォルトは個別取得へのフォールバック（N+1）。リモートDBのバックエンドは
+        1クエリ実装でオーバーライドし、候補ごとの往復を避ける。
+        """
+        return {vid: self.get_video(vid) for vid in video_ids}
+
     def delete_video(self, video_id: str) -> bool:
         """映像と関連指紋を削除"""
         raise NotImplementedError("This backend does not support video fingerprinting")
