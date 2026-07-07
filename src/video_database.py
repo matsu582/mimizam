@@ -63,7 +63,6 @@ class VideoFingerprintDatabase:
         self._geom_top_k = 6
         self._geom_min_inliers = 15
         self._geom_ransac_thresh = 5.0
-        self._geom_inlier_saturation = 100.0
         # 速度対策。1クエリフレームで幾何一致が _geom_max_hits 件見つかったら、
         # 残る上位候補のBFマッチを打ち切る。区間判定はDB時刻クラスタで行うため、
         # 1フレームから数件拾えれば十分（同一フレームが多数のDB候補に一致しても
@@ -82,6 +81,11 @@ class VideoFingerprintDatabase:
         # knnMatch(BF)がO(Nq×Nd)で律速のため、上限削減がそのまま高速化に効く
         # （400→256でBFの突き合わせ量が約0.41倍）。
         self._geom_max_desc = 256
+        # インライア数→[0,1]スコアの飽和点。真の一致のインライア数は突き合わせる
+        # 記述子数にほぼ比例するため、_geom_max_desc に比例させてスコアの尺度を
+        # 記述子上限の変更に対して安定させる（400→100, 256→64）。ノイズは
+        # インライア0〜8と桁違いに少ないので分離は保たれる。
+        self._geom_inlier_saturation = 0.25 * self._geom_max_desc
         # 幾何検証済みマッチの一致区間はDB時刻クラスタで導く。各クエリフレームが
         # 幾何一致したDB候補のDB時刻を集め、DB時刻が近いもの同士（間隔
         # _geom_region_db_gap 秒以内）を1つの区間に束ねる。OPは似たカットが多く
