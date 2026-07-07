@@ -66,6 +66,12 @@ class VideoFingerprintDatabase:
         # 1フレームから数件拾えれば十分（同一フレームが多数のDB候補に一致しても
         # クラスタ上は同じ塊に寄与するだけ）。強一致フレームの走査を早期終了する。
         self._geom_max_hits = 3
+        # 幾何検証のBFマッチ回数は「検証するクエリフレーム数 × 候補数」に比例する。
+        # クエリ全フレームを検証すると候補数に比例して線形に遅くなるため、時間軸で
+        # 均等に間引いた最大 _geom_max_query_frames 件だけを幾何検証する。区間判定は
+        # DB時刻クラスタ（最小 min_region_frames フレーム）で行うので、OP等の塊には
+        # 間引き後も十分なフレームが入る。0以下で無効（全フレーム検証）。
+        self._geom_max_query_frames = 48
         # 幾何検証の速度対策。BFマッチはフレームあたり記述子数の二乗で重くなるため、
         # 1フレームで突き合わせる記述子を _geom_max_desc 件（先頭N件）に制限する。
         # 真の一致はインライアが100+と桁違いに多く、数百点でも十分に分離できる。
@@ -329,15 +335,36 @@ class VideoFingerprintDatabase:
         # クエリ側のキーポイント座標(float32)と記述子(uint8)は全候補で使い回すため
         # ここで一度だけ整形・uint8化しておく（候補ごとの再変換を避ける）。
         query_geom_by_fidx: Dict[int, Tuple[np.ndarray, np.ndarray]] = {}
+        # 幾何検証するクエリフレームは時間軸で均等に間引く。全候補で同じ集合を
+        # 使い回すため、間引きとクエリ側の座標・記述子整形はここで一度だけ行う。
+        geom_query_fps: List[Tuple[int, float, np.ndarray]] = []
         if query_raw:
-            for fidx, _ts, arr in query_raw:
+            geom_sel = self._subsample_indices(
+                len(query_raw), self._geom_max_query_frames
+            )
+            for i in geom_sel:
+                fidx, ts, arr = query_raw[i]
                 kpt, desc = split_raw_descriptor(arr)
                 query_geom_by_fidx[fidx] = self._prep_geom_frame(kpt, desc)
+                geom_query_fps.append((fidx, ts, arr))
         use_geometric = bool(query_geom_by_fidx)
         # 幾何検証のBFMatcherは1インスタンスを全ペアで共有する（生成コスト削減）。
         geom_matcher = (
             cv2.BFMatcher(cv2.NORM_HAMMING) if use_geometric else None
         )
+
+        # クエリ側のVLADベクトル行列は候補に依存しないため、候補ループの外で
+        # 一度だけ構築する（従来は候補ごとに再構築していた）。幾何検証時は間引いた
+        # クエリフレームのみで類似度を計算し、BFマッチ回数を抑える。
+        q_all = np.stack(
+            [q_fp.astype(np.float32) for _, _, q_fp in query_frame_fps]
+        )
+        if use_geometric:
+            q_mat = np.stack(
+                [q_fp.astype(np.float32) for _, _, q_fp in geom_query_fps]
+            )
+        else:
+            q_mat = q_all
 
         for vid_id in candidate_video_ids:
             raw_frames = frames_by_video.get(vid_id, [])
@@ -349,37 +376,42 @@ class VideoFingerprintDatabase:
                 for fidx, ts, fp_blob in raw_frames
             ]
 
-            # クエリ×DBの全フレーム類似度を行列積で一括計算
+            # クエリ×DBのフレーム類似度を行列積で一括計算
             # （Python二重ループを回避し、BLASによる高速化を図る）
-            q_mat = np.stack(
-                [q_fp.astype(np.float32) for _, _, q_fp in query_frame_fps]
-            )
             d_mat = np.stack([d_fp for _, _, d_fp in db_frame_vecs])
             # 非有限値（NaN/inf）混入時の行列積警告を抑止し0類似度化
             with np.errstate(all="ignore"):
-                sims = q_mat @ d_mat.T  # (クエリフレーム数, DBフレーム数)
+                sims = q_mat @ d_mat.T  # (対象クエリフレーム数, DBフレーム数)
             np.nan_to_num(sims, copy=False, nan=0.0, posinf=0.0, neginf=0.0)
 
             db_ts_arr = np.array(
                 [d_ts for _, d_ts, _ in db_frame_vecs], dtype=np.float64
             )
-            best_idx = np.argmax(sims, axis=1)
-            best_per_query = sims[np.arange(sims.shape[0]), best_idx]
 
-            # 幾何検証にはDB側のキーポイント座標付き生記述子が必要。
-            # DB側も座標(float32)と記述子(uint8)へ一度だけ整形しておく。
-            db_geom_by_fidx: Dict[int, Tuple[np.ndarray, np.ndarray]] = {}
             if use_geometric:
+                # 幾何検証にはDB側のキーポイント座標付き生記述子が必要。ただし
+                # 実際に突き合わせるのは各クエリフレームのANN上位 _geom_top_k 件の
+                # DBフレームだけなので、その和集合に限定して整形する（未使用フレーム
+                # のuint8変換を省く）。
+                db_fidx_arr = [f for f, _, _ in db_frame_vecs]
+                top_k = self._geom_top_k
+                order = np.argsort(-sims, axis=1)[:, :top_k]
+                needed_j = np.unique(order)
+                needed_fidx = {db_fidx_arr[int(j)] for j in needed_j}
+                db_geom_by_fidx: Dict[
+                    int, Tuple[np.ndarray, np.ndarray]
+                ] = {}
                 for fidx, _ts, arr in self.get_frame_descriptors(vid_id):
+                    if fidx not in needed_fidx:
+                        continue
                     kpt, desc = split_raw_descriptor(arr)
                     db_geom_by_fidx[fidx] = self._prep_geom_frame(kpt, desc)
                 # 再登録で生記述子は必ず保存される前提。無い映像は照合対象外。
                 if not db_geom_by_fidx:
                     continue
 
-            if use_geometric:
                 frame_matches, geom_scores = self._build_geometric_matches(
-                    query_frame_fps, db_frame_vecs, db_ts_arr, sims,
+                    geom_query_fps, db_frame_vecs, db_ts_arr, sims,
                     query_geom_by_fidx, db_geom_by_fidx, geom_matcher,
                 )
                 # 幾何検証済み候補の代表スコア（インライア正規化）を採否に使う
@@ -396,6 +428,8 @@ class VideoFingerprintDatabase:
                 # ようにする。メモリ保護のため1フレームあたり _frame_match_cap 件で頭打ち。
                 cand_threshold = self._frame_match_cand_threshold
                 cap = self._frame_match_cap
+                best_idx = np.argmax(sims, axis=1)
+                best_per_query = sims[np.arange(sims.shape[0]), best_idx]
 
                 frame_matches = []
                 for i, (_, q_ts, _) in enumerate(query_frame_fps):
@@ -469,6 +503,28 @@ class VideoFingerprintDatabase:
 
         results.sort(key=lambda r: r["frame_similarity"], reverse=True)
         return results
+
+    @staticmethod
+    def _subsample_indices(n: int, cap: int) -> List[int]:
+        """0..n-1 を時間軸で均等に間引いた最大 cap 件の昇順インデックスを返す
+
+        両端（先頭・末尾）を必ず含めつつ等間隔に選ぶ。cap<=0 または n<=cap の
+        場合は全インデックスを返す（間引き無効）。幾何検証するクエリフレームを
+        減らしてBFマッチ回数を抑えるために使う。
+
+        Args:
+            n: 母集合の要素数
+            cap: 選ぶ最大件数
+
+        Returns:
+            昇順のインデックス列
+        """
+        if cap <= 0 or n <= cap:
+            return list(range(n))
+        if cap == 1:
+            return [0]
+        idx = np.linspace(0, n - 1, cap)
+        return sorted(set(int(round(v)) for v in idx))
 
     def _prep_geom_frame(
         self, kpt: np.ndarray, desc: np.ndarray,

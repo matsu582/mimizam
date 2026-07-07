@@ -118,5 +118,30 @@ class TestGeometricRegions(unittest.TestCase):
         self.assertEqual(md["matched_frames"], 0)
 
 
+class TestSubsampleIndices(unittest.TestCase):
+    """幾何検証するクエリフレームの均等間引きの回帰テスト"""
+
+    def test_returns_all_when_below_cap(self):
+        """要素数がcap以下なら全件そのまま返す"""
+        self.assertEqual(VDB._subsample_indices(5, 48), [0, 1, 2, 3, 4])
+
+    def test_disabled_when_cap_non_positive(self):
+        """cap<=0 は間引き無効（全件）"""
+        self.assertEqual(VDB._subsample_indices(4, 0), [0, 1, 2, 3])
+
+    def test_caps_count_and_keeps_endpoints(self):
+        """capを超えたら件数を頭打ちにし、両端を必ず含み昇順・重複なし"""
+        idx = VDB._subsample_indices(224, 48)
+        self.assertLessEqual(len(idx), 48)
+        self.assertEqual(idx[0], 0)
+        self.assertEqual(idx[-1], 223)
+        self.assertEqual(idx, sorted(set(idx)))
+
+    def test_indices_in_range(self):
+        """返るインデックスは全て 0..n-1 の範囲内"""
+        idx = VDB._subsample_indices(87, 48)
+        self.assertTrue(all(0 <= i < 87 for i in idx))
+
+
 if __name__ == "__main__":
     unittest.main()
