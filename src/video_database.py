@@ -101,6 +101,12 @@ class VideoFingerprintDatabase:
         # 検証すると、DBの映像数が増えても検索時間を一定に保てる。0以下で無制限
         # （全候補を検証）。上位候補はANN得票順で選ぶ。
         self._geom_max_candidates = 0
+        # 診断用。Trueにすると各候補の一致フレームを (クエリ時刻→DB時刻, インライア数)
+        # の一覧でログ出力する。区間のクエリ側スパンが何に由来するかを特定するための
+        # 調査用フラグで、既定は無効。環境変数 MIMIZAM_GEOM_DIAG=1 でも有効化できる。
+        self._geom_diag = os.environ.get("MIMIZAM_GEOM_DIAG", "") not in (
+            "", "0", "false", "False",
+        )
         self.backend: DatabaseBackend = create_database_backend(config)
 
         if not self.backend.connect():
@@ -611,6 +617,8 @@ class VideoFingerprintDatabase:
             item["sims"], query_geom_by_fidx, item["db_geom_by_fidx"],
             matcher,
         )
+        if self._geom_diag:
+            self._log_geom_diagnostics(item["vid_id"], frame_matches)
         # 幾何検証済み候補の代表スコア（インライア正規化）を採否に使う
         max_sim = max(geom_scores) if geom_scores else 0.0
         if max_sim < threshold:
@@ -783,6 +791,38 @@ class VideoFingerprintDatabase:
                 geom_scores.append(best_score)
 
         return frame_matches, geom_scores
+
+    def _log_geom_diagnostics(
+        self, vid_id: str, frame_matches: List[Dict]
+    ) -> None:
+        """各一致フレームを (クエリ時刻→DB時刻, インライア数) の一覧でログ出力する
+
+        区間のクエリ側スパンが何に由来するかを調べる調査用。幾何一致した
+        （候補が1件以上ある）フレームのみを、クエリ時刻の昇順で出力する。
+        スコアは _geom_inlier_saturation で正規化済みのため、インライア数は
+        score×sat で復元する（score が1.0飽和のものは実インライアが飽和点以上）。
+        """
+        sat = self._geom_inlier_saturation
+        lines: List[str] = []
+        for fm in sorted(frame_matches, key=lambda f: f.get("query_ts", 0.0)):
+            cands = fm.get("candidates", [])
+            if not cands:
+                continue
+            q = fm.get("query_ts", 0.0)
+            pair_txt = ", ".join(
+                "db%.1fs(inl%s%d)" % (
+                    d, "≥" if s >= 1.0 else "", int(round(s * sat))
+                )
+                for d, s in sorted(cands, key=lambda c: -c[1])
+            )
+            lines.append("  q%5.1fs -> %s" % (q, pair_txt))
+        if not lines:
+            self.logger.info("[geom-diag] %s: 一致フレーム無し", vid_id)
+            return
+        self.logger.info(
+            "[geom-diag] %s: 一致フレーム=%d件\n%s",
+            vid_id, len(lines), "\n".join(lines),
+        )
 
     @staticmethod
     def _fit_dominant_alignment(

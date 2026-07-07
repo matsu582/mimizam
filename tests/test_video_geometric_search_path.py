@@ -68,6 +68,7 @@ class TestGeometricSearchPath(unittest.TestCase):
         db._geom_region_db_gap = 45.0
         db._geom_max_workers = 1
         db._geom_max_candidates = 0
+        db._geom_diag = False
         import logging
         db.logger = logging.getLogger("test.vdb")
         return db
