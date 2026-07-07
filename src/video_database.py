@@ -10,6 +10,7 @@
 import logging
 import math
 import os
+import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import List, Optional, Dict, Tuple
 
@@ -401,6 +402,12 @@ class VideoFingerprintDatabase:
                 geom_candidates = candidate_video_ids[
                     :self._geom_max_candidates
                 ]
+            # 各段の所要時間・データ量を計測してボトルネックを可視化する。
+            t_sims = 0.0
+            t_db_read = 0.0
+            t_prep = 0.0
+            db_read_bytes = 0
+            db_read_frames = 0
             work: List[dict] = []
             for vid_id in geom_candidates:
                 raw_frames = frames_by_video.get(vid_id, [])
@@ -411,10 +418,12 @@ class VideoFingerprintDatabase:
                     for fidx, ts, fp_blob in raw_frames
                 ]
                 d_mat = np.stack([d_fp for _, _, d_fp in db_frame_vecs])
+                _t0 = time.perf_counter()
                 with np.errstate(all="ignore"):
                     sims = q_mat @ d_mat.T
                 np.nan_to_num(sims, copy=False, nan=0.0, posinf=0.0,
                               neginf=0.0)
+                t_sims += time.perf_counter() - _t0
                 db_ts_arr = np.array(
                     [d_ts for _, d_ts, _ in db_frame_vecs], dtype=np.float64
                 )
@@ -432,11 +441,16 @@ class VideoFingerprintDatabase:
                 ] = {}
                 # 必要なフレームの生記述子だけをDBから読み込む（無関係フレームの
                 # 数百KB×多数の読み込みを避ける）。
-                for fidx, _ts, arr in self.get_frame_descriptors(
-                    vid_id, needed_fidx,
-                ):
+                _t0 = time.perf_counter()
+                db_rows = self.get_frame_descriptors(vid_id, needed_fidx)
+                t_db_read += time.perf_counter() - _t0
+                _t0 = time.perf_counter()
+                for fidx, _ts, arr in db_rows:
+                    db_read_bytes += arr.nbytes
+                    db_read_frames += 1
                     kpt, desc = split_raw_descriptor(arr)
                     db_geom_by_fidx[fidx] = self._prep_geom_frame(kpt, desc)
+                t_prep += time.perf_counter() - _t0
                 # 再登録で生記述子は必ず保存される前提。無い映像は照合対象外。
                 if not db_geom_by_fidx:
                     continue
@@ -460,14 +474,24 @@ class VideoFingerprintDatabase:
             else:
                 max_workers = os.cpu_count() or 4
             max_workers = max(1, min(max_workers, n_work))
+            _t0 = time.perf_counter()
             if max_workers <= 1 or n_work <= 1:
-                verified = (_verify(it) for it in work)
+                verified = list(_verify(it) for it in work)
             else:
                 with ThreadPoolExecutor(max_workers=max_workers) as ex:
                     verified = list(ex.map(_verify, work))
+            t_verify = time.perf_counter() - _t0
             for res in verified:
                 if res is not None:
                     results.append(res)
+            self.logger.info(
+                "[geom-timing] 候補=%d 検証ワーカ=%d | "
+                "類似度行列(ANN)=%.3fs | DB記述子読込=%.3fs "
+                "(%d frames, %.1f MB) | 記述子整形=%.3fs | "
+                "幾何検証(BF/RANSAC)=%.3fs",
+                n_work, max_workers, t_sims, t_db_read, db_read_frames,
+                db_read_bytes / 1e6, t_prep, t_verify,
+            )
         else:
             for vid_id in candidate_video_ids:
                 raw_frames = frames_by_video.get(vid_id, [])

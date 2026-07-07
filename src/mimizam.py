@@ -13,6 +13,7 @@ import shutil
 import logging
 import tempfile
 import subprocess
+import time
 from typing import List, Optional, Dict, Any, Tuple
 from pathlib import Path
 import json
@@ -647,8 +648,13 @@ class Mimizam:
                 )
 
             # Step 1: フレーム指紋のANN近傍投票で候補絞り込み
+            _t_ann = time.perf_counter()
             candidates = vdb.search_frame_candidates(
                 fp.frame_fingerprints, top_k=top_k * 2
+            )
+            self.logger.info(
+                "[geom-timing] ANN候補絞り込み(得票)=%.3fs, 候補=%d件",
+                time.perf_counter() - _t_ann, len(candidates),
             )
 
             if not use_frame_matching or not candidates:
