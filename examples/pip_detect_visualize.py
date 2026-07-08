@@ -37,7 +37,16 @@ from mimizam import (
     detect_pip_regions,
     sample_frames_from_video,
 )
-from mimizam.src.video_fingerprinter import VideoFingerprintConfig
+
+# 検索で使用する上位矩形数の既定。VideoFingerprintConfig.pip_max_regions が
+# 利用できればそれに合わせ、無ければ1件（最も確度の高い矩形のみ）とする。
+try:
+    from mimizam.src.video_fingerprinter import VideoFingerprintConfig
+    DEFAULT_MAX_REGIONS = getattr(
+        VideoFingerprintConfig(), "pip_max_regions", 1
+    )
+except Exception:
+    DEFAULT_MAX_REGIONS = 1
 
 logging.basicConfig(
     level=logging.INFO,
@@ -117,7 +126,7 @@ def _print_regions(regions: List[PipRegion], used_count: int) -> None:
 
 
 def main() -> int:
-    default_max = VideoFingerprintConfig().pip_max_regions
+    default_max = DEFAULT_MAX_REGIONS
 
     parser = argparse.ArgumentParser(
         description="PiP矩形検出の可視化ツール",
