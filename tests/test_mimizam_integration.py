@@ -166,6 +166,9 @@ class TestMimizamSQLite(unittest.TestCase):
         self.assertEqual(retrieved_song.title, title)
         self.assertEqual(retrieved_song.artist, artist)
         self.assertEqual(retrieved_song.file_path, self.test_audio_file)
+        # 楽曲長（duration）が登録・取得で往復すること（テスト音声は約3.0秒）
+        self.assertIsNotNone(retrieved_song.duration)
+        self.assertAlmostEqual(retrieved_song.duration, 3.0, delta=0.5)
     
     def test_search_song_exact_match(self):
         """完全一致での楽曲検索テスト"""
@@ -192,6 +195,11 @@ class TestMimizamSQLite(unittest.TestCase):
         self.assertEqual(best_match['song'].id, song_id)
         self.assertGreater(best_match['confidence'], 0.5, "信頼度が低すぎます")
         self.assertGreater(best_match['match_count'], 0)
+
+        # クエリ全長（=クエリ指紋の最大 time_offset）が結果に載ること。
+        # 表示側（audio_from_video_search）が被覆区間バーの基準に使う。
+        self.assertIn('query_duration', best_match)
+        self.assertGreater(best_match['query_duration'], 0.0)
     
     def test_identify_audio(self):
         """音声識別テスト"""

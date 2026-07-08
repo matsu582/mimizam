@@ -48,7 +48,8 @@ class Song:
     title: str
     artist: str
     file_path: str
-    meta: Optional[dict] = None 
+    duration: Optional[float] = None
+    meta: Optional[dict] = None
     created_at: Optional[str] = None
 
 

@@ -79,6 +79,7 @@ class SQLiteBackend(DatabaseBackend):
                     title TEXT NOT NULL,
                     artist TEXT NOT NULL,
                     file_path TEXT NOT NULL,
+                    duration REAL,
                     meta TEXT,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
@@ -129,9 +130,9 @@ class SQLiteBackend(DatabaseBackend):
             cursor = self.connection.cursor()
             meta_json = json.dumps(song.meta, ensure_ascii=False) if song.meta else None
             cursor.execute("""
-                INSERT OR REPLACE INTO songs (id, title, artist, file_path, meta)
-                VALUES (?, ?, ?, ?, ?)
-            """, (song.id, song.title, song.artist, song.file_path, meta_json))
+                INSERT OR REPLACE INTO songs (id, title, artist, file_path, meta, duration)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """, (song.id, song.title, song.artist, song.file_path, meta_json, song.duration))
             self.connection.commit()
             return True
         except Exception as e:
@@ -217,7 +218,7 @@ class SQLiteBackend(DatabaseBackend):
         try:
             cursor = self.connection.cursor()
             cursor.execute("""
-                SELECT id, title, artist, file_path, created_at, meta
+                SELECT id, title, artist, file_path, created_at, meta, duration
                 FROM songs
                 WHERE id = ?
             """, (song_id,))
@@ -230,7 +231,7 @@ class SQLiteBackend(DatabaseBackend):
                         meta = json.loads(row[5])
                     except Exception:
                         meta = None
-                return Song(id=row[0], title=row[1], artist=row[2], file_path=row[3], created_at=row[4], meta=meta)
+                return Song(id=row[0], title=row[1], artist=row[2], file_path=row[3], created_at=row[4], meta=meta, duration=row[6])
         except Exception as e:
             self.logger.error(f"SQLite song retrieval error: {e}")
         
@@ -249,7 +250,7 @@ class SQLiteBackend(DatabaseBackend):
                 batch = unique_ids[i:i + batch_size]
                 placeholders = ','.join('?' * len(batch))
                 cursor.execute(f"""
-                    SELECT id, title, artist, file_path, created_at, meta
+                    SELECT id, title, artist, file_path, created_at, meta, duration
                     FROM songs
                     WHERE id IN ({placeholders})
                 """, batch)
@@ -263,6 +264,7 @@ class SQLiteBackend(DatabaseBackend):
                     song_map[row[0]] = Song(
                         id=row[0], title=row[1], artist=row[2],
                         file_path=row[3], created_at=row[4], meta=meta,
+                        duration=row[6],
                     )
         except Exception as e:
             self.logger.error(f"SQLite batch song retrieval error: {e}")
@@ -274,7 +276,7 @@ class SQLiteBackend(DatabaseBackend):
         try:
             cursor = self.connection.cursor()
             cursor.execute("""
-                SELECT id, title, artist, file_path, created_at, meta
+                SELECT id, title, artist, file_path, created_at, meta, duration
                 FROM songs
                 ORDER BY title, artist
             """)
@@ -286,7 +288,7 @@ class SQLiteBackend(DatabaseBackend):
                         meta = json.loads(row[5])
                     except Exception:
                         meta = None
-                songs.append(Song(id=row[0], title=row[1], artist=row[2], file_path=row[3], created_at=row[4], meta=meta))
+                songs.append(Song(id=row[0], title=row[1], artist=row[2], file_path=row[3], created_at=row[4], meta=meta, duration=row[6]))
         except Exception as e:
             self.logger.error(f"SQLite song list retrieval error: {e}")
         

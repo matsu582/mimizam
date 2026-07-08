@@ -54,7 +54,8 @@ class TestCrossBackendConsistency(unittest.TestCase):
             id="test_song_container",
             title="Container Test Song",
             artist="Test Artist",
-            file_path="/path/to/test.wav"
+            file_path="/path/to/test.wav",
+            duration=12.5,
         )
 
         self.test_fingerprints = [
@@ -82,6 +83,12 @@ class TestCrossBackendConsistency(unittest.TestCase):
         self.assertIsNotNone(
             retrieved_song, f"{backend_name}での楽曲取得に失敗")
         self.assertEqual(retrieved_song.title, self.test_song.title)
+        # 楽曲長（duration）が全backendで往復すること
+        self.assertIsNotNone(
+            retrieved_song.duration,
+            f"{backend_name}でduration が保持されていない")
+        self.assertAlmostEqual(
+            retrieved_song.duration, self.test_song.duration, delta=0.01)
 
         # フィンガープリント追加
         success = db.add_fingerprints(

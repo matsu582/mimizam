@@ -377,13 +377,8 @@ AKAZE記述子→VLAD集約→PCA圧縮の変換パイプラインを保持し�
     )
     parser.add_argument(
         "--database", "-d",
-        default="visual_fingerprints.db",
-        help="音声指紋DBのパス（デフォルト: visual_fingerprints.db）",
-    )
-    parser.add_argument(
-        "--video-db",
-        default=None,
-        help="映像指紋DBのパス（省略時は音声DBと同じバックエンドを使用）",
+        default="video_fingerprints.db",
+        help="映像指紋DBのパス（デフォルト: video_fingerprints.db）",
     )
     parser.add_argument(
         "--model", "-m",
@@ -456,7 +451,7 @@ AKAZE記述子→VLAD集約→PCA圧縮の変換パイプラインを保持し�
         logger.info(f"モデル読み込み完了: {args.model}")
 
         # 映像指紋DB統計を表示
-        stats = mimizam.get_video_database_stats(args.video_db)
+        stats = mimizam.get_video_database_stats(args.database)
         video_count = stats.get("videos", 0)
         logger.info(
             f"映像指紋DB統計 - "
@@ -484,7 +479,7 @@ AKAZE記述子→VLAD集約→PCA圧縮の変換パイプラインを保持し�
                 top_k=args.top_k,
                 use_frame_matching=use_frame,
                 show_details=args.details,
-                video_db_path=args.video_db,
+                video_db_path=args.database,
                 detect_pip=args.detect_pip,
             )
 
@@ -494,7 +489,7 @@ AKAZE記述子→VLAD集約→PCA圧縮の変換パイプラインを保持し�
                 top_k=args.top_k,
                 use_frame_matching=use_frame,
                 show_details=args.details,
-                video_db_path=args.video_db,
+                video_db_path=args.database,
                 detect_pip=args.detect_pip,
             )
 
