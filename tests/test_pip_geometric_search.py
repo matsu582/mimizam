@@ -11,7 +11,16 @@ import types
 import unittest
 from unittest import mock
 
-from mimizam import Mimizam, VideoFingerprinter, VideoFingerprint, PipRegion
+import cv2
+import numpy as np
+
+from mimizam import (
+    Mimizam, VideoFingerprinter, VideoFingerprintConfig,
+    VideoFingerprint, PipRegion,
+)
+from mimizam.src.video_fingerprinter import (
+    KEYPOINT_COLS, split_raw_descriptor,
+)
 
 
 def _make_mimizam():
@@ -166,6 +175,98 @@ class TestLimitPipRegions(unittest.TestCase):
         regions = [self._region(s) for s in (0.5, 3.0, 1.0)]
         limited = VideoFingerprinter._limit_pip_regions(regions, 0)
         self.assertEqual(len(limited), 3)
+
+
+class _FakeKp:
+    def __init__(self, pt):
+        self.pt = pt
+
+
+class _FakeAkaze:
+    """一定数のキーポイント/61次元記述子を返すダミーAKAZE"""
+
+    def detectAndCompute(self, gray, mask):
+        n = 8
+        kps = [_FakeKp((float(i), float(i * 2))) for i in range(n)]
+        desc = np.full((n, 61), 7, dtype=np.uint8)
+        return kps, desc
+
+
+class _FakeCap:
+    def isOpened(self):
+        return True
+
+    def get(self, prop):
+        if prop == cv2.CAP_PROP_FRAME_COUNT:
+            return 120
+        if prop == cv2.CAP_PROP_FPS:
+            return 24.0
+        return 0
+
+    def set(self, *args):
+        return True
+
+    def read(self):
+        return True, np.zeros((1080, 1920, 3), dtype=np.uint8)
+
+    def release(self):
+        pass
+
+
+class TestPipRawDescriptorFormat(unittest.TestCase):
+    """PiP矩形の生記述子が通常経路と同じN×(2+D)形式で保持されること
+
+    幾何検証は座標2列＋記述子D列を前提に列分割するため、素のN×Dで保存すると
+    query=N×(D-2) と DB=N×D の列数不一致で batchDistance が落ちる。この回帰を防ぐ。
+    """
+
+    def test_pip_raw_descriptors_are_packed_with_keypoints(self):
+        cfg = VideoFingerprintConfig()
+        cfg.store_raw_descriptors = True
+        vfp = VideoFingerprinter(cfg)
+
+        vfp.encoder = mock.MagicMock()
+        vfp.encoder.is_trained = True
+
+        def _encode(per_frame_desc):
+            return VideoFingerprint(
+                frame_fingerprints=[
+                    (0, 0.0, np.zeros(512, dtype=np.float32))
+                ],
+                frame_count=len(per_frame_desc),
+                descriptor_count=sum(d.shape[0] for _, _, d in per_frame_desc),
+            )
+
+        vfp.encoder.encode_video.side_effect = _encode
+
+        region = PipRegion(
+            x=100, y=100, w=400, h=300, area_ratio=0.1, pip_score=3.0,
+        )
+
+        with mock.patch(
+            "mimizam.src.pip_detector.sample_frames_from_video",
+            return_value=[np.zeros((10, 10, 3), dtype=np.uint8)],
+        ), mock.patch(
+            "mimizam.src.pip_detector.detect_pip_regions",
+            return_value=[region],
+        ), mock.patch(
+            "mimizam.src.video_fingerprinter.cv2.VideoCapture",
+            return_value=_FakeCap(),
+        ), mock.patch(
+            "mimizam.src.video_fingerprinter._create_akaze",
+            return_value=_FakeAkaze(),
+        ), mock.patch("os.path.exists", return_value=True):
+            results = vfp.fingerprint_pip_regions("dummy.mp4")
+
+        self.assertEqual(len(results), 1)
+        _region, fp = results[0]
+        self.assertIsNotNone(fp.raw_descriptors)
+        for _fidx, _ts, arr in fp.raw_descriptors:
+            # 2列(座標) + 61列(記述子)
+            self.assertEqual(arr.shape[1], KEYPOINT_COLS + 61)
+            coords, desc = split_raw_descriptor(arr)
+            self.assertEqual(coords.shape[1], KEYPOINT_COLS)
+            self.assertEqual(desc.shape[1], 61)
 
 
 if __name__ == "__main__":

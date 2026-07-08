@@ -1187,6 +1187,7 @@ class VideoFingerprinter:
 
         for region in pip_regions:
             per_frame_desc = []
+            per_frame_kpts = []
 
             for fidx in sample_indices:
                 cap.set(cv2.CAP_PROP_POS_FRAMES, fidx)
@@ -1218,13 +1219,21 @@ class VideoFingerprinter:
                     per_frame_desc.append(
                         (fidx, ts, desc.astype(np.float32))
                     )
+                    # 幾何検証(RANSAC)用にキーポイント座標(N×2)も保持する
+                    coords = np.array(
+                        [kp.pt for kp in kps], dtype=np.float32
+                    ).reshape(-1, KEYPOINT_COLS)
+                    per_frame_kpts.append((fidx, ts, coords))
 
             if not per_frame_desc:
                 continue
 
             fp = self.encoder.encode_video(per_frame_desc)
             if self.config.store_raw_descriptors:
-                fp.raw_descriptors = per_frame_desc
+                # 通常経路と同じN×(2+D)形式で保持し、幾何検証経路と整合させる
+                fp.raw_descriptors = pack_raw_descriptors(
+                    per_frame_desc, per_frame_kpts
+                )
             results.append((region, fp))
 
             logger.info(
