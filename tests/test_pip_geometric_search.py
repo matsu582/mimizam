@@ -176,6 +176,16 @@ class TestLimitPipRegions(unittest.TestCase):
         limited = VideoFingerprinter._limit_pip_regions(regions, 0)
         self.assertEqual(len(limited), 3)
 
+    def test_default_config_keeps_only_top_region(self):
+        # 既定では最も確度の高い1件のみ採用する
+        cfg = VideoFingerprintConfig()
+        self.assertEqual(cfg.pip_max_regions, 1)
+        regions = [self._region(s) for s in (0.5, 3.0, 1.0)]
+        limited = VideoFingerprinter._limit_pip_regions(
+            regions, cfg.pip_max_regions
+        )
+        self.assertEqual([r.pip_score for r in limited], [3.0])
+
 
 class _FakeKp:
     def __init__(self, pt):

@@ -254,7 +254,8 @@ class VideoFingerprintConfig:
     store_raw_descriptors: bool = False
 
     # PiP矩形検出で指紋化・検索する矩形の最大数（pip_score上位から採用、0で無制限）
-    pip_max_regions: int = 3
+    # 既定は最も確度の高い1件のみ。偽陽性の下位矩形が結果を汚すのを防ぐ。
+    pip_max_regions: int = 1
 
 
 @dataclass
