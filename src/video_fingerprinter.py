@@ -253,6 +253,9 @@ class VideoFingerprintConfig:
     # 肥大化する。既定Falseで保持しない。
     store_raw_descriptors: bool = False
 
+    # PiP矩形検出で指紋化・検索する矩形の最大数（pip_score上位から採用、0で無制限）
+    pip_max_regions: int = 3
+
 
 @dataclass
 class VideoFrameInfo:
@@ -1107,6 +1110,18 @@ class VideoFingerprinter:
             fp.raw_descriptors = per_frame_desc
         return fp
 
+    @staticmethod
+    def _limit_pip_regions(
+        pip_regions: List['PipRegion'], max_regions: int
+    ) -> List['PipRegion']:
+        """PiP矩形を pip_score 降順で最大 max_regions 件に絞る（max_regions<=0で無制限）"""
+        ordered = sorted(
+            pip_regions, key=lambda r: r.pip_score, reverse=True
+        )
+        if max_regions > 0:
+            return ordered[:max_regions]
+        return ordered
+
     def fingerprint_pip_regions(
         self, video_path: str
     ) -> List[Tuple['PipRegion', VideoFingerprint]]:
@@ -1144,6 +1159,12 @@ class VideoFingerprinter:
 
         if not pip_regions:
             return []
+
+        # 確度(pip_score)の高い矩形から最大 pip_max_regions 件に絞る。矩形数×候補数の
+        # 幾何検証コストを抑えるため、偽陽性を含みうる下位矩形は指紋化しない。
+        pip_regions = self._limit_pip_regions(
+            pip_regions, self.config.pip_max_regions
+        )
 
         results = []
         target = self.config.normalize_long_side

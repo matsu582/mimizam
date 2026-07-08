@@ -320,6 +320,14 @@ def _print_detail_section(result: Dict[str, Any]) -> None:
 
         print(f"     --- 映像マッチ ---")
         print(f"     映像類似度: {v_sim:.3f}")
+        pip_region = visual.get("pip_region")
+        if pip_region:
+            print(
+                "     PiP一致: 矩形 "
+                f"({pip_region['x']},{pip_region['y']}) "
+                f"{pip_region['w']}x{pip_region['h']} "
+                f"(pip_score {pip_region['pip_score']:.2f})"
+            )
         if votes is not None:
             print(f"     候補得票(ANN): {votes}票 平均類似度: "
                   f"{(video_sim or 0.0):.3f}")

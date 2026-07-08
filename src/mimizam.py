@@ -14,7 +14,7 @@ import logging
 import tempfile
 import subprocess
 import time
-from typing import List, Optional, Dict, Any, Tuple
+from typing import List, Optional, Dict, Any, Tuple, TYPE_CHECKING
 from pathlib import Path
 import json
 
@@ -24,6 +24,9 @@ from .audio_fingerprinter import AudioFingerprinter
 from .fingerprint_database import FingerprintDatabase, FingerprintMatcher
 from .database_base import DatabaseConfig, Song, Fingerprint, Video
 from .exceptions import MimizamError, DatabaseError, AudioProcessingError
+
+if TYPE_CHECKING:
+    from .video_database import VideoFingerprintDatabase
 
 
 class Mimizam:
@@ -648,6 +651,71 @@ class Mimizam:
         strength = 0.5 * coverage + 0.5 * vote_ratio
         return frame_similarity * (floor + (1.0 - floor) * strength)
 
+    def _match_and_rank(
+        self,
+        vdb: 'VideoFingerprintDatabase',
+        frame_fingerprints: List[Tuple[int, float, np.ndarray]],
+        raw_descriptors: Optional[List[Tuple[int, float, np.ndarray]]],
+        top_k: int,
+    ) -> List[Dict[str, Any]]:
+        """フレーム指紋から候補を絞り込み、幾何検証して実効スコア順に整列する
+
+        通常（全画面）経路とPiP矩形経路で共通の照合手順:
+          1. フレーム指紋のANN近傍投票で候補映像を絞り込む
+          2. 候補をフレーム単位の幾何検証（RANSAC）で精密照合する
+          3. 被覆率・得票率を反映した実効映像スコアを付与して降順に整列する
+
+        Args:
+            vdb: 映像データベース
+            frame_fingerprints: クエリのフレーム単位指紋
+            raw_descriptors: 幾何検証用のクエリ生記述子（無ければ非幾何にフォールバック）
+            top_k: ANN絞り込みの候補数（実際の返却は呼び出し側で切り詰める）
+
+        Returns:
+            実効スコア降順の結果リスト（時間整合区間が無い候補は含まれない）
+        """
+        _t_ann = time.perf_counter()
+        candidates = vdb.search_frame_candidates(
+            frame_fingerprints, top_k=top_k * 2
+        )
+        self.logger.info(
+            "[geom-timing] ANN候補絞り込み(得票)=%.3fs, 候補=%d件",
+            time.perf_counter() - _t_ann, len(candidates),
+        )
+        if not candidates:
+            return []
+
+        candidate_ids = [c["video_id"] for c in candidates]
+        frame_results = vdb.search_video_with_frame_matching(
+            frame_fingerprints, candidate_ids, query_raw=raw_descriptors,
+        )
+
+        cand_map = {c["video_id"]: c for c in candidates}
+        results: List[Dict[str, Any]] = []
+        for fm in frame_results:
+            vid = fm["video_id"]
+            cand = cand_map.get(vid, {})
+            votes = cand.get("votes", 0)
+            md = fm.get("match_details", {})
+            effective = self._effective_video_score(
+                fm["frame_similarity"], md, votes
+            )
+            entry = {
+                "video_id": vid,
+                "video_similarity": cand.get("similarity", 0.0),
+                "video": cand.get("video"),
+                "vote_count": votes,
+                "frame_similarity": fm["frame_similarity"],
+                # ランキング/統合に使う実効スコアは被覆率・票数を反映
+                "similarity": effective,
+            }
+            if "match_details" in fm:
+                entry["match_details"] = fm["match_details"]
+            results.append(entry)
+
+        results.sort(key=lambda r: r["similarity"], reverse=True)
+        return results
+
     def search_video(
         self,
         query_file_path: str,
@@ -712,60 +780,22 @@ class Mimizam:
                     context={'query_file_path': query_file_path},
                 )
 
-            # Step 1: フレーム指紋のANN近傍投票で候補絞り込み
-            _t_ann = time.perf_counter()
-            candidates = vdb.search_frame_candidates(
-                fp.frame_fingerprints, top_k=top_k * 2
-            )
-            self.logger.info(
-                "[geom-timing] ANN候補絞り込み(得票)=%.3fs, 候補=%d件",
-                time.perf_counter() - _t_ann, len(candidates),
-            )
-
-            if not use_frame_matching or not candidates:
+            # Step 1+2: ANN近傍投票での候補絞り込み → フレーム単位の幾何検証。
+            # 一連は通常経路とPiP経路で共通のため _match_and_rank に集約する。
+            if not use_frame_matching:
+                _t_ann = time.perf_counter()
+                candidates = vdb.search_frame_candidates(
+                    fp.frame_fingerprints, top_k=top_k * 2
+                )
+                self.logger.info(
+                    "[geom-timing] ANN候補絞り込み(得票)=%.3fs, 候補=%d件",
+                    time.perf_counter() - _t_ann, len(candidates),
+                )
                 results = candidates[:top_k]
             else:
-                # Step 2: フレーム単位マッチングで精密照合
-                # クエリに生記述子があればANN上位候補をRANSAC幾何検証で再判定する
-                candidate_ids = [c["video_id"] for c in candidates]
-                frame_results = vdb.search_video_with_frame_matching(
-                    fp.frame_fingerprints, candidate_ids,
-                    query_raw=fp.raw_descriptors,
-                )
-
-                # 結果を統合
-                frame_map = {
-                    r["video_id"]: r for r in frame_results
-                }
-                cand_map = {c["video_id"]: c for c in candidates}
-                # フレームマッチで時間的一貫性が確認された結果のみ採用
-                results = []
-                for vid, fm in frame_map.items():
-                    cand = cand_map.get(vid, {})
-                    votes = cand.get("votes", 0)
-                    md = fm.get("match_details", {})
-                    effective = self._effective_video_score(
-                        fm["frame_similarity"], md, votes
-                    )
-                    entry = {
-                        "video_id": vid,
-                        "video_similarity": cand.get("similarity", 0.0),
-                        "video": cand.get("video"),
-                        "vote_count": votes,
-                        "frame_similarity": fm["frame_similarity"],
-                        # ランキング/統合に使う実効スコアは被覆率・票数を反映
-                        "similarity": effective,
-                    }
-                    if "match_details" in fm:
-                        entry["match_details"] = fm[
-                            "match_details"
-                        ]
-                    results.append(entry)
-
-                results.sort(
-                    key=lambda r: r["similarity"], reverse=True
-                )
-                results = results[:top_k]
+                results = self._match_and_rank(
+                    vdb, fp.frame_fingerprints, fp.raw_descriptors, top_k
+                )[:top_k]
 
             # Step 3: PiP矩形検出 → 矩形内指紋でDB検索
             if detect_pip:
@@ -1114,25 +1144,39 @@ class Mimizam:
     def _search_pip_regions(
         self, query_path, vfp, vdb, top_k
     ) -> List[Dict[str, Any]]:
-        """PiP矩形内の指紋でDB検索"""
+        """PiP矩形内の指紋でDB検索する
+
+        矩形内指紋も通常経路と同じ _match_and_rank（ANN絞り込み→フレーム単位の
+        幾何検証→実効スコア化）に通す。これにより PiP 結果も match_details（区間）と
+        実効スコアを持ち、通常経路の結果と同じ尺度で統合・順位付けできる。
+        幾何検証にはクエリ側の生記述子が要るため、指紋生成の間だけ
+        store_raw_descriptors を有効化する（通常経路の search_video と同型）。
+        """
         try:
-            pip_fps = vfp.fingerprint_pip_regions(query_path)
+            prev_store_raw = vfp.config.store_raw_descriptors
+            vfp.config.store_raw_descriptors = True
+            try:
+                pip_fps = vfp.fingerprint_pip_regions(query_path)
+            finally:
+                vfp.config.store_raw_descriptors = prev_store_raw
             if not pip_fps:
                 return []
 
-            pip_results = []
+            pip_results: List[Dict[str, Any]] = []
             for region, pip_fp in pip_fps:
-                matches = vdb.search_frame_candidates(
-                    pip_fp.frame_fingerprints, top_k=top_k
+                region_info = {
+                    "x": region.x, "y": region.y,
+                    "w": region.w, "h": region.h,
+                    "pip_score": region.pip_score,
+                }
+                entries = self._match_and_rank(
+                    vdb, pip_fp.frame_fingerprints,
+                    getattr(pip_fp, "raw_descriptors", None), top_k,
                 )
-                for m in matches:
-                    m["pip_region"] = {
-                        "x": region.x, "y": region.y,
-                        "w": region.w, "h": region.h,
-                        "pip_score": region.pip_score,
-                    }
-                    m["pip_similarity"] = m["similarity"]
-                pip_results.extend(matches)
+                for e in entries:
+                    # どのPiP矩形由来の一致かを保持する（表示・デバッグ用）
+                    e["pip_region"] = region_info
+                pip_results.extend(entries)
 
             return pip_results
         except Exception as exc:
@@ -1143,26 +1187,25 @@ class Mimizam:
     def _merge_pip_results(
         base_results, pip_results, top_k
     ) -> List[Dict[str, Any]]:
-        """通常検索結果とPiP検索結果を統合"""
-        existing_ids = {r["video_id"] for r in base_results}
-        merged = list(base_results)
+        """通常検索結果とPiP検索結果を実効スコア基準で統合する
+
+        両経路とも同じ実効スコア（similarity）と match_details を持つため、
+        video_id ごとに実効スコアが高い方を採用する。PiP側が勝った場合は
+        その pip_region（一致した矩形）も引き継ぐ。
+        """
+        by_id: Dict[str, Dict[str, Any]] = {}
+        for r in base_results:
+            by_id[r["video_id"]] = r
 
         for pr in pip_results:
             vid = pr["video_id"]
-            if vid in existing_ids:
-                for r in merged:
-                    if r["video_id"] == vid:
-                        pip_sim = pr.get("pip_similarity", 0)
-                        if pip_sim > r.get("similarity", 0):
-                            r["similarity"] = pip_sim
-                            r["pip_region"] = pr.get("pip_region")
-                            r["pip_similarity"] = pip_sim
-                        break
-            else:
-                pr["similarity"] = pr.get("pip_similarity", 0)
-                merged.append(pr)
-                existing_ids.add(vid)
+            cur = by_id.get(vid)
+            if cur is None or pr.get("similarity", 0) > cur.get(
+                "similarity", 0
+            ):
+                by_id[vid] = pr
 
+        merged = list(by_id.values())
         merged.sort(
             key=lambda r: r.get("similarity", 0), reverse=True
         )
