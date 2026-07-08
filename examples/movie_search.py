@@ -82,7 +82,6 @@ def create_mimizam_instance(args) -> Mimizam:
     matcher_config = {
         "min_confidence": 0.1,
         "max_results": args.top_k * 4,
-        "scoring_method": "hybrid",
     }
 
     if args.db_type == "sqlite":

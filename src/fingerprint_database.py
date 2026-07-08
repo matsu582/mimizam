@@ -185,11 +185,6 @@ class FingerprintMatcher:
         self.logger = logging.getLogger(__name__)
         self.min_confidence = 0.1
         self.max_results = 10
-        
-        # スコアリング方式の選択。尺度不変ハッシュへ移行したため time_scale/
-        # freq_scale のブルートフォース列挙は廃止し、いずれの方式も単一検索＋
-        # 頑健直線回帰の同一経路へ委譲する（名称は後方互換のため保持）。
-        self.scoring_method = "hybrid"  # "hybrid", "histogram", "detailed"
 
         # 整列許容度（秒）。傾きで速度変化を吸収した後のオフセット残差の許容幅。
         # 大きすぎると無関係曲の偶発整列が増えるため、ピーク時間分解能(約23ms)に
@@ -219,57 +214,31 @@ class FingerprintMatcher:
         self.slope_min_dq = 1.0              # 傾き算出に使う query 時間差の下限（秒）
         self.slope_top_candidates = 5        # インライア評価に回す傾き候補ビン数
     
-    def set_scoring_method(self, method: str) -> None:
-        """
-        スコアリング方式を設定
-        
-        Args:
-            method: "hybrid" (2段階), "histogram" (ヒストグラムのみ), "detailed" (多面的のみ)
-        """
-        if method not in ["hybrid", "histogram", "detailed"]:
-            raise ValueError("method must be 'hybrid', 'histogram', or 'detailed'")
-        self.scoring_method = method
-        self.logger.info(f"Scoring method set to {method}")
-    
     def find_matches(self, query_fingerprints: List[Fingerprint], 
                     min_matches: int = 5, top_k: int = 10, 
                     include_details: bool = True) -> List[Dict[str, Any]]:
         """
-        選択されたスコアリング方式でクエリフィンガープリントに一致する楽曲を検索
-        
+        クエリフィンガープリントに一致する楽曲を検索
+
+        尺度不変ハッシュ前提の単一検索マッチング（速度・ピッチ変化に頑健）。
+        ハッシュ自体が時間伸縮・ピッチ変化に不変なため、DB検索は1回のみで
+        候補集合が完結する（time_scale/freq_scale のブルートフォース列挙は行わない）。
+
         Args:
             query_fingerprints: クエリフィンガープリントのリスト
             min_matches: 必要な最小フィンガープリント一致数
-            top_k: ヒストグラム段階で絞り込む候補数（hybrid方式のみ）
+            top_k: 返す候補数の上限
             include_details: 詳細なマッチ情報を含めるかどうか（デフォルト: True）
-            
+
         Returns:
             楽曲情報と信頼度スコアを含む一致辞書のリスト
             song_info と詳細なマッチ情報を含む
         """
         if not query_fingerprints:
             return []
-        
-        # スコアリング方式に応じた最小一致数の調整
-        adjusted_min_matches = min_matches
-        if self.scoring_method in ["histogram", "hybrid"]:
-            adjusted_min_matches = max(5, min_matches // 2)  # ヒストグラム方式では5以上を維持
 
-        import time
-        self.logger.info("[BENCHMARK] start benchmark")
-        t0 = time.perf_counter()
+        results = self._find_matches(query_fingerprints, min_matches, top_k)
 
-        if self.scoring_method == "hybrid":
-            results = self._find_matches_hybrid(query_fingerprints, adjusted_min_matches, top_k)
-        elif self.scoring_method == "histogram":
-            results = self._find_matches_histogram(query_fingerprints, adjusted_min_matches, top_k)
-        elif self.scoring_method == "detailed":
-            results = self._find_matches_detailed(query_fingerprints, min_matches, top_k)
-        else:
-            raise ValueError(f"Unknown scoring method: {self.scoring_method}")
-        t1 = time.perf_counter()
-        self.logger.info(f"[BENCHMARK] {self.scoring_method}: {t1-t0:.4f}s")
-        
         # song_info と詳細情報を追加
         if results:
             # 楽曲情報はまとめて取得（結果ごとの個別取得によるN+1を回避）
@@ -295,8 +264,8 @@ class FingerprintMatcher:
         
         return results
     
-    def _find_matches_scale_invariant(self, query_fingerprints: List[Fingerprint],
-                                      min_matches: int, top_k: int) -> List[Dict[str, Any]]:
+    def _find_matches(self, query_fingerprints: List[Fingerprint],
+                      min_matches: int, top_k: int) -> List[Dict[str, Any]]:
         """尺度不変ハッシュ前提の単一検索マッチング（速度・ピッチ変化に頑健）
 
         ハッシュ自体が時間伸縮・ピッチ変化に不変なため、time_scale/freq_scale の
@@ -345,19 +314,6 @@ class FingerprintMatcher:
             }
 
         return self._sort_and_limit_results(best_results)[:top_k]
-
-    # 後方互換: scoring_method は挙動を変えず、いずれも尺度不変の単一検索経路へ委譲する。
-    def _find_matches_hybrid(self, query_fingerprints: List[Fingerprint],
-                             min_matches: int, top_k: int) -> List[Dict[str, Any]]:
-        return self._find_matches_scale_invariant(query_fingerprints, min_matches, top_k)
-
-    def _find_matches_histogram(self, query_fingerprints: List[Fingerprint],
-                                min_matches: int, top_k: int = 10) -> List[Dict[str, Any]]:
-        return self._find_matches_scale_invariant(query_fingerprints, min_matches, top_k)
-
-    def _find_matches_detailed(self, query_fingerprints: List[Fingerprint],
-                               min_matches: int, top_k: int = 10) -> List[Dict[str, Any]]:
-        return self._find_matches_scale_invariant(query_fingerprints, min_matches, top_k)
 
     def _estimate_slope_candidates(self, pairs: List[Tuple[float, float]]) -> List[float]:
         """支配傾き（=time_scale）の候補を投票数上位順に返す（ハフ投票）
@@ -650,67 +606,6 @@ class FingerprintMatcher:
         
         return None
     
-    def _calculate_confidence_score(self, match_pairs: List[Tuple[float, float]]) -> float:
-        """
-        一致の時間アライメントに基づいて信頼度スコアを計算
-
-       Args:
-            match_pairs: (query_time_offset, db_time_offset)タプルのリスト
-
-        スコア計算の詳細:
-        - 入力: (query_time_offset, db_time_offset) のペアリスト
-        - まず、各ペアの時間差（query_time - db_time）を計算し、
-          類似の時間差を持つ一致を「アライメントされたグループ」としてまとめる（tolerance=0.3秒）
-        - 最大のアライメントグループのサイズをmax_aligned_matches、全一致数をtotal_matchesとし、
-          base_confidence = max_aligned_matches / total_matches とする
-        - アライメント数が多い場合はボーナス（20件以上:*1.3, 10件以上:*1.2, 5件以上:*1.1）
-        - アライメントグループが多すぎる場合はペナルティ（グループ数>3:*0.9）
-        - 複数の中規模グループがあればボーナス（3件以上のグループ数*0.1, 最大+0.3）
-        - 最終スコアは1.0でクリップ
-
-        例: 30件中25件が同じ時間差で揃っていれば高スコア、
-        一致がバラバラなら低スコア。
-
-        Returns:
-            0と1の間の信頼度スコア
-        """
-        if len(match_pairs) < 2:
-            return 0.0
-        
-        # 改良された許容度で時間アライメントされたグループを検索
-        aligned_groups = self._find_time_aligned_matches(match_pairs, self.time_tolerance)
-        
-        if not aligned_groups:
-            return 0.0
-        
-        # 最大のアライメントされたグループを取得
-        largest_group = max(aligned_groups, key=len)
-        max_aligned_matches = len(largest_group)
-        total_matches = len(match_pairs)
-        
-        # ベース信頼度：アライメントされた一致の比率
-        base_confidence = max_aligned_matches / total_matches
-        
-        # 強いシグナルに対するボーナスを適用
-        if max_aligned_matches >= 20:
-            base_confidence *= 1.3
-        elif max_aligned_matches >= 10:
-            base_confidence *= 1.2
-        elif max_aligned_matches >= 5:
-            base_confidence *= 1.1
-        
-        # 散在する一致に対するペナルティ
-        if len(aligned_groups) > 3:
-            base_confidence *= 0.9
-        
-        # 複数の小さなアライメントされたグループがある場合のボーナス（冗長な証拠）
-        secondary_groups = [g for g in aligned_groups if len(g) >= 3 and g != largest_group]
-        if secondary_groups:
-            secondary_bonus = min(0.1 * len(secondary_groups), 0.3)
-            base_confidence += secondary_bonus
-        
-        return min(base_confidence, 1.0)  # 1.0でキャップ
-    
     def _find_time_aligned_matches(self, match_pairs: List[Tuple[float, float]], 
                                   tolerance: float = 0.2,
                                   time_scale: float = 1.0) -> List[List[Tuple[float, float]]]:
@@ -758,33 +653,6 @@ class FingerprintMatcher:
         
         return groups
     
-    # マルチクライテリア用の品質指標計算メソッド
-    def _calculate_alignment_ratio(self, match_pairs: List[Tuple[float, float]]) -> float:
-        """
-        時間的一貫性を計算（0.5秒以内の時間差を持つマッチの比率）
-        
-        Args:
-            match_pairs: (query_time, db_time)のマッチペアリスト
-            
-        Returns:
-            時間的一貫性比率（0.0-1.0）
-        """
-        if not match_pairs:
-            return 0.0
-        
-        # 時間差は符号付きで計算する。abs()で符号を捨てると +3s と -3s が
-        # 同一視され、鏡像的なズレでも「整列している」と誤評価するため。
-        time_diffs = [query_time - db_time for query_time, db_time in match_pairs]
-        median_offset = np.median(time_diffs)
-        
-        # 0.5秒以内の許容範囲
-        tolerance = 0.5
-        
-        # 符号付きオフセットの中央値からの偏差が許容範囲内のマッチ数を計算
-        aligned_matches = sum(1 for diff in time_diffs if abs(diff - median_offset) <= tolerance)
-        
-        return aligned_matches / len(match_pairs)
-    
     def _calculate_match_density(self, match_pairs: List[Tuple[float, float]]) -> float:
         """
         マッチ密度を計算（単位時間あたりのマッチ数）
@@ -815,8 +683,7 @@ class FingerprintMatcher:
 
         find_matches / search_fingerprints で既に取得済みの
         (query_time, db_time) ペアを直接受け取り、DB再検索を行わずに詳細情報を
-        構築する。これが詳細取得の主経路であり、query_fingerprints から
-        DB再検索する get_detailed_match_info は補助（後方互換）に位置付ける。
+        構築する。詳細取得はこの経路に一本化されている。
 
         Args:
             match_pairs: (query_time, db_time) ペアのリスト
@@ -833,40 +700,6 @@ class FingerprintMatcher:
             # 呼び出し側が倍率を渡さなくても速度変化一致を正しく扱えるよう自動推定する
             time_scale = self._fit_scale_offset(pairs)[0] if pairs else 1.0
         return self._build_detailed_match_info(pairs, time_scale)
-
-    def get_detailed_match_info(self, query_fingerprints: List[Fingerprint], 
-                               song_id: str,
-                               match_pairs: Optional[List[Tuple[float, float]]] = None) -> Dict[str, Any]:
-        """
-        特定の楽曲の詳細なマッチ情報を取得（後方互換API）
-
-        match_pairs 主導の :meth:`detailed_match_info` を推奨する。本メソッドは
-        match_pairs が未指定のとき query_fingerprints から DB を再検索する補助経路で、
-        その再検索経路は非推奨（将来的に削除予定）。
-
-        Args:
-            query_fingerprints: クエリフィンガープリントのリスト（再検索経路でのみ使用）
-            song_id: 詳細を取得する楽曲識別子
-            match_pairs: 取得済みの (query_time, db_time) ペア。指定された場合は
-                DB再検索を行わずこれを使う（推奨経路）。
-            
-        Returns:
-            詳細なマッチ情報を含む辞書
-        """
-        # 取得済みペアがあれば再検索せずそのまま使う（推奨経路）
-        if match_pairs is not None:
-            return self.detailed_match_info(match_pairs)
-
-        # 補助（後方互換）: query_fingerprints から DB を再検索する。非推奨。
-        import warnings
-        warnings.warn(
-            "get_detailed_match_info() の query_fingerprints からの再検索経路は非推奨です。"
-            "取得済みの match_pairs を detailed_match_info(match_pairs) に渡してください。",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        all_matches = self.database.search_fingerprints(query_fingerprints)
-        return self.detailed_match_info(all_matches.get(song_id, []))
 
     def _build_detailed_match_info(self, match_pairs: List[Tuple[float, float]],
                                    time_scale: float = 1.0) -> Dict[str, Any]:
@@ -921,129 +754,6 @@ class FingerprintMatcher:
             'match_positions': match_positions,
             'statistics': statistics
         }
-    
-    def _calculate_peak_prominence(self, hist, peak_idx: int) -> float:
-        """ピークの突出度を計算（ヒストグラム方式）"""
-        
-        if peak_idx == 0 or peak_idx == len(hist) - 1:
-            return 0.0
-            
-        peak_value = hist[peak_idx]
-        if peak_value <= 1:
-            return 0.0
-        
-        # 左右の最小値を探索
-        left_min = min(hist[:peak_idx]) if peak_idx > 0 else peak_value
-        right_min = min(hist[peak_idx+1:]) if peak_idx < len(hist)-1 else peak_value
-        
-        # 突出度計算: (ピーク - 周辺最小値) / ピーク
-        baseline = min(left_min, right_min)
-        prominence = (peak_value - baseline) / peak_value if peak_value > 0 else 0.0
-        
-        return max(0.0, prominence)
-    
-    def _calculate_weighted_offset(self, hist, bin_edges, peak_idx: int) -> float:
-        """重み付きオフセット計算（ピーク周辺の重心）"""
-        
-        # ピーク周辺のビンを取得（±2ビン）
-        start_idx = max(0, peak_idx - 2)
-        end_idx = min(len(hist), peak_idx + 3)
-        
-        weights = hist[start_idx:end_idx]
-        positions = (bin_edges[start_idx:end_idx] + bin_edges[start_idx+1:end_idx+1]) / 2
-        
-        if np.sum(weights) == 0:
-            return (bin_edges[peak_idx] + bin_edges[peak_idx + 1]) / 2
-        
-        # 重心計算
-        weighted_offset = np.average(positions, weights=weights)
-        return weighted_offset
-
-    def _calculate_histogram_confidence(self, max_count: int, total_matches: int, 
-                                       prominence: float, time_scale: float) -> float:
-        """ヒストグラム信頼度計算"""
-        
-        # 基本スコア：最大ビンの相対頻度
-        base_score = max_count / total_matches if total_matches > 0 else 0.0
-        
-        # ヒストグラム方式: ピークの突出度を重視
-        prominence_boost = 1.0 + (prominence * 2.0)  # 突出度による強化
-        
-        # 一致数による重み付け（対数スケール）
-        match_weight = min(1.0, np.log(max_count + 1) / np.log(20))  # 20一致で最大重み
-        
-        # 時間スケールペナルティ（ヒストグラム方式）
-        scale_penalty = 1.0
-        if abs(time_scale - 1.0) > 0.01:
-            # より緩やかなペナルティ
-            scale_deviation = abs(time_scale - 1.0)
-            scale_penalty = np.exp(-scale_deviation * 0.5)  # 指数的減衰
-        
-        # 最終信頼度
-        confidence = base_score * prominence_boost * match_weight * scale_penalty
-        
-        # ヒストグラム方式: 統計的閾値による正規化
-        if max_count >= 5 and prominence > 0.3:
-            confidence = min(1.0, confidence * 1.5)  # 高品質マッチのブースト
-        
-        return min(1.0, confidence)
-    
-    def _calculate_hybrid_histogram_confidence(self, match_pairs: List[Tuple[float, float]], 
-                                             time_scale: float) -> float:
-        """Hybrid方式用の軽量化ヒストグラム信頼度計算"""
-        
-        if len(match_pairs) < 5:
-            return 0.0
-        
-        # 時間差を計算（スケール調整済み）
-        offsets = [(db_time - query_time)/time_scale for query_time, db_time in match_pairs]
-        offsets = np.array(offsets)
-        
-        # 軽量化されたビン幅計算
-        std_dev = np.std(offsets)
-        bin_width = max(0.1, min(float(std_dev) / 2, 0.5))  # 0.1-0.5秒の範囲
-        
-        # 適応的レンジ（軽量版）
-        offset_range = max(5.0, float(std_dev) * 3)
-        offset_mean = np.mean(offsets)
-        
-        bins = int((2 * offset_range) / bin_width)
-        bins = max(10, min(bins, 50))  # ビン数を制限（軽量化）
-        
-        hist, _ = np.histogram(offsets, 
-                                     bins=bins, 
-                                     range=(float(offset_mean - offset_range), 
-                                           float(offset_mean + offset_range)))
-        
-        max_count = int(np.max(hist))
-        max_bin_idx = int(np.argmax(hist))
-        
-        if max_count < 3:
-            return 0.0
-        
-        # 軽量化されたピーク突出度計算
-        peak_prominence = self._calculate_peak_prominence(hist, max_bin_idx)
-        
-        # 基本信頼度計算
-        base_score = max_count / len(offsets)
-        
-        # hybrid用の簡略化された信頼度計算
-        prominence_boost = 1.0 + (peak_prominence * 1.5)  # histogram方式より控えめ
-        match_weight = min(1.0, np.log(max_count + 1) / np.log(15))  # 15一致で最大重み
-        
-        # 軽量化されたスケールペナルティ
-        scale_penalty = 1.0
-        if abs(time_scale - 1.0) > 0.05:
-            scale_deviation = abs(time_scale - 1.0)
-            scale_penalty = np.exp(-scale_deviation * 0.3)  # より軽いペナルティ
-        
-        confidence = base_score * prominence_boost * match_weight * scale_penalty
-        
-        # hybrid用の控えめなブースト
-        if max_count >= 5 and peak_prominence > 0.2:
-            confidence = min(1.0, confidence * 1.2)
-        
-        return min(1.0, confidence)
 
 
 def create_sqlite_config(db_path: str = "fingerprints.db") -> DatabaseConfig:

@@ -1,267 +1,147 @@
 # mimizam音声指紋マッチングのスコア計算について
 
-mimizamで採用している音声指紋比較時のスコア計算方法（histogram/hybrid/detailed）について、計算方法とパラメータについて記します。
+mimizamの音声指紋マッチングは、尺度不変ハッシュを前提とした**単一検索マッチング**（速度・ピッチ変化に頑健）に統一されている。本書では現在の照合・スコア計算の方法とパラメータを記す。
+
+> 旧仕様（`histogram` / `hybrid` / `detailed` の3方式と、time/freq スケールのブルートフォース探索による信頼度計算）は完全に廃止された。スコアリング方式の選択API（`scoring_method` / `set_scoring_method`）も存在しない。
 
 ---
 
-## 1. スコアリング方式の概要
+## 1. 前提: 尺度不変ハッシュ
 
-mimizamでは3つのスコアリング方式を実装しており、用途に応じて選択可能です：
+ハッシュはアンカー＋2ターゲットのピーク三つ組から生成される32bitビットパック値で、
+時間比 `(t1-tA)/(t2-tA)` と周波数比 `log2(f1/fA)`, `log2(f2/fA)` を符号化する。
+これにより、ハッシュ自体が**速度変化（時間伸縮）・ピッチ変化（周波数スケール）に本質的に不変**である。
 
-### 1.1 方式の選択
-- **hybrid方式**（デフォルト）: 2段階判定（高速候補選別 + 詳細評価）
-- **histogram方式**: ヒストグラム分析のみ
-- **detailed方式**: 多面的スコアリングのみ
+その結果、照合側で time_scale / freq_scale を総当りしてハッシュを作り直す必要がなく、
+**DB検索は1回のみ**で候補集合が完結する（詳細は `docs/fingerprint_generation_details.md`）。
 
-### 1.2 共通パラメータ
+### 1.1 共通パラメータ
+
 ```python
-# 基本設定
-min_confidence = 0.1        # 最小信頼度閾値
-max_results = 10           # 最大結果数
-time_tolerance = 0.3       # 時間許容度（秒）
-freq_tolerance = 100       # 周波数許容度（Hz）
-
-# 速度・ピッチ変化の許容範囲
-freq_scale_factors = [0.9, 0.95, 1.0, 1.05, 1.1]  # ±10%のピッチ変化
+min_confidence = 0.1     # 最小信頼度閾値
+max_results = 10         # 最大結果数
+time_tolerance = 0.05    # 整列許容度（秒）。傾きで速度変化を吸収した後の
+                         # オフセット残差の許容幅
 ```
 
 ---
 
-## 2. Hybrid方式（推奨デフォルト）
+## 2. 照合フロー（単一検索マッチング）
 
-### 2.1 概要
-2段階の判定プロセスにより、速度と精度のバランスを実現：
-1. **第1段階**: 高速ヒストグラム分析で候補絞り込み
-2. **第2段階**: 多面的スコアリングで詳細評価
+`FingerprintMatcher.find_matches()` の処理は次の通り。
 
-### 2.2 第1段階: 高速候補選別
-
-#### 使用スケール
-```python
-hybrid_fast_scales = [0.8, 0.9, 1.0, 1.1, 1.2, 1.5]  # 高速候補抽出用
+```
+クエリ指紋群
+  ↓ database.search_fingerprints(query)  … DB検索は1回のみ
+楽曲ごとの (query_time, db_time) 衝突ペア
+  ↓ 支配直線 db ≈ slope·query + offset をハフ投票で頑健推定
+  ↓ 整列インライア（残差 ±time_tolerance 以内）を抽出
+  ↓ significance ベースの信頼度算出
+min_confidence 以上を実効スコア順に整列
 ```
 
-#### 計算方法
-- 各スケールでクエリフィンガープリントをスケーリング
-- データベース検索による一致ペア抽出
-- ヒストグラム信頼度計算（軽量版）
-- 上位K件（デフォルト10件）を候補として選出
-
-#### ヒストグラム信頼度計算
-```python
-def _calculate_hybrid_histogram_confidence(match_pairs, time_scale):
-    # 1. 時間差計算（スケール調整済み）
-    offsets = [(db_time - query_time)/time_scale for query_time, db_time in match_pairs]
-    
-    # 2. 適応的ビン幅計算
-    std_dev = np.std(offsets)
-    bin_width = max(0.1, min(std_dev / 2, 0.5))  # 0.1-0.5秒の範囲
-    
-    # 3. ヒストグラム生成
-    hist, _ = np.histogram(offsets, bins=bins, range=適応的レンジ)
-    max_count = np.max(hist)
-    
-    # 4. 信頼度計算
-    base_score = max_count / len(offsets)
-    prominence_boost = 1.0 + (peak_prominence * 1.5)
-    match_weight = min(1.0, log(max_count + 1) / log(15))
-    scale_penalty = exp(-scale_deviation * 0.3)
-    
-    confidence = base_score * prominence_boost * match_weight * scale_penalty
-```
-
-#### パラメータについて
-- **hybrid_fast_scales = [0.8, 0.9, 1.0, 1.1, 1.2, 1.5]**
-  - 根拠: 候補絞り込みに必要最小限の範囲
-  - 計算量: 6回検索で高速処理を実現
-- **bin_width**: `max(0.1, min(std_dev / 2, 0.5))` - データ分散に応じた適応的調整
-- **match_weight**: `log(max_count + 1) / log(15)` - 15一致で最大重みに到達
-- **scale_penalty**: `exp(-scale_deviation * 0.3)` - 指数的減衰でスケール偏差をペナルティ化
-
-### 2.3 第2段階: 詳細評価
-
-#### 使用スケール
-```python
-detailed_scales = [0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.25, 1.5, 1.75, 2.0]  # 包括的
-```
-
-#### 計算方法
-- 候補楽曲ごとに全スケール・全周波数スケールで再検索
-- 多面的信頼度スコア計算
-- 最適スケールの決定
-- 最終信頼度として詳細評価結果を採用
-
-#### パラメータについて
-- **detailed_scales = [0.5〜2.0]**
-  - 根拠: 実用的な再生速度変化の全範囲をカバー（0.5倍-2倍）
-  - 用途: 高精度が要求される用途
-  - 計算量: 11スケール × 5周波数スケール = 55回検索
+速度変化した一致では `query_time - db_time` は一定にならないため、
+傾き（= time_scale）で正規化した残差 `db_time - slope·query_time` を一定量として扱う。
 
 ---
 
-## 3. Histogram方式（ヒストグラム分析）
+## 3. 支配直線の推定（頑健直線回帰）
 
-### 3.1 概要
-ヒストグラム分析による高速マッチング
+尺度不変ハッシュは粗量子化のため偶発衝突が多く、外れ値が過半になりうる。
+そこで中央値ではなく**最頻値ベース（ハフ投票）**で傾き・切片を推定する。
 
-### 3.2 使用スケール
+### 3.1 傾き候補の投票（`_estimate_slope_candidates`）
+
+ペア間傾き `(dj-di)/(qj-qi)` を log2 空間でヒストグラム投票し、得票上位ビンの
+傾き中央値を候補として複数返す。
+
 ```python
-histogram_scales = [0.8, 0.85, 0.9, 0.95, 1.0, 1.05, 1.1, 1.15, 1.2, 1.3, 1.5]  # 細かい刻み
+slope_range = (0.25, 4.0)     # 傾き（=time_scale）の妥当域
+line_fit_sample_size = 150    # ペア傾き算出のサンプル点上限（O(K^2)抑制）
+slope_log2_bin = 0.03         # 傾きヒストグラムのビン幅（log2空間）
+slope_min_dq = 1.0            # 傾き算出に使う query 時間差の下限（秒）
+slope_top_candidates = 5      # インライア評価に回す傾き候補ビン数
 ```
 
-### 3.3 計算方法
+- 単一の最頻ビンだけだと、粗量子化で偶発的に別倍率のビンが競り勝つと取り違える。
+  上位複数を後段のインライア評価に渡し、真の倍率を選び直せるようにする。
+- query 側の時間差が十分大きいペアのみを使い、時間量子化の影響を抑える。
 
-#### ヒストグラム信頼度計算
-```python
-def _calculate_histogram_confidence(max_count, total_matches, prominence, time_scale):
-    # 1. 基本スコア：最大ビンの相対頻度
-    base_score = max_count / total_matches
-    
-    # 2. ピークの突出度による強化
-    prominence_boost = 1.0 + (prominence * 2.0)
-    
-    # 3. 一致数による重み付け（対数スケール）
-    match_weight = min(1.0, log(max_count + 1) / log(20))  # 20一致で最大重み
-    
-    # 4. 時間スケールペナルティ
-    scale_penalty = exp(-scale_deviation * 0.5)  # 指数的減衰
-    
-    # 5. 最終信頼度
-    confidence = base_score * prominence_boost * match_weight * scale_penalty
-    
-    # 6. 高品質マッチのブースト
-    if max_count >= 5 and prominence > 0.3:
-        confidence = min(1.0, confidence * 1.5)
-```
+### 3.2 傾きの確定とインライア抽出（`_fit_scale_offset` / `_inliers_for_slope`）
 
-#### パラメータ根拠
-- **bin_width**: `max(0.1, min(std_dev / 2, 1.0))` - データ分散に応じた適応的調整
-- **offset_range**: `max(10, std_dev * 4)` - 統計的外れ値を考慮
-- **prominence閾値**: `0.3` - 経験的に決定された有意性閾値
-- **histogram_scales = [0.8〜1.5]**
-  - 根拠: 一般的な音声指紋システム(Dejavu)の推奨範囲
-  - 用途: 速度重視の用途
-  - 計算量: 11スケールで高速処理
-- **match_weight**: `log(max_count + 1) / log(20)` - 20一致で最大重みに到達
-- **高品質マッチブースト**: max_count ≥ 5 かつ prominence > 0.3 で1.5倍
+各傾き候補について、オフセット `db_time - slope·query_time` の最頻ビン（幅 `time_tolerance`）
+近傍のインライアを数え、**インライアが最大になる傾き**を採用する。
+オフセットは最頻ビン内インライアの中央値とする。
 
 ---
 
-## 4. Detailed方式（多面的スコアリング）
+## 4. 信頼度計算（significance ベース）
 
-### 4.1 概要
-包括的な多面的評価による高精度マッチング
+信頼度は `_confidence_from_inliers(aligned, total, db_span)` で算出する。
+`aligned` は整列インライア数、`total` は全衝突ペア数、`db_span` は全衝突が散らばるDB時間幅。
 
-### 4.2 使用スケール
-```python
-detailed_scales = [0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.25, 1.5, 1.75, 2.0]  # 包括的（0.5倍-2倍）
-freq_scale_factors = [0.9, 0.95, 1.0, 1.05, 1.1]  # ±10%のピッチ変化
+### 4.1 significance（偶然整列に対する超過倍率）
+
+全 `total` 件の衝突が DB時間幅 `db_span` 全域へ一様に散ると仮定すると、
+許容幅 `±time_tolerance` の1オフセット帯に偶然入る期待数は
+
+```
+expected = total × (2·time_tolerance / db_span)
+significance = aligned / expected
 ```
 
-### 4.3 基本信頼度計算
+真の一致は一つのオフセットに集中するため `aligned ≫ expected`、無関係曲は
+衝突が全域へ散って `aligned` が `expected` 並みに留まる。
+`significance` は DB規模・衝突総数に依存せず両者を分離できる
+（割合 `aligned/total` は大規模DBで正解でも極小になり不適）。
 
-#### 時間アライメント分析
+> `db_span` が不明・極小のときは `expected=1`（偶然1件相当）とみなし、
+> `significance` を整列絶対数に退化させる（小規模・単体テスト向けの安全側フォールバック）。
+
+### 4.2 信頼度の合成
+
 ```python
-def _calculate_confidence_score(match_pairs):
-    # 1. 時間アライメントグループ化（tolerance=0.3秒）
-    aligned_groups = _find_time_aligned_matches(match_pairs, 0.3)
-    
-    # 2. 最大グループサイズによる基本信頼度
-    max_aligned_matches = max(len(group) for group in aligned_groups)
-    base_confidence = max_aligned_matches / len(match_pairs)
-    
-    # 3. 一致数ボーナス
-    if max_aligned_matches >= 20:
-        base_confidence *= 1.3
-    elif max_aligned_matches >= 10:
-        base_confidence *= 1.2
-    elif max_aligned_matches >= 5:
-        base_confidence *= 1.1
-    
-    # 4. 分散ペナルティ
-    if len(aligned_groups) > 3:
-        base_confidence *= 0.9
-    
-    # 5. 冗長性ボーナス
-    secondary_groups = [g for g in aligned_groups if len(g) >= 3]
-    if secondary_groups:
-        secondary_bonus = min(0.1 * len(secondary_groups), 0.3)
-        base_confidence += secondary_bonus
-    
-    return min(base_confidence, 1.0)
+confidence_full_matches = 40        # 数項が飽和する整列数
+confidence_full_significance = 100  # significance項が飽和する値
+confidence_purity_floor = 0.5       # 純度項が効き始める整列割合
+
+count_term = min(1, aligned / confidence_full_matches)                       # 整列の絶対数
+sig_term   = min(1, log1p(significance) / log1p(confidence_full_significance))# 偶然超過倍率
+base_conf  = count_term * sig_term                                           # 片方が低いと抑制
+
+# クリーンな一致は整列割合が1.0近くまで上がる（無関係曲では起こらない）
+purity_conf = max(0, (ratio - confidence_purity_floor) / (1 - confidence_purity_floor))
+
+confidence = min(max(base_conf, purity_conf), 1.0)
 ```
 
-#### パラメータについて
-- **time_tolerance = 0.3秒**
-  - 根拠: 音声のジッターやエンコーディング誤差を考慮
-  - 影響: アライメントグループ化の精度に直接影響
-  - 調整: ノイジーな環境では0.5秒まで拡大可能
-- **一致数ボーナス（経験的閾値）**:
-  - ≥20一致: ×1.3（強い証拠）
-  - ≥10一致: ×1.2（中程度の証拠）
-  - ≥5一致: ×1.1（弱い証拠）
-- **分散ペナルティ**: アライメントグループ数 > 3で×0.9
-- **冗長性ボーナス**: セカンダリグループ（≥3一致）ごとに+0.1（最大+0.3）
+- `base_conf` は「絶対数」と「偶然超過倍率」の積で、どちらか一方が低いだけで抑制される。
+- 高純度時（ノイズが少なく整列割合が高い）は絶対数が少なくても高信頼度とみなす純度項を併用し、大きい方を採る。
+- `aligned < 2` のペアは信頼度0（偶発衝突の棄却）。
 
-### 4.4 スケーリング補正
+### 4.3 パラメータ根拠
 
-#### スケーリング付き信頼度計算
-```python
-def _calculate_confidence_score_with_scaling(match_pairs, time_scale, freq_scale):
-    # 1. ベース信頼度計算
-    base_confidence = _calculate_confidence_score(match_pairs)
-    
-    # 2. 時間スケールペナルティ
-    scale_penalty = 1.0
-    time_deviation = abs(time_scale - 1.0)
-    
-    if time_scale <= 0.7:          # 非常に遅い（0.5倍-0.7倍）
-        scale_penalty *= 0.8
-    elif time_scale >= 1.5:        # 非常に速い（1.5倍-2倍）
-        scale_penalty *= 0.85
-    elif time_deviation > 0.1:     # 中程度の速度変化
-        scale_penalty *= (1.0 - time_deviation * 0.2)
-    
-    # 3. 周波数スケールペナルティ
-    freq_deviation = abs(freq_scale - 1.0)
-    if freq_deviation > 0.03:
-        scale_penalty *= (1.0 - freq_deviation * 0.3)
-    
-    # 4. 極端スケーリング時のボーナス
-    if len(match_pairs) >= 20 and (time_scale <= 0.7 or time_scale >= 1.5):
-        base_confidence *= 1.15
-    elif len(match_pairs) >= 10 and (time_deviation > 0.01 or freq_deviation > 0.01):
-        base_confidence *= 1.1
-    
-    return min(base_confidence * scale_penalty, 1.0)
-```
-
-#### パラメータについて
-- **時間スケールペナルティ（段階的調整）**:
-  - time_scale ≤ 0.7: ×0.8（非常に遅い）
-  - time_scale ≥ 1.5: ×0.85（非常に速い）
-  - 中程度の変化: ×(1.0 - deviation × 0.2)
-- **周波数スケールペナルティ**: freq_deviation > 0.03で×(1.0 - deviation × 0.3)
-- **極端スケーリング時のボーナス**:
-  - ≥20一致 + 極端スケール: ×1.15
-  - ≥10一致 + スケール変化: ×1.1
-- **freq_scale_factors = [0.9〜1.1]**: ±10%のピッチ変化に対応
+- **time_tolerance = 0.05秒**: 傾きで速度変化を吸収した後のオフセット残差の許容幅。
+  ピーク時間分解能（約23ms）に見合う狭さにし、無関係曲の偶発整列を抑える。
+- **confidence_full_matches = 40**: 整列インライアがこの件数で数項が飽和する。
+- **confidence_full_significance = 100**: 多数のオフセット帯を暗黙に比較するため、
+  偶然でも数倍程度は生じうる。確実な一致は数十〜百倍に達するので高めに設定する。
+- **confidence_purity_floor = 0.5**: 無関係曲の整列割合（概ね0.1〜0.2）では純度項が0となり、
+  クリーンな一致でのみ効く。
 
 ---
 
-## 5. 性能特性
+## 5. 結果の整列（`_sort_and_limit_results`）
 
-### 5.1 計算量比較
-| 方式      | スケール探索回数     | 相対計算量 | 精度 |
-| --------- | -------------------- | ---------- | ---- |
-| Histogram | 11回                 | 1.0x       | 標準 |
-| Hybrid    | 6回+55回（候補のみ） | 1.5x       | 高   |
-| Detailed  | 55回（全候補）       | 5.0x       | 最高 |
+`min_confidence` を満たす候補を、以下の優先度で降順整列し `max_results` 件に絞る。
 
-### 5.2 用途別推奨設定
-- **リアルタイム処理**: Histogram方式
-- **バランス型**: Hybrid方式（デフォルト）
-- **高精度要求**: Detailed方式
+1. 信頼度 `confidence`
+2. マッチ数 `match_count`
+3. 時間的整列率 `alignment_ratio`
+4. 時間スケールの正確性（`time_scale` が 1.0 に近いほど良い）
+
+各結果には `time_scale`（= 復元した傾き）と `time_offset`（= 切片）が付与される。
+ピッチ不変はハッシュ側で吸収済みのため `freq_scale` は常に 1.0。
 
 ---
 

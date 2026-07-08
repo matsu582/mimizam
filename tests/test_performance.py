@@ -976,7 +976,6 @@ class TestMimizamPerformanceIntegration(TestAudioMixin, unittest.TestCase):
                 matcher_config={
                     'min_confidence': 0.1,
                     'max_results': 10,
-                    'scoring_method': 'hybrid'
                 },
                 enable_adaptive_params=False
             )
