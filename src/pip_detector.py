@@ -96,8 +96,10 @@ def detect_pip_regions(
     )
     candidates.extend(area_rects)
 
-    # 重複除去
+    # 重複除去と包含候補の統合
+    raw_candidate_count = len(candidates)
     candidates = _deduplicate(candidates)
+    candidates = _merge_contained_regions(candidates, scale, rw, rh)
 
     # 偽陽性フィルタ
     filtered = _filter_false_positives(
@@ -113,7 +115,8 @@ def detect_pip_regions(
     if result:
         logger.info(
             f"PiP rectangle detection: {len(result)} found "
-            f"(out of {len(candidates)} candidates)"
+            f"(out of {raw_candidate_count} candidates, "
+            f"merged to {len(candidates)})"
         )
 
     return result[:5]
@@ -424,6 +427,69 @@ def _deduplicate(rects: List[PipRegion]) -> List[PipRegion]:
         if not is_dup:
             kept.append(rect)
     return kept
+
+
+def _merge_contained_regions(
+    rects: List[PipRegion],
+    scale: float,
+    map_w: int,
+    map_h: int,
+) -> List[PipRegion]:
+    """包含・高IoUの候補群を外接矩形へ統合する"""
+    if len(rects) <= 1:
+        return rects
+
+    frame_area = (map_w * map_h) / (scale * scale) if scale > 0 else 0.0
+    groups: List[List[PipRegion]] = []
+    for rect in sorted(rects, key=lambda r: r.w * r.h, reverse=True):
+        placed = False
+        for group in groups:
+            merged = _union_region(group, frame_area)
+            if (
+                _containment_ratio(merged, rect) >= 0.6
+                or _compute_iou(merged, rect) >= 0.5
+            ):
+                group.append(rect)
+                placed = True
+                break
+        if not placed:
+            groups.append([rect])
+
+    return [_union_region(group, frame_area) for group in groups]
+
+
+def _union_region(
+    rects: List[PipRegion], frame_area: float,
+) -> PipRegion:
+    """候補群の外接矩形を作る"""
+    if len(rects) == 1:
+        return rects[0]
+
+    x1 = min(r.x for r in rects)
+    y1 = min(r.y for r in rects)
+    x2 = max(r.x + r.w for r in rects)
+    y2 = max(r.y + r.h for r in rects)
+    w = x2 - x1
+    h = y2 - y1
+    area_ratio = (w * h) / frame_area if frame_area > 0 else 0.0
+    return PipRegion(
+        x=x1, y=y1, w=w, h=h,
+        area_ratio=area_ratio, pip_score=0.0, method="merged",
+    )
+
+
+def _containment_ratio(a: PipRegion, b: PipRegion) -> float:
+    """小さい方の矩形が交差領域にどれだけ含まれるかを返す"""
+    x1 = max(a.x, b.x)
+    y1 = max(a.y, b.y)
+    x2 = min(a.x + a.w, b.x + b.w)
+    y2 = min(a.y + a.h, b.y + b.h)
+    if x2 <= x1 or y2 <= y1:
+        return 0.0
+
+    inter = (x2 - x1) * (y2 - y1)
+    smaller = min(a.w * a.h, b.w * b.h)
+    return inter / smaller if smaller > 0 else 0.0
 
 
 def _compute_iou(a: PipRegion, b: PipRegion) -> float:

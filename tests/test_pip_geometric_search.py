@@ -18,6 +18,7 @@ from mimizam import (
     Mimizam, VideoFingerprinter, VideoFingerprintConfig,
     VideoFingerprint, PipRegion,
 )
+from mimizam.src import pip_detector
 from mimizam.src.video_fingerprinter import (
     KEYPOINT_COLS, split_raw_descriptor,
 )
@@ -153,6 +154,37 @@ class TestMergePipResults(unittest.TestCase):
         ids = {r["video_id"] for r in merged}
         self.assertEqual(ids, {"v1", "v2"})
         self.assertEqual(merged[0]["video_id"], "v2")
+
+
+class TestPipRegionMerge(unittest.TestCase):
+    """包含・高IoU候補をPiP全体の外接矩形へ統合すること"""
+
+    def test_merges_contained_fragments_into_outer_region(self):
+        rects = [
+            PipRegion(100, 100, 420, 200, 0.105, 0.0),
+            PipRegion(100, 100, 220, 200, 0.055, 0.0),
+            PipRegion(300, 100, 220, 200, 0.055, 0.0),
+        ]
+
+        merged = pip_detector._merge_contained_regions(
+            rects, scale=1.0, map_w=1000, map_h=800,
+        )
+
+        self.assertEqual(len(merged), 1)
+        self.assertEqual((merged[0].x, merged[0].y), (100, 100))
+        self.assertEqual((merged[0].w, merged[0].h), (420, 200))
+
+    def test_keeps_separate_regions_unmerged(self):
+        rects = [
+            PipRegion(10, 10, 100, 100, 0.0125, 0.0),
+            PipRegion(300, 300, 100, 100, 0.0125, 0.0),
+        ]
+
+        merged = pip_detector._merge_contained_regions(
+            rects, scale=1.0, map_w=1000, map_h=800,
+        )
+
+        self.assertEqual(len(merged), 2)
 
 
 class TestLimitPipRegions(unittest.TestCase):
