@@ -317,9 +317,11 @@ def main() -> int:
         help=f"pip_score の検出閾値（既定: {pd.DEFAULT_PIP_SCORE_THRESHOLD}）",
     )
     parser.add_argument(
-        "--strategy", nargs="+", default=["all"],
-        choices=STRATEGIES + ["all"],
-        help="比較する戦略（既定: all＝baseline/A/B/C を全て）",
+        "--strategy", default="all",
+        help=(
+            "比較する戦略をカンマ区切りで指定（既定: all＝baseline/A/B/C 全て）"
+            "。例: --strategy A,B / --strategy baseline"
+        ),
     )
     parser.add_argument(
         "--cluster-margin", type=float, default=0.02,
@@ -343,7 +345,18 @@ def main() -> int:
         logger.error("動画ファイルが見つかりません: %s", args.video)
         return 1
 
-    strategies = STRATEGIES if "all" in args.strategy else args.strategy
+    requested = [s.strip() for s in args.strategy.split(",") if s.strip()]
+    if "all" in requested:
+        strategies = STRATEGIES
+    else:
+        invalid = [s for s in requested if s not in STRATEGIES]
+        if invalid:
+            logger.error(
+                "不明な戦略: %s（選択肢: %s, all）",
+                ",".join(invalid), ",".join(STRATEGIES),
+            )
+            return 1
+        strategies = requested
 
     logger.info("フレームをサンプリング中: %s", args.video)
     frames = sample_frames_from_video(args.video, n_frames=args.frames)
