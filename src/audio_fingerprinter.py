@@ -369,24 +369,18 @@ class HashGenerator:
 
     def __init__(self, 
                  target_zone_size: int = 5,
-                 time_delta_range: Tuple[float, float] = (0.1, 2.0),
                  max_peaks_per_second: int = 30,  # 1秒あたりの最大ピーク数（密度制御）
-                 min_peak_separation: float = 0.02,  # 後方互換のため受理（現方式では未使用）
                  density_time_window: float = 0.1):  # 定数マップの時間窓（秒）
         """
         ハッシュジェネレータを初期化
         
         Args:
             target_zone_size: 各アンカーに対して考慮するターゲットピーク数
-            time_delta_range: 考慮する時間差の範囲（秒、現方式では選択は件数ベース）
             max_peaks_per_second: 1秒あたりの最大ピーク数（密度制御）
-            min_peak_separation: 後方互換用（旧・時間方向潰し込みは廃止）
             density_time_window: 定数マップ密度制御の時間窓幅（秒）
         """
         self.target_zone_size = target_zone_size
-        self.time_delta_range = time_delta_range
         self.max_peaks_per_second = max_peaks_per_second
-        self.min_peak_separation = min_peak_separation
         self.density_time_window = density_time_window
     
     def generate_hashes(self, peaks: List[Peak], debug: bool = False) -> List[Fingerprint]:
@@ -462,7 +456,6 @@ class HashGenerator:
         if candidates:
             sample_deltas = [p.time - anchor_peak.time for p in candidates]
             logger.debug(f"Anchor {i} at {anchor_peak.time:.2f}s, sample time deltas: {[f'{d:.3f}' for d in sample_deltas]}")
-            logger.debug(f"Valid range: {self.time_delta_range[0]:.3f} - {self.time_delta_range[1]:.3f}s")
     
     def _create_fingerprints_from_targets(self, anchor_peak: Peak, target_peaks: List[Peak],
                                         seen_hashes: set, valid_time_deltas: List[float]) -> List[Fingerprint]:
@@ -520,9 +513,9 @@ class HashGenerator:
 
         candidate_peaks は時間昇順であることを前提とする。
 
-        尺度不変ハッシュでは「絶対時間窓(time_delta_range)」でターゲットを選ぶと、
-        速度変化で同じ窓内に入るピーク集合が変わり、三つ組が別物になって不変性が
-        崩れる。そこで選択は件数（ランク）ベースにする: アンカー直後の
+        尺度不変ハッシュでは絶対時間窓でターゲットを選ぶと、速度変化で同じ窓内に
+        入るピーク集合が変わり、三つ組が別物になって不変性が崩れる。そこで選択は
+        件数（ランク）ベースにする: アンカー直後の
         target_zone_size 件を採る。一様な時間伸縮では「直後のN件」は同じピーク集合
         （時刻が伸縮されただけ）になるため、時間比が保存される。
         """
@@ -770,9 +763,7 @@ class AudioFingerprinter:
             # （同一インスタンスを複数スレッドで使っても競合しないようにするため）
             hash_generator = HashGenerator(
                 target_zone_size=adjusted_params['target_zone_size'],
-                time_delta_range=self.hash_generator.time_delta_range,
                 max_peaks_per_second=adjusted_params['max_peaks_per_second'],
-                min_peak_separation=adjusted_params['min_peak_separation'],
             )
         else:
             min_amplitude = self.min_amplitude
