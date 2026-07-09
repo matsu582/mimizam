@@ -666,7 +666,8 @@ class AudioFingerprinter:
                  peak_neighborhood_size: int = 10,
                  enable_adaptive_params: bool = True,
                  audible_only: bool = False,
-                 enable_numba_optimization: bool = True):
+                 enable_numba_optimization: bool = True,
+                 enable_performance_monitor: bool = True):
         """
         音声フィンガープリンターを初期化
         
@@ -679,6 +680,8 @@ class AudioFingerprinter:
             enable_adaptive_params: 適応的パラメータ調整を有効にする
             audible_only: 可聴域(20Hz-20kHz)のみを使う場合True
             enable_numba_optimization: Numba JIT最適化を有効にする
+            enable_performance_monitor: パフォーマンス計測を有効にする
+                （適応的パラメータ調整とは独立して動作する）
         """
         self.spectrogram_analyzer = SpectrogramAnalyzer(
             n_fft, hop_length, sr, enable_numba_optimization=enable_numba_optimization
@@ -690,13 +693,10 @@ class AudioFingerprinter:
         self.enable_adaptive_params = enable_adaptive_params
         self.audible_only = audible_only
         
-        # 適応的パラメータ調整器
-        if enable_adaptive_params:
-            self.parameter_tuner = AdaptiveParameterTuner()
-            self.performance_monitor = PerformanceMonitor()
-        else:
-            self.parameter_tuner = None
-            self.performance_monitor = None
+        # 適応的パラメータ調整器（計測とは独立）
+        self.parameter_tuner = AdaptiveParameterTuner() if enable_adaptive_params else None
+        # パフォーマンス計測器（適応的パラメータのON/OFFに依存しない）
+        self.performance_monitor = PerformanceMonitor() if enable_performance_monitor else None
         
     def load_audio_with_pydub(self, file_path: str ) -> np.ndarray:
         audio = AudioSegment.from_file(file_path)
