@@ -281,6 +281,34 @@ class TestFingerprintMatcher(unittest.TestCase):
         # 直線に乗る正規ペアはインライアとして残る
         self.assertGreaterEqual(len(inliers), 10)
 
+    def test_fit_scale_offset_rejects_octave_alias(self):
+        """尺度不変マッチャ：オクターブ・エイリアス（真値の1/2傾き）へ落ちない
+
+        自己相似の高い音源では、真の傾き s に対して s/2 付近にも整列する偽の副
+        クラスタが生じ、ピーク集合の僅かな揺れで偽解のインライアが真値を上回る
+        ことがある（速度復元がオクターブ落ちする）。真値0.8のインライアが偽解0.4
+        より少なくても、エイリアス降格により基本周期側(0.8)を採用することを固定する。
+        """
+        # 真値: db = 0.8·q（8点）
+        true_pairs = [(float(q), 0.8 * q) for q in range(2, 18, 2)]
+        # 偽解（サブハーモニック）: db = 0.4·q + 5（10点、真値よりインライア多め）
+        alias_pairs = [(float(q), 0.4 * q + 5.0) for q in range(3, 23, 2)]
+        pairs = true_pairs + alias_pairs
+
+        # 前提: 傾き候補として真値(≈0.8)と偽解(≈0.4)の双方が挙がり、
+        # 偽解のインライアが真値以上（＝素朴な最多インライア選択では偽解が勝つ）。
+        cands = self.matcher._estimate_slope_candidates(pairs)
+        self.assertTrue(any(abs(c - 0.8) < 0.05 for c in cands),
+                        f"真値0.8が候補に無い: {cands}")
+        self.assertTrue(any(abs(c - 0.4) < 0.05 for c in cands),
+                        f"偽解0.4が候補に無い: {cands}")
+        _off_t, inl_true, _res_t = self.matcher._inliers_for_slope(pairs, 0.8)
+        _off_a, inl_alias, _res_a = self.matcher._inliers_for_slope(pairs, 0.4)
+        self.assertGreaterEqual(len(inl_alias), len(inl_true))
+
+        slope, _offset, _inliers = self.matcher._fit_scale_offset(pairs)
+        self.assertAlmostEqual(slope, 0.8, delta=0.05)
+
     def test_find_time_aligned_matches(self):
         """時間アライメントマッチ検索テスト"""
         match_pairs = [
