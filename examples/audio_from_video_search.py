@@ -513,13 +513,6 @@ Examples:
         help='Use only audible frequency range (20Hz-20kHz) for fingerprint generation'
     )
 
-    parser.add_argument(
-        '--scoring-method',
-        choices=['hybrid', 'histogram', 'detailed'],
-        default='hybrid',
-        help='Scoring method: hybrid (2-stage), histogram (histogram-based), detailed (multi-faceted)'
-    )
-    
     args = parser.parse_args()
     
     # ログの設定
@@ -545,7 +538,6 @@ Examples:
         matcher_config = {
             'min_confidence': args.min_confidence,
             'max_results': args.max_results,
-            'scoring_method': args.scoring_method
         }
         
         if args.backend == 'sqlite':

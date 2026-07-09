@@ -61,7 +61,6 @@ class TestElasticsearchContainers(TestAudioMixin, unittest.TestCase):
                 matcher_config={
                     'min_confidence': 0.1,
                     'max_results': 5,
-                    'scoring_method': 'hybrid'
                 },
                 enable_adaptive_params=False
             )
@@ -584,7 +583,6 @@ class TestElasticsearchContainers(TestAudioMixin, unittest.TestCase):
                 matcher_config={
                     'min_confidence': 0.1,
                     'max_results': 5,
-                    'scoring_method': 'hybrid'
                 },
                 enable_adaptive_params=False
             )
@@ -694,7 +692,6 @@ class TestElasticsearchContainers(TestAudioMixin, unittest.TestCase):
             custom_matcher_config = {
                 'min_confidence': 0.3,
                 'max_results': 3,
-                'scoring_method': 'detailed'
             }
             
             # Elasticsearchが利用可能になるまで待機

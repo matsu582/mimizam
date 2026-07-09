@@ -411,7 +411,6 @@ class TestMimizamCrossBackendIntegration(unittest.TestCase):
             matcher_config={
                 'min_confidence': 0.1,
                 'max_results': 10,
-                'scoring_method': 'hybrid'
             },
             enable_adaptive_params=False  # テストの一貫性のため
         )
@@ -482,7 +481,6 @@ class TestMimizamCrossBackendIntegration(unittest.TestCase):
             matcher_config={
                 'min_confidence': 0.1,
                 'max_results': 5,
-                'scoring_method': 'hybrid'
             },
             enable_adaptive_params=False
         )
@@ -521,7 +519,6 @@ class TestMimizamCrossBackendIntegration(unittest.TestCase):
         custom_matcher_config = {
             'min_confidence': 0.2,
             'max_results': 8,
-            'scoring_method': 'detailed'
         }
         
         mimizam = create_mimizam_sqlite(

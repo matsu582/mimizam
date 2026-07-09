@@ -274,7 +274,6 @@ class TestMimizamIntegration(unittest.TestCase):
             matcher_config={
                 'min_confidence': 0.1,
                 'max_results': 5,
-                'scoring_method': 'hybrid'
             },
             enable_adaptive_params=False  # テストの一貫性のため無効化
         )
@@ -436,7 +435,6 @@ class TestMimizamIntegration(unittest.TestCase):
             matcher_config={
                 'min_confidence': 0.3,
                 'max_results': 3,
-                'scoring_method': 'detailed'
             },
             n_fft=1024,
             hop_length=256,

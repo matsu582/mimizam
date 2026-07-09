@@ -37,8 +37,7 @@ class TestAdaptiveParameterTuner(unittest.TestCase):
         char = {'duration': 5.0, 'rms': 0.05, 'silence_ratio': 0.1,
                 'spectral_entropy': 6.0, 'tempo': 120, 'spectral_centroid_mean': 1500}
         adjusted = {'min_amplitude': -60, 'peak_neighborhood_size': 10,
-                    'target_zone_size': 5, 'max_peaks_per_second': 15,
-                    'min_peak_separation': 0.02}
+                    'target_zone_size': 5, 'max_peaks_per_second': 15}
         summary = self.tuner.get_parameter_summary(char, adjusted)
         self.assertIn('Duration: 5.00s', summary)
         self.assertIn('Min amplitude: -60', summary)

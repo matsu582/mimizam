@@ -101,13 +101,13 @@ class TestBatchSongRetrieval(unittest.TestCase):
 
 
 class TestDetailedMatchInfoNoResearch(unittest.TestCase):
-    """③④ get_detailed_match_info は match_pairs 指定時にDB再検索しない"""
+    """③④ detailed_match_info は取得済み match_pairs からDB再検索なしで構築する"""
 
     def test_match_pairs_skips_search(self):
         mock_db = Mock()
         matcher = FingerprintMatcher(mock_db)
         pairs = [(1.0, 10.0), (2.0, 11.0), (3.0, 12.0)]
-        info = matcher.get_detailed_match_info([], "s1", match_pairs=pairs)
+        info = matcher.detailed_match_info(pairs)
         # 再検索(search_fingerprints)は呼ばれない
         mock_db.search_fingerprints.assert_not_called()
         self.assertEqual(info['statistics']['total_matches'], 3)
@@ -265,40 +265,33 @@ class TestSingleSearchQueryCount(unittest.TestCase):
         self.assertFalse(hasattr(self.matcher, "time_scale_factors"))
         self.assertFalse(hasattr(self.matcher, "_scale_fingerprints"))
 
-    def test_hybrid_searches_once(self):
-        self.matcher.set_scoring_method("hybrid")
-        self.matcher.find_matches(self.query, min_matches=1, include_details=True)
-        self.assertEqual(self.mock_db.search_fingerprints.call_count, 1)
-
-    def test_detailed_searches_once(self):
-        self.matcher.set_scoring_method("detailed")
-        self.matcher.find_matches(self.query, min_matches=1, include_details=True)
-        self.assertEqual(self.mock_db.search_fingerprints.call_count, 1)
-
-    def test_histogram_searches_once(self):
-        self.matcher.set_scoring_method("histogram")
+    def test_scale_invariant_searches_once(self):
+        """尺度不変マッチングはDB検索を1回だけ発行する（多重発行の回帰）"""
         self.matcher.find_matches(self.query, min_matches=1, include_details=True)
         self.assertEqual(self.mock_db.search_fingerprints.call_count, 1)
 
 
-class TestAlignmentRatioSign(unittest.TestCase):
-    """⑤ alignment_ratio が符号（ズレの向き）を区別する"""
+class TestAlignmentSign(unittest.TestCase):
+    """⑤ 時間整列が符号（ズレの向き）を区別する"""
 
     def setUp(self):
         self.matcher = FingerprintMatcher(Mock())
 
-    def test_consistent_offset_is_fully_aligned(self):
-        """一定の符号付きオフセットで揃っていれば比率は1.0"""
+    def test_consistent_offset_is_single_group(self):
+        """一定の符号付きオフセットで揃っていれば単一グループにまとまる"""
         pairs = [(4.0, 1.0), (5.0, 2.0), (6.0, 3.0)]  # 全て +3.0
-        self.assertEqual(self.matcher._calculate_alignment_ratio(pairs), 1.0)
+        groups = self.matcher._find_time_aligned_matches(pairs, tolerance=0.2)
+        largest = max(groups, key=len)
+        self.assertEqual(len(largest), 3)
 
     def test_mirror_offset_not_aligned(self):
-        """+3s と -3s の鏡像的ズレは整列と見なさない（abs()回帰）"""
+        """+3s と -3s の鏡像的ズレは同一グループに入れない（abs()回帰）"""
         pairs = [(4.0, 1.0), (1.0, 4.0)]  # +3.0 と -3.0
-        ratio = self.matcher._calculate_alignment_ratio(pairs)
-        # abs()で符号を捨てると両方が同一視され1.0になってしまう。
-        # 符号付きなら中央値0付近から±3ずれるため整列扱いにならない。
-        self.assertLess(ratio, 1.0)
+        groups = self.matcher._find_time_aligned_matches(pairs, tolerance=0.2)
+        # abs()で符号を捨てると両方が同一視され1グループになってしまう。
+        # 符号付きなら残差 +3 と -3 に分かれ別グループになる。
+        largest = max(groups, key=len)
+        self.assertEqual(len(largest), 1)
 
 
 class TestMoviePositionDivergence(unittest.TestCase):

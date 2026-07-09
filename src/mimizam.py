@@ -44,7 +44,6 @@ class Mimizam:
             matcher_config: FingerprintMatcherの設定パラメータ
                 - min_confidence: 最小信頼度スコア (float, default: 0.1)
                 - max_results: 最大結果数 (int, default: 5)
-                - scoring_method: スコアリング手法 (str, default: 'hybrid')
         """
         self.logger = logging.getLogger(__name__)
         
@@ -66,7 +65,6 @@ class Mimizam:
         default_matcher_config = {
             'min_confidence': 0.1,
             'max_results': 5,
-            'scoring_method': 'hybrid'
         }
         
         if matcher_config:
@@ -80,12 +78,10 @@ class Mimizam:
         # Matcherの設定を適用
         self.matcher.min_confidence = default_matcher_config['min_confidence']
         self.matcher.max_results = default_matcher_config['max_results']
-        if hasattr(self.matcher, 'set_scoring_method'):
-            self.matcher.set_scoring_method(default_matcher_config['scoring_method'])
-        
+
         self.logger.info("Mimizam system initialized")
         self.logger.info(f"Database backend: {self.database.config.backend}")
-        self.logger.info(f"Matcher configuration - confidence: {default_matcher_config['min_confidence']}, max results: {default_matcher_config['max_results']}, scoring: {default_matcher_config['scoring_method']}")
+        self.logger.info(f"Matcher configuration - confidence: {default_matcher_config['min_confidence']}, max results: {default_matcher_config['max_results']}")
     
     def add_song(self, file_path: str, title: str, artist: str, 
                  song_id: Optional[str] = None,

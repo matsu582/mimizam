@@ -209,23 +209,6 @@ class TestFingerprintMatcher(unittest.TestCase):
         self.assertEqual(self.matcher.database, self.mock_database)
         self.assertEqual(self.matcher.min_confidence, 0.1)
         self.assertEqual(self.matcher.max_results, 10)
-        self.assertEqual(self.matcher.scoring_method, "hybrid")
-    
-    def test_set_scoring_method(self):
-        """スコアリング方式設定テスト"""
-        # 有効な方式の設定
-        self.matcher.set_scoring_method("histogram")
-        self.assertEqual(self.matcher.scoring_method, "histogram")
-        
-        self.matcher.set_scoring_method("detailed")
-        self.assertEqual(self.matcher.scoring_method, "detailed")
-        
-        self.matcher.set_scoring_method("hybrid")
-        self.assertEqual(self.matcher.scoring_method, "hybrid")
-        
-        # 無効な方式の設定
-        with self.assertRaises(ValueError):
-            self.matcher.set_scoring_method("invalid")
     
     def test_find_matches_empty_fingerprints(self):
         """空のフィンガープリントリストでのマッチング"""
@@ -280,32 +263,6 @@ class TestFingerprintMatcher(unittest.TestCase):
         """空のマッチペアでの時間オフセット計算"""
         result = self.matcher._calculate_time_offset([])
         self.assertEqual(result, 0.0)
-    
-    def test_calculate_confidence_score(self):
-        """信頼度スコア計算テスト"""
-        # 完全にアライメントされたマッチ
-        aligned_matches = [
-            (1.0, 1.5),  # diff: -0.5
-            (2.0, 2.5),  # diff: -0.5
-            (3.0, 3.5),  # diff: -0.5
-            (4.0, 4.5),  # diff: -0.5
-            (5.0, 5.5)   # diff: -0.5
-        ]
-        
-        result = self.matcher._calculate_confidence_score(aligned_matches)
-        self.assertGreater(result, 0.8)  # 高い信頼度
-        
-        # 散在したマッチ
-        scattered_matches = [
-            (1.0, 1.5),  # diff: -0.5
-            (2.0, 3.0),  # diff: -1.0
-            (3.0, 4.0),  # diff: -1.0
-            (4.0, 6.0),  # diff: -2.0
-            (5.0, 8.0)   # diff: -3.0
-        ]
-        
-        result2 = self.matcher._calculate_confidence_score(scattered_matches)
-        self.assertLess(result2, result)  # より低い信頼度
     
     def test_fit_scale_offset_recovers_slope(self):
         """尺度不変マッチャ：頑健直線回帰で傾き(=time_scale)と切片を復元する
@@ -390,39 +347,36 @@ class TestFingerprintMatcher(unittest.TestCase):
             result = self.matcher.identify_audio(self.test_fingerprints, 0.5)
             self.assertIsNone(result)
     
-    def test_get_detailed_match_info(self):
-        """詳細マッチ情報取得テスト"""
-        mock_matches = {
-            'test_song_1': [
-                (1.0, 1.5),
-                (2.0, 2.5),
-                (3.0, 3.5)
-            ]
-        }
-        
-        self.mock_database.search_fingerprints.return_value = mock_matches
-        
-        result = self.matcher.get_detailed_match_info(self.test_fingerprints, 'test_song_1')
-        
+    def test_detailed_match_info(self):
+        """詳細マッチ情報取得テスト（match_pairs主導、DB再検索なし）"""
+        match_pairs = [
+            (1.0, 1.5),
+            (2.0, 2.5),
+            (3.0, 3.5)
+        ]
+
+        result = self.matcher.detailed_match_info(match_pairs)
+
         self.assertIn('match_positions', result)
         self.assertIn('statistics', result)
-        
+
         # マッチ位置の確認
         match_positions = result['match_positions']
         self.assertEqual(len(match_positions), 3)
-        
+
         # 統計情報の確認
         statistics = result['statistics']
         self.assertEqual(statistics['total_matches'], 3)
         self.assertGreater(statistics['aligned_matches'], 0)
         self.assertGreater(statistics['alignment_ratio'], 0.0)
+
+        # DB再検索を行わないこと
+        self.mock_database.search_fingerprints.assert_not_called()
     
-    def test_get_detailed_match_info_no_matches(self):
+    def test_detailed_match_info_no_matches(self):
         """詳細マッチ情報取得テスト（マッチなし）"""
-        self.mock_database.search_fingerprints.return_value = {}
-        
-        result = self.matcher.get_detailed_match_info(self.test_fingerprints, 'nonexistent_song')
-        
+        result = self.matcher.detailed_match_info([])
+
         self.assertEqual(result['match_positions'], [])
         self.assertEqual(result['statistics']['total_matches'], 0)
 
@@ -506,60 +460,6 @@ class TestAdvancedMatchingAlgorithms(unittest.TestCase):
             (5.0, 5.5)   # diff: -0.5
         ]
     
-    def test_calculate_peak_prominence(self):
-        """ピーク突出度計算テスト"""
-        import numpy as np
-        
-        # 明確なピークを持つヒストグラム
-        hist = np.array([1, 2, 10, 3, 1])
-        peak_idx = 2
-        
-        prominence = self.matcher._calculate_peak_prominence(hist, peak_idx)
-        
-        # 突出度が正の値であることを確認
-        self.assertGreater(prominence, 0.0)
-        self.assertLessEqual(prominence, 1.0)
-    
-    def test_calculate_weighted_offset(self):
-        """重み付きオフセット計算テスト"""
-        import numpy as np
-        
-        hist = np.array([1, 2, 10, 3, 1])
-        bin_edges = np.array([0, 1, 2, 3, 4, 5])
-        peak_idx = 2
-        
-        offset = self.matcher._calculate_weighted_offset(hist, bin_edges, peak_idx)
-        
-        # ピーク周辺の重心が計算されることを確認
-        self.assertIsInstance(offset, (int, float))
-        self.assertGreater(offset, 0.0)
-    
-    def test_calculate_histogram_confidence(self):
-        """ヒストグラム信頼度計算テスト"""
-        max_count = 10
-        total_matches = 20
-        prominence = 0.8
-        time_scale = 1.0
-        
-        confidence = self.matcher._calculate_histogram_confidence(
-            max_count, total_matches, prominence, time_scale
-        )
-        
-        # 信頼度が適切な範囲内にあることを確認
-        self.assertGreaterEqual(confidence, 0.0)
-        self.assertLessEqual(confidence, 1.0)
-        self.assertGreater(confidence, 0.1)  # 良い条件なので最低限の信頼度
-    
-    def test_calculate_hybrid_histogram_confidence(self):
-        """Hybrid方式ヒストグラム信頼度計算テスト"""
-        confidence = self.matcher._calculate_hybrid_histogram_confidence(
-            self.test_match_pairs, 1.0
-        )
-        
-        # 信頼度が適切な範囲内にあることを確認
-        self.assertGreaterEqual(confidence, 0.0)
-        self.assertLessEqual(confidence, 1.0)
-    
     def test_confidence_from_inliers_monotonic(self):
         """significanceベース信頼度：整列数とsignificanceが高いほど信頼度が上がる
 
@@ -622,8 +522,8 @@ class TestIntegrationScenarios(unittest.TestCase):
             Fingerprint(hash_value=11111, time_offset=3.0, song_id="")
         ]
     
-    def test_full_matching_workflow_hybrid(self):
-        """Hybrid方式での完全マッチングワークフローテスト"""
+    def test_full_matching_workflow(self):
+        """完全マッチングワークフローテスト"""
         # データベースの検索結果をモック
         mock_search_results = {
             "song1": [(1.0, 1.5), (2.0, 2.5), (3.0, 3.5), (4.0, 4.5), (5.0, 5.5)],
@@ -644,8 +544,7 @@ class TestIntegrationScenarios(unittest.TestCase):
         # 尺度不変マッチャの信頼度は _confidence_from_inliers で算出される
         with patch.object(self.matcher, '_confidence_from_inliers', return_value=0.8):
             
-            # Hybrid方式でマッチング実行
-            self.matcher.set_scoring_method("hybrid")
+            # 尺度不変マッチングを実行
             self.matcher.min_confidence = 0.5  # 信頼度閾値を下げる
             results = self.matcher.find_matches(self.query_fingerprints, min_matches=2)
             
@@ -663,8 +562,8 @@ class TestIntegrationScenarios(unittest.TestCase):
                 self.assertGreaterEqual(best_match['confidence'], 0.0)
                 self.assertLessEqual(best_match['confidence'], 1.0)
     
-    def test_different_scoring_methods_comparison(self):
-        """異なるスコアリング方式の比較テスト"""
+    def test_single_search_returns_candidates(self):
+        """尺度不変の単一検索で候補が得られる"""
         # 良好なマッチデータ
         good_match_data = {
             "song1": [(1.0, 1.5), (2.0, 2.5), (3.0, 3.5), (4.0, 4.5), (5.0, 5.5)]
@@ -677,21 +576,15 @@ class TestIntegrationScenarios(unittest.TestCase):
         }
         self.mock_database.list_songs.return_value = self.test_songs
         # 小さな合成フィクスチャはインライア数が少なく信頼度飽和に届かないため、
-        # ここでは方式間で結果が返る配管を検証する目的で閾値を下げる。
+        # ここでは結果が返る配管を検証する目的で閾値を下げる。
         self.matcher.min_confidence = 0.0
         
-        # 各スコアリング方式でテスト（全て尺度不変の単一検索へ委譲される）
-        methods = ["hybrid", "histogram", "detailed"]
-        results = {}
+        results = self.matcher.find_matches(self.query_fingerprints, min_matches=3)
         
-        for method in methods:
-            self.matcher.set_scoring_method(method)
-            method_results = self.matcher.find_matches(self.query_fingerprints, min_matches=3)
-            results[method] = method_results
-        
-        # 各方式で結果が得られることを確認
-        for method in methods:
-            self.assertGreater(len(results[method]), 0, f"{method} method should return results")
+        # 結果が得られることを確認
+        self.assertGreater(len(results), 0)
+        # DB検索は1回のみ（尺度探索による多重発行がない）
+        self.mock_database.search_fingerprints.assert_called_once()
     
     def test_edge_case_minimal_matches(self):
         """エッジケース：最小マッチ数でのテスト"""

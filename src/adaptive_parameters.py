@@ -118,8 +118,6 @@ class AdaptiveParameterTuner:
             'peak_neighborhood_size': 10,
             'target_zone_size': 5,
             'max_peaks_per_second': 15,
-            'min_peak_separation': 0.02,
-            'time_delta_range': (0.1, 2.0)
         }
     
     def _adjust_for_silence(self, params: Dict[str, Any], characteristics: Dict[str, float]) -> Dict[str, Any]:
@@ -152,10 +150,8 @@ class AdaptiveParameterTuner:
         """テンポに基づいてパラメータを調整"""
         if characteristics['tempo'] > 140:
             params['max_peaks_per_second'] = 20
-            params['min_peak_separation'] = 0.01
         elif characteristics['tempo'] < 80:
             params['max_peaks_per_second'] = 12
-            params['min_peak_separation'] = 0.03
         return params
     
     def _adjust_for_duration(self, params: Dict[str, Any], characteristics: Dict[str, float]) -> Dict[str, Any]:
@@ -212,7 +208,6 @@ Adjusted Parameters:
 - Peak neighborhood size: {adjusted_params['peak_neighborhood_size']}
 - Target zone size: {adjusted_params['target_zone_size']}
 - Max peaks/second: {adjusted_params['max_peaks_per_second']}
-- Min peak separation: {adjusted_params['min_peak_separation']:.3f}s
 """
         return summary
 
