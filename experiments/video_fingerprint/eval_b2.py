@@ -11,16 +11,23 @@ import json, os, sys, time
 import numpy as np
 from sklearn.cluster import MiniBatchKMeans
 from scipy.spatial import cKDTree
-H = os.path.expanduser(os.environ.get("VFEXP_DIR", "~/vfexp")); C = f"{H}/cache"
+H = os.path.expanduser(os.environ.get("VFEXP_DIR", "~/vfexp") + ""); C = f"{H}/cache"
 DBV = os.environ.get("DBV", "bbb,ed,sintel,tos,sprite,agent327").split(",")
 E = lambda k, d: type(d)(os.environ.get(k, d))
 NPTS, KNN, WBITS = E("NPTS", 150), E("KNN", 5), E("WBITS", 5)
 COMBOS = [tuple(map(int, c.split(":"))) for c in E("COMBOS", "1:2,1:3").split(",")]
-QB, QSTEP, QMAX = 5, E("QSTEP", 0.25), 4.0  # α,β の量子化（5bit・幅 0.25・±4 で打ち切り）
+QB, QSTEP, QMAX = 5, E("QSTEP", 0.25), 4.0; MASKQ = (1 << QB) - 1  # α,β の量子化（5bit・幅 0.25・±4 で打ち切り）
 MAXHIT, QBURST, CAP = E("MAXHIT", 100), E("QBURST", 4), E("CAP", 8)
+TSTAT = E("TSTAT", 0)  # >0 なら、同じ場所（TSTAT px 四方）の点は何フレームに出ても 1 票にまとめる（クエリ側・DB 側とも）
 OFF_S, ROT_B, SC_B, AN_B = 4.0, 16, 0.25, 0.25
 STRETCH = [x for x in E("STRETCH", "").split(",") if x]  # 例 "133,178"（横に ×1.33・×1.78）。"c00" などは切り出した窓（extract_crops.py）
-MODE = E("MODE", "aff")  # aff: 4 点のアフィン不変 / sim: B と同じ 3 点の相似不変（距離比・角度）
+MODE = E("MODE", "aff")  # aff: 4 点のアフィン不変 / sim: B と同じ 3 点の相似不変（距離比・角度）/ pair: 2 点・tri: 3 点（中心点の大きさ・向きを基準にした相対位置、近傍は半径で選ぶ）/ quad: 4 点（半径近傍、面積比）
+PR = E("PR", 4.0)  # pair の近傍半径（中心点の大きさの倍数）
+TS = E("TS", 64.0); TB = 10 if MODE == "pair" else 0  # pair は平行移動も投票（TS px 幅、x・y 各 5bit）
+TR, TRL, TPSI = E("TR", 4.0), E("TRL", -0.5), E("TPSI", 0)  # tri・quad: 近傍の半径（中心点の大きさの倍数）・大きさの比の下限（log2）、tri: 近傍の向きもハッシュに入れるか
+TDIR, TDQ = E("TDIR", 16), E("TDQ", 1)  # tri: 方向の段数（16 か 8・4 などで粗くする）・距離をハッシュに入れるか
+QK, QSZ = E("QK", 0), E("QSZ", 1)  # quad: 近傍が QK 点より多い中心点は捨てる（0 は捨てない）・大きさの比をハッシュに入れるか
+SENT = np.uint64(2**64 - 1)  # DB に入れない印
 
 def frames(z, pre):
     off, ts, d, kp = z[pre + "off"], z[pre + "ts"], z[pre + "desc"], z[pre + "kp"]
@@ -36,6 +43,103 @@ def quads(km, d, kp):
     sel = np.argsort(-kp[:, 4])[:NPTS]; d, kp = d[sel], kp[sel]
     w = words(km, d); p = kp[:, :2].astype(np.float64); n = len(p)
     nn = cKDTree(p).query(p, KNN + 1)[1][:, 1:]  # 自分を除く近い順 KNN 点
+    if MODE == "tri":
+        sz = kp[:, 2].astype(np.float64); th = np.deg2rad(kp[:, 3].astype(np.float64))
+        nb = cKDTree(p).query_ball_point(p, TR * sz)
+        A = np.repeat(np.arange(n), [len(x) for x in nb]); B = np.concatenate([np.array(x, np.int64) for x in nb])
+        rho = np.log2(sz[B] / sz[A]); dist = np.linalg.norm(p[B] - p[A], axis=1) / sz[A]
+        ok = (A != B) & (dist > 0.5) & (rho >= TRL) & (rho < TRL + 2)  # 大きさの近い点だけを近傍にする（順位は使わない）
+        A, B = A[ok], B[ok]
+        o = np.argsort(A, kind="stable"); A, B = A[o], B[o]
+        cnt = np.bincount(A, minlength=n); st = np.r_[0, np.cumsum(cnt)]
+        AA, BB, CC = [], [], []
+        for k in np.unique(cnt[cnt >= 2]):
+            ids = np.nonzero(cnt == k)[0]; nbm = B[st[ids][:, None] + np.arange(k)]
+            i1, i2 = np.triu_indices(k, 1)
+            AA.append(np.repeat(ids, len(i1))); BB.append(nbm[:, i1].ravel()); CC.append(nbm[:, i2].ravel())
+        if not AA: return None
+        A, B, Cc = np.concatenate(AA), np.concatenate(BB), np.concatenate(CC)
+        def loc(X):
+            dv = p[X] - p[A]
+            return (np.linalg.norm(dv, axis=1) / sz[A], (np.arctan2(dv[:, 1], dv[:, 0]) - th[A]) % (2 * np.pi) / (2 * np.pi) * 16,
+                    np.log2(sz[X] / sz[A]), (th[X] - th[A]) % (2 * np.pi) / (2 * np.pi) * 16)
+        lb, lc = loc(B), loc(Cc)
+        sw = lc[1] < lb[1]  # B と C は中心点の向きから測った方向の順に並べる
+        B, Cc = np.where(sw, Cc, B), np.where(sw, B, Cc); lb, lc = [tuple(np.where(sw, y, x) for x, y in zip(lb, lc)), tuple(np.where(sw, x, y) for x, y in zip(lb, lc))]
+        u, v = p[B] - p[A], p[Cc] - p[A]
+        ok = np.abs(u[:, 0] * v[:, 1] - u[:, 1] * v[:, 0]) > 0.2 * np.linalg.norm(u, axis=1) * np.linalg.norm(v, axis=1) + 1e-9  # ほぼ一直線は捨てる
+        A, B, Cc = A[ok], B[ok], Cc[ok]; lb = tuple(x[ok] for x in lb); lc = tuple(x[ok] for x in lc)
+        qd = lambda d_: np.clip(np.floor((np.log2(d_) + 1) / 0.5), 0, 15).astype(np.int64)
+        qr = lambda r_: np.clip(np.floor((r_ - TRL) / 0.5), 0, 3).astype(np.int64)
+        def pk(fb, fc):
+            h = w[A].astype(np.uint64)
+            f = [(w[B], WBITS), (w[Cc], WBITS), (qd(lb[0]) * TDQ, 4), (qd(lc[0]) * TDQ, 4), (qr(lb[2]), 2), (qr(lc[2]), 2), (fb % 16, 4), (fc % 16, 4)]
+            if TPSI: f += [(np.floor(lb[3]).astype(np.int64) % 16, 4), (np.floor(lc[3]).astype(np.int64) % 16, 4)]
+            for x, bits in f: h = (h << np.uint64(bits)) | x.astype(np.uint64)
+            return h
+        db_, dc_ = lb[1] * TDIR / 16, lc[1] * TDIR / 16; fb, fc = np.floor(db_).astype(np.int64), np.floor(dc_).astype(np.int64)
+        nb_ = np.where(db_ - fb >= 0.5, fb + 1, fb - 1) % TDIR; nc_ = np.where(dc_ - fc >= 0.5, fc + 1, fc - 1) % TDIR
+        return dict(hd=pk(fb, fc), hs=[pk(a, b) for a in (fb, nb_) for b in (fc, nc_)], A=A, B=B, C=Cc, p=p.astype(np.float32))
+    if MODE == "quad":
+        # 4 点（中心 A ＋ 半径近傍の 3 点）。D-A = α(B-A)+β(C-A) の (α,β)（三角形の面積比）はアフィン変換で変わらない
+        sz = kp[:, 2].astype(np.float64)
+        nb = cKDTree(p).query_ball_point(p, TR * sz)
+        A = np.repeat(np.arange(n), [len(x) for x in nb]); B = np.concatenate([np.array(x, np.int64) for x in nb])
+        rho = np.log2(sz[B] / sz[A]); dist = np.linalg.norm(p[B] - p[A], axis=1) / sz[A]
+        ok = (A != B) & (dist > 0.5) & (rho >= TRL) & (rho < TRL + 2)
+        A, B = A[ok], B[ok]
+        o = np.lexsort((np.arctan2(p[B, 1] - p[A, 1], p[B, 0] - p[A, 0]), A)); A, B = A[o], B[o]  # A の周りの角度順（巡回順はアフィンで不変）
+        cnt = np.bincount(A, minlength=n); st = np.r_[0, np.cumsum(cnt)]
+        AA, BB, CC, DD = [], [], [], []
+        for k in np.unique(cnt[cnt >= 3]):
+            if QK and k > QK: continue
+            ids = np.nonzero(cnt == k)[0]; nbm = B[st[ids][:, None] + np.arange(k)]
+            cmb = np.array([(i, j, l) for i in range(k) for j in range(i + 1, k) for l in range(j + 1, k)])
+            AA.append(np.repeat(ids, len(cmb))); BB.append(nbm[:, cmb[:, 0]].ravel()); CC.append(nbm[:, cmb[:, 1]].ravel()); DD.append(nbm[:, cmb[:, 2]].ravel())
+        if not AA: return None
+        A0, b0, c0, d0 = (np.concatenate(x) for x in (AA, BB, CC, DD)); m = len(A0)
+        rots = [(b0, c0, d0), (c0, d0, b0), (d0, b0, c0)]  # 巡回の 3 通り。DB は一番小さいハッシュの 1 通りだけ、クエリは 3 通りとも引く
+        def ab(Bx, Cx, Dx):
+            u, v, t = p[Bx] - p[A0], p[Cx] - p[A0], p[Dx] - p[A0]
+            det = u[:, 0] * v[:, 1] - u[:, 1] * v[:, 0]
+            ok = np.abs(det) > 0.2 * np.linalg.norm(u, axis=1) * np.linalg.norm(v, axis=1) + 1e-9
+            al = (t[:, 0] * v[:, 1] - t[:, 1] * v[:, 0]) / np.where(ok, det, 1); be = (u[:, 0] * t[:, 1] - u[:, 1] * t[:, 0]) / np.where(ok, det, 1)
+            ok &= (np.abs(al) < QMAX) & (np.abs(be) < QMAX)
+            return ok, (al + QMAX) / QSTEP, (be + QMAX) / QSTEP
+        qr = lambda X: np.clip(np.floor((np.log2(sz[X] / sz[A0]) - TRL) / 0.5), 0, 3).astype(np.uint64)
+        def pk(Bx, Cx, Dx, ia, ib, ok):
+            h = w[A0].astype(np.uint64)
+            for x in (w[Bx], w[Cx], w[Dx]): h = (h << np.uint64(WBITS)) | x.astype(np.uint64)
+            if QSZ:
+                for X in (Bx, Cx, Dx): h = (h << np.uint64(2)) | qr(X)
+            h = (h << np.uint64(2 * QB)) | (np.clip(ia, 0, MASKQ).astype(np.uint64) << np.uint64(QB)) | np.clip(ib, 0, MASKQ).astype(np.uint64)
+            return np.where(ok, h, SENT)
+        hd, hs = [], [[], [], [], []]
+        for Bx, Cx, Dx in rots:
+            ok, pa, pb = ab(Bx, Cx, Dx); la, lb = np.floor(pa).astype(np.int64), np.floor(pb).astype(np.int64)
+            na = np.where(pa - la >= 0.5, la + 1, la - 1); nb_ = np.where(pb - lb >= 0.5, lb + 1, lb - 1)
+            hd.append(pk(Bx, Cx, Dx, la, lb, ok))
+            for j, (a_, b_) in enumerate([(la, lb), (la, nb_), (na, lb), (na, nb_)]): hs[j].append(pk(Bx, Cx, Dx, a_, b_, ok))
+        hd = np.stack(hd); mn = hd.min(0); first = np.argmax(hd == mn, 0)
+        hd = np.where(np.arange(3)[:, None] == first[None], hd, SENT).ravel()  # 一番小さい 1 通り以外は DB に入れない
+        return dict(hd=hd, hs=[np.concatenate(x) for x in hs], A=np.tile(A0, 3), B=np.concatenate([r[0] for r in rots]), C=np.concatenate([r[1] for r in rots]), p=p.astype(np.float32))
+    if MODE == "pair":
+        sz = kp[:, 2].astype(np.float64); th = np.deg2rad(kp[:, 3].astype(np.float64))
+        nb = cKDTree(p).query_ball_point(p, PR * sz)
+        A = np.repeat(np.arange(n), [len(x) for x in nb]); B = np.concatenate([np.array(x, np.int64) for x in nb])
+        dv = p[B] - p[A]; dist = np.linalg.norm(dv, axis=1) / sz[A]; rho = np.log2(sz[B] / sz[A])
+        ok = (A != B) & (dist > 0.5) & (np.abs(rho) < 1.5); A, B, dv, dist, rho = A[ok], B[ok], dv[ok], dist[ok], rho[ok]
+        qd = np.clip(np.floor((np.log2(dist) + 1) / 0.5), 0, 15).astype(np.int64)
+        qr = np.clip(np.floor((rho + 1.5) / 0.5), 0, 7).astype(np.int64)
+        fph = (np.arctan2(dv[:, 1], dv[:, 0]) - th[A]) % (2 * np.pi) / (2 * np.pi) * 16
+        fps = (th[B] - th[A]) % (2 * np.pi) / (2 * np.pi) * 16
+        def pk(a, b):
+            h = w[A].astype(np.uint64)
+            for v, bits in [(w[B], WBITS), (qd, 4), (qr, 3), (a % 16, 4), (b % 16, 4)]: h = (h << np.uint64(bits)) | v.astype(np.uint64)
+            return h
+        la, lb = np.floor(fph).astype(np.int64), np.floor(fps).astype(np.int64)
+        na = np.where(fph - la >= 0.5, la + 1, la - 1); nb2 = np.where(fps - lb >= 0.5, lb + 1, lb - 1)
+        return dict(hd=pk(la, lb), hs=[pk(a, b) for a in (la, na) for b in (lb, nb2)], A=A, B=B, C=B, p=p.astype(np.float32))
     if MODE == "sim":
         i1, i2 = np.triu_indices(KNN, 1)
         A = np.repeat(np.arange(n), len(i1)); B = nn[:, i1].ravel(); Cc = nn[:, i2].ravel()  # B は C より近い
@@ -60,15 +164,15 @@ def quads(km, d, kp):
     pa = (al + QMAX) / QSTEP; pb = (be + QMAX) / QSTEP
     return dict(w=(w[A][ok], w[B][ok], w[Cc][ok], w[D][ok]), pa=pa[ok], pb=pb[ok], A=A[ok], B=B[ok], C=Cc[ok], p=p.astype(np.float32))
 
-MASKQ = (1 << QB) - 1
 def pack(wv, ia, ib):
     h = np.zeros(len(wv[0]), np.uint64)
     for x in wv: h = (h << np.uint64(WBITS)) | x.astype(np.uint64)
     return ((h << np.uint64(2 * QB))
             | (np.clip(ia, 0, MASKQ).astype(np.uint64) << QB) | np.clip(ib, 0, MASKQ).astype(np.uint64))
 
-def hard(q): return pack(q["w"], np.floor(q["pa"]).astype(int), np.floor(q["pb"]).astype(int))
+def hard(q): return q["hd"] if MODE in ("pair", "tri", "quad") else pack(q["w"], np.floor(q["pa"]).astype(int), np.floor(q["pb"]).astype(int))
 def soft(q):
+    if MODE in ("pair", "tri", "quad"): return q["hs"]
     la, lb = np.floor(q["pa"]).astype(int), np.floor(q["pb"]).astype(int)
     na = np.where(q["pa"] - la >= 0.5, la + 1, la - 1); nb = np.where(q["pb"] - lb >= 0.5, lb + 1, lb - 1)
     if MODE == "sim": lb, nb = lb % (1 << QB), nb % (1 << QB)  # 角度は一周する
@@ -85,15 +189,18 @@ km = MiniBatchKMeans(1 << WBITS, random_state=0, n_init=3, batch_size=4096).fit(
 train_s = time.perf_counter() - t0; print("trained", round(train_s, 1), flush=True)
 
 t0 = time.perf_counter(); cols = {k: [] for k in ("h", "vid", "ts", "gf", "A", "B", "C")}; pts = []; npts = 0
+finfo = []; DIAG_N = [None]
+DBX = [x for x in os.environ.get("DBX", "").split(",") if x]  # DB 側にも登録する、横に縮めた版（extract_dbstretch.py）
 for vi, n in enumerate(DBV):
-    for ts, d, kp in frames(caches[n], "full_"):
+  for xi, zz in enumerate([caches[n]] + [np.load(f"{C}/{n}__{x}.npz") for x in DBX]):
+    for ts, d, kp in frames(zz, "full_"):
         q = quads(km, d, kp)
         if q is None: continue
-        h = hard(q); m = len(h)
+        h = hard(q); kk = h != SENT; h = h[kk]; m = len(h)
         cols["h"].append(h); cols["vid"].append(np.full(m, vi, np.int8)); cols["ts"].append(np.full(m, ts, np.float32))
         cols["gf"].append(np.full(m, len(pts), np.int32))
-        for k in "ABC": cols[k].append(q[k].astype(np.int16))
-        pts.append(q["p"]); npts += len(q["p"])
+        for k in "ABC": cols[k].append(q[k][kk].astype(np.int16))
+        pts.append(q["p"]); npts += len(q["p"]); finfo.append((vi, xi, ts))
 db = {k: np.concatenate(v) for k, v in cols.items()}
 o = np.argsort(db["h"], kind="stable"); db = {k: v[o] for k, v in db.items()}
 index_s = time.perf_counter() - t0
@@ -123,7 +230,7 @@ if BACKEND == "sqlite":
 
 if BACKEND == "pg":
     import io, psycopg2
-    con = psycopg2.connect(host="localhost", dbname="vfexp", user=os.environ.get("PGUSER", "postgres"), password=os.environ.get("PGPASSWORD", "")); cur = con.cursor(); t_ = time.perf_counter()
+    con = psycopg2.connect(host="localhost", dbname="vfexp", user="ubuntu", password=os.environ.get("PGPASSWORD", "")); cur = con.cursor(); t_ = time.perf_counter()
     cur.execute("DROP TABLE IF EXISTS video_hashes; DROP TABLE IF EXISTS video_frames")
     cur.execute("CREATE TABLE video_frames (frame_id INTEGER PRIMARY KEY, video_idx SMALLINT, ts REAL, points BYTEA)")
     cur.execute("CREATE TABLE video_hashes (hash_value BIGINT NOT NULL, frame_id INTEGER NOT NULL, a SMALLINT, b SMALLINT, c SMALLINT)")
@@ -237,29 +344,39 @@ def score(fr):
             rows.append(nb_rows(src["h"], np.stack(hs), keep, qp, q["A"].astype(np.int64), q["B"].astype(np.int64), q["C"].astype(np.int64),
                                 src["gf"], src["A"], src["B"], src["C"], src["vid"], src["ts"], src["ggf"], PP, ts, qi))
             continue
-        Vq = np.stack([qp[q["B"]] - qp[q["A"]], qp[q["C"]] - qp[q["A"]]], 2)  # 列 = AB, AC
+        Vq = None if MODE == "pair" else np.stack([qp[q["B"]] - qp[q["A"]], qp[q["C"]] - qp[q["A"]]], 2)  # 列 = AB, AC
         for h in hs:
             t_ = time.perf_counter(); lo = np.searchsorted(src["h"], h, "left"); hi = np.searchsorted(src["h"], h, "right"); SS_S[0] += time.perf_counter() - t_
             cnt = hi - lo; sel = (cnt > 0) & (cnt <= MAXHIT) & keep
             if not sel.any(): continue
             cs = cnt[sel]; qq = np.repeat(np.nonzero(sel)[0], cs); e = np.repeat(lo[sel] - np.cumsum(cs) + cs, cs) + np.arange(cs.sum())
             gf = src["gf"][e]; pa, pb, pc = PP[gf, src["A"][e]], PP[gf, src["B"][e]], PP[gf, src["C"][e]]
-            Vd = np.stack([pb - pa, pc - pa], 2).astype(np.float64)
-            vq = Vq[qq]; dq = vq[:, 0, 0] * vq[:, 1, 1] - vq[:, 0, 1] * vq[:, 1, 0]
-            iq = np.stack([np.stack([vq[:, 1, 1], -vq[:, 0, 1]], 1), np.stack([-vq[:, 1, 0], vq[:, 0, 0]], 1)], 1) / dq[:, None, None]
-            M = Vd @ iq  # クエリ→DB のアフィン行列
-            if FAST:  # 2x2 の特異値を閉じた式で出す（s0*s1=|det|、s0^2+s1^2=Frobenius^2）
-                det = np.abs(M[:, 0, 0] * M[:, 1, 1] - M[:, 0, 1] * M[:, 1, 0]); fr2 = (M ** 2).sum((1, 2))
-                r_ = np.sqrt(np.maximum(fr2 * fr2 - 4 * det * det, 0)); s = np.stack([np.sqrt((fr2 + r_) / 2), np.sqrt(np.maximum(fr2 - r_, 0) / 2)], 1)
+            if MODE == "pair":  # 2 点から相似変換（回転・拡大率）だけを出す。縦横比の票は 0
+                vq2 = qp[q["B"][qq]] - qp[q["A"][qq]]; vd2 = (pb - pa).astype(np.float64)
+                sc = np.log2(np.maximum(np.linalg.norm(vd2, axis=1), 1e-9) / np.maximum(np.linalg.norm(vq2, axis=1), 1e-9))
+                rot = (np.arctan2(vd2[:, 1], vd2[:, 0]) - np.arctan2(vq2[:, 1], vq2[:, 0])) % (2 * np.pi); an = np.zeros(len(sc))
             else:
-                s = np.linalg.svd(M, compute_uv=False)
-            sc = np.log2(np.sqrt(np.maximum(s[:, 0] * s[:, 1], 1e-9))); an = np.log2(s[:, 0] / np.maximum(s[:, 1], 1e-9))
-            rot = np.arctan2(M[:, 1, 0] - M[:, 0, 1], M[:, 0, 0] + M[:, 1, 1]) % (2 * np.pi)
+                Vd = np.stack([pb - pa, pc - pa], 2).astype(np.float64)
+                M = None
+                vq = Vq[qq]; dq = vq[:, 0, 0] * vq[:, 1, 1] - vq[:, 0, 1] * vq[:, 1, 0]
+                iq = np.stack([np.stack([vq[:, 1, 1], -vq[:, 0, 1]], 1), np.stack([-vq[:, 1, 0], vq[:, 0, 0]], 1)], 1) / dq[:, None, None]
+                M = Vd @ iq  # クエリ→DB のアフィン行列
+                if FAST:  # 2x2 の特異値を閉じた式で出す（s0*s1=|det|、s0^2+s1^2=Frobenius^2）
+                    det = np.abs(M[:, 0, 0] * M[:, 1, 1] - M[:, 0, 1] * M[:, 1, 0]); fr2 = (M ** 2).sum((1, 2))
+                    r_ = np.sqrt(np.maximum(fr2 * fr2 - 4 * det * det, 0)); s = np.stack([np.sqrt((fr2 + r_) / 2), np.sqrt(np.maximum(fr2 - r_, 0) / 2)], 1)
+                else:
+                    s = np.linalg.svd(M, compute_uv=False)
+                sc = np.log2(np.sqrt(np.maximum(s[:, 0] * s[:, 1], 1e-9))); an = np.log2(s[:, 0] / np.maximum(s[:, 1], 1e-9))
+                rot = np.arctan2(M[:, 1, 0] - M[:, 0, 1], M[:, 0, 0] + M[:, 1, 1]) % (2 * np.pi)
             off_b = np.clip(np.round((src["ts"][e] - ts) / OFF_S).astype(np.int64) + 512, 0, 1023)
             rot_b = np.floor(rot / (2 * np.pi) * ROT_B).astype(np.int64) % ROT_B
             sc_b = np.clip(np.round(sc / SC_B).astype(np.int64) + 16, 0, 31)
             an_b = np.clip(np.round(an / AN_B).astype(np.int64), 0, 7)
             key = (((src["vid"][e].astype(np.int64) << 10 | off_b) << 4 | rot_b) << 5 | sc_b) << 3 | an_b  # 25bit
+            if TB:  # DB 点 = 2^sc・R(rot)・クエリ点 + t
+                cr, sr = np.cos(rot) * 2.0 ** sc, np.sin(rot) * 2.0 ** sc; qa_ = qp[q["A"][qq]]
+                tx = pa[:, 0] - (cr * qa_[:, 0] - sr * qa_[:, 1]); ty = pa[:, 1] - (sr * qa_[:, 0] + cr * qa_[:, 1])
+                key = key << TB | np.clip(np.round(tx / TS).astype(np.int64) + 16, 0, 31) << 5 | np.clip(np.round(ty / TS).astype(np.int64) + 16, 0, 31)
             qa = (qi * NPTS + q["A"][qq]).astype(np.int64)  # クエリ点
             da = (src["ggf"][e].astype(np.int64) * NPTS + src["A"][e])  # DB 点
             rows.append((key, qa, da))
@@ -267,27 +384,38 @@ def score(fr):
     if not rows: return {}, {}, {}
     key, qa, da = (np.concatenate(x) for x in zip(*rows))
     if os.environ.get("DUMP") and not os.path.exists(os.environ["DUMP"]): np.savez(os.environ["DUMP"], key=key, qa=qa, da=da)
+    if DIAG_N[0]:  # 票の出どころを調べる用（diag_neg.py）: 票の組と、クエリ点・DB 点の座標・DB フレームの版と時刻
+        QP = np.full((len(fr), NPTS, 2), -1, np.float32)
+        for qi_, ts_, q_, hs_ in qs_: QP[qi_, :len(q_["p"])] = q_["p"]
+        np.savez(f"{H}/diag_{DIAG_N[0]}.npz", key=key, qa=qa, da=da, QP=QP, QTS=np.array([x[0] for x in fr]), DP=P, FI=np.array(finfo), NPTS=NPTS, TB=TB)
+        DIAG_N[0] = None
     # (key, クエリ点) と (key, DB 点) の重複なし票。フレームごとに CAP で頭打ち（1 本の int64 に詰めて unique）
+    if TSTAT:  # 時間で変わらない文字・ロゴ・止まった画面の票を、フレームの数だけ積み上げない
+        QP_ = np.zeros((len(fr), NPTS, 2), np.float32)
+        for qi_, ts_, q_, hs_ in qs_: QP_[qi_, :len(q_["p"])] = q_["p"]
+        qxy = QP_[qa // NPTS, qa % NPTS]; dxy = PP[da // NPTS, da % NPTS]
+        qa = (qxy[:, 0] // TSTAT).astype(np.int64) << 12 | (qxy[:, 1] // TSTAT).astype(np.int64)
+        da = (dxy[:, 0] // TSTAT).astype(np.int64) << 12 | (dxy[:, 1] // TSTAT).astype(np.int64)
     QS = int(qa.max()).bit_length()
     if FAST:  # 値だけの np.unique は hash 経路で遅いので、sort して隣と比べる
         def uq(a): a = np.sort(a); return a[np.r_[True, a[1:] != a[:-1]]]
     else:
         uq = np.unique
     kq = uq(key << QS | qa); kd = uq(key << DS | da)
-    kf, nf = np.unique((kq >> QS) << 7 | ((kq & ((1 << QS) - 1)) // NPTS), return_counts=True)
-    keys, capped = np.unique(kf >> 7, return_inverse=True); sq = np.bincount(capped, weights=np.minimum(nf, CAP))
+    kf, nf = np.unique((kq >> QS) << 7 | (0 if TSTAT else (kq & ((1 << QS) - 1)) // NPTS), return_counts=True)
+    keys, capped = np.unique(kf >> 7, return_inverse=True); sq = np.bincount(capped, weights=np.minimum(nf, 1 << 30 if TSTAT else CAP))
     kk, nd = np.unique(kd >> DS, return_counts=True)
     if FAST:  # 映像ごとの最大票を配列のまま出す（keys は昇順、vid は上位ビット）
         j = np.searchsorted(kk, keys); j = np.minimum(j, len(kk) - 1); v = np.minimum(sq, np.where(kk[j] == keys, nd[j], 0))
-        vid = keys >> 22; fcnt = np.bincount(capped); o = np.lexsort((-v, vid)); first = o[np.r_[True, vid[o][1:] != vid[o][:-1]]]
+        vid = keys >> (22 + TB); fcnt = np.bincount(capped); o = np.lexsort((-v, vid)); first = o[np.r_[True, vid[o][1:] != vid[o][:-1]]]
         first = first[v[first] > 0]
         T["agg"] += time.perf_counter() - t_h
-        return ({int(vid[i]): float(v[i]) for i in first}, {int(vid[i]): (((int(keys[i]) >> 12) & 1023) - 512) * OFF_S for i in first}, {int(vid[i]): int(fcnt[i]) for i in first})
+        return ({int(vid[i]): float(v[i]) for i in first}, {int(vid[i]): (((int(keys[i]) >> (12 + TB)) & 1023) - 512) * OFF_S for i in first}, {int(vid[i]): int(fcnt[i]) for i in first})
     ndm = dict(zip(kk.tolist(), nd.tolist()))
     best, off, nfr = {}, {}, {}
     for k, s_, fcount in zip(keys.tolist(), sq.tolist(), np.bincount(capped).tolist()):
-        v = min(s_, ndm.get(k, 0)); vid = k >> 22
-        if v > best.get(vid, 0): best[vid] = v; off[vid] = (((k >> 12) & 1023) - 512) * OFF_S; nfr[vid] = fcount
+        v = min(s_, ndm.get(k, 0)); vid = k >> (22 + TB)
+        if v > best.get(vid, 0): best[vid] = v; off[vid] = (((k >> (12 + TB)) & 1023) - 512) * OFF_S; nfr[vid] = fcount
     return best, off, nfr
 
 out = []
@@ -298,6 +426,7 @@ for k_ in T: T[k_] = 0.0
 for q in json.load(open(os.path.expanduser(os.environ.get("META", f"{H}/q/meta.json"))))[::(192 // LIMIT if LIMIT else 1)]:
     name = os.path.basename(q["file"])[:-4]; z = np.load(f"{C}/{name}.npz")
     t0 = time.perf_counter()
+    if os.environ.get("DIAG"): DIAG_N[0] = name
     best, off, nfr = score(frames(z, "full_"))
     if len(z["pip_off"]) > 1:
         pb_, po, pn = score(frames(z, "pip_"))

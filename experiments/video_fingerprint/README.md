@@ -1,4 +1,4 @@
-# 映像のハッシュ指紋（B3）の実験 script
+# 映像のハッシュ指紋の実験 script
 
 映像指紋を、音声と同じ「離散ハッシュを完全一致で引き、ずれの投票で確かめる」作りにできるかを試した script。RANSAC と生 AKAZE 記述子は使わない。結果は `docs/video_fingerprint_hash_experiment.md` にまとめた。製品コード（`src/`）は変えていない。
 
@@ -50,3 +50,47 @@ $P analyze_s.py B3fsc1000     # 正解率・誤検出 0 での再現率・加工
 - `invariance.py`: 点を検出し直さずに座標だけ変えて、ハッシュが残る割合を測る
 - `repeat.py` `repeat2.py` `repeat_pip.py`: 加工の前後で AKAZE の点が同じ場所に出る割合を測る
 - `analyze.py`: V0・C 案の集計、`cmp_nb.py`: 2 つの結果が同じかと速度の比較
+
+## 時間をまたぐハッシュ（T2・T3・T3P）
+
+```bash
+cd experiments/video_fingerprint
+P=../../.venv/bin/python
+S2="DBV=bbb,ed,sintel,tos,sprite,agent327,hero,coffee,spring,cosmos META=$VFEXP_DIR/q2/meta.json"
+
+# B3d: DB のキーフレームを横に縮めた 2 版（__s75・__s56）を作り、DB 側にも登録する。B3d＋場所 1 票は TSTAT=8
+$P extract_dbstretch.py
+C="NB=1 NBSS=1 FAST=1 MODE=tri WBITS=6 NPTS=1000 TPSI=0 TR=3 DBX=s75,s56"
+env TAG=T3dx $C $P eval_b2.py; env TAG=T3dxs $C TSTAT=8 $P eval_b2.py
+
+# T2: キーフレームの 2 点（静止点を除く）
+env TAG=TTdx STAT=4 DBX=s75,s56 $P eval_t.py
+
+# 0.5 秒ごとのフレームの AKAZE（LONG で長辺を変えると cache_fx{LONG}/ に出す。DB は縮めた 2 版も作る）
+for L in 1280 960 640; do env LONG=$L $P extract_fixed.py; done
+
+# T3P: 静止点を全点で除いてから 300 点。DB 640・クエリ 960。FAST=3 で検索を速くした処理（結果は同じ）
+C="PRESTAT=1 NPTS=300 F=1 STAT=2.0 CDIR=$VFEXP_DIR/cache_fx640 QCDIR=$VFEXP_DIR/cache_fx960 QSTAT=3.0 DBX=s75,s56 FAST=3"
+env TAG=TF3P640Q960dx $C $P eval_t3.py; env TAG=S2_TF3P640Q960dx $C $S2 $P eval_t3.py
+$P an_th.py TF3P640Q960dx:40 S2_TF3P640Q960dx:40   # 1 位−2 位の閾値で数える
+
+# クエリ 1 本の抽出時間（1 スレッド / フレームごとに N スレッド）
+env LONG=960 $P time_fixed.py; env LONG=960 N=8 $P time_par.py
+```
+
+T3 は `PRESTAT=1` を外したもの。長辺 1280 は `CDIR` を `cache_fx`、`STAT=4` にする。
+
+### `eval_t3.py` の主な環境変数
+
+| 変数 | 意味 |
+|---|---|
+| `CDIR` / `QCDIR` | DB / クエリの AKAZE キャッシュ（`QCDIR` を省くと `CDIR`） |
+| `STAT` / `QSTAT` | 静止点とみなす距離（px）。DB / クエリ |
+| `PRESTAT` | 1 で全点で静止点を判定してから `NPTS` 点を選ぶ |
+| `NPTS` / `F` / `SUB` | 1 枚の点数 / 後ろ何枚と組むか / フレームを何枚に 1 枚使うか |
+| `DBX` | DB に一緒に登録する縮めた版（`s75,s56`） |
+| `FAST` | 1: 静止点の判定と投票、2: ＋DB 引きを先頭 24 bit の表と numba 並列、3: ＋ハッシュ作りを numba。結果は同じ |
+| `DBCACHE` | DB をこの pickle に保存し、次からは読み込む（2.4GB 程度） |
+| `LIMIT` | クエリを間引いて N 本だけ評価する |
+
+`eval_b2.py` には、`MODE=tri`（a の半径内の 2 点で組む 3 点）、`TSTAT`（同じ場所の点を 1 票）、`DBX`、`DIAG=1`（票の出どころを `diag_neg.py` で見る）を足した。
