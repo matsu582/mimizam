@@ -484,7 +484,7 @@ class Mimizam:
         raws = [detect(v) for v in versions]
         if not hasher.is_trained:
             self.logger.info("Video hash model not trained: training on this video")
-            hasher.train([r[5] for r in raws[0]])
+            hasher.train([[r[5] for r in raws[0]]])
         rows = []
         for ver, raw in enumerate(raws):
             for h, ts, anchor, size, angle in hasher.db_rows(
@@ -1351,15 +1351,13 @@ class Mimizam:
             from .video_hash import detect, read_frames
             hasher = self._get_video_hasher()
             c = hasher.config
-            descs = []
-            for path in video_paths:
-                raw = detect(read_frames(path, c.db_step, c.db_long_side)[0])
-                descs.extend(r[5] for r in raw)
+            descs = [[r[5] for r in detect(read_frames(path, c.db_step, c.db_long_side)[0])]
+                     for path in video_paths]
             hasher.train(descs)
             if model_path:
                 hasher.save(model_path)
             return {"videos": len(video_paths),
-                    "descriptors": int(sum(len(d) for d in descs))}
+                    "frames": int(sum(len(v) for v in descs))}
         vfp = self._get_video_fingerprinter()
         stats = vfp.train_from_videos(video_paths)
         if model_path:

@@ -54,7 +54,8 @@ class VideoHashConfig:
     scale_bin: float = 0.5
     # 判定: 1 位の票 − 2 位の票がこれを超えたら一致
     margin_threshold: float = 11.0
-    codebook_samples: int = 200000
+    train_frames: int = 100
+    train_points: int = 200
 
 
 @dataclass
@@ -120,18 +121,25 @@ class VideoHasher:
     def is_trained(self) -> bool:
         return self.centers is not None
 
-    def train(self, descriptor_sets: List[np.ndarray]) -> None:
-        """視覚語（2^word_bits 語）を k-means で学習する"""
+    def train(self, videos: List[List[np.ndarray]]) -> None:
+        """視覚語（2^word_bits 語）を k-means で学習する。videos は映像ごとのフレームごとの記述子。
+        映像ごとに train_frames 枚、1 枚あたり train_points 点を選ぶ（映像の長さで偏らせない）"""
         from sklearn.cluster import MiniBatchKMeans
-        d = np.vstack([x for x in descriptor_sets if len(x)])
-        n = 1 << self.config.word_bits
-        if len(d) < n:
-            raise ValueError("Not enough descriptors to train visual words")
+        c = self.config
         rng = np.random.default_rng(0)
-        if len(d) > self.config.codebook_samples:
-            d = d[rng.choice(len(d), self.config.codebook_samples, replace=False)]
+        samp = []
+        for frames in videos:
+            frames = [d for d in frames if len(d)]
+            if not frames:
+                continue
+            for i in rng.choice(len(frames), min(c.train_frames, len(frames)), replace=False):
+                d = frames[i]
+                samp.append(d[rng.choice(len(d), min(c.train_points, len(d)), replace=False)])
+        n = 1 << c.word_bits
+        if sum(len(s) for s in samp) < n:
+            raise ValueError("Not enough descriptors to train visual words")
         km = MiniBatchKMeans(n, random_state=0, n_init=3, batch_size=4096).fit(
-            np.unpackbits(d, axis=1).astype(np.float32))
+            np.unpackbits(np.vstack(samp), axis=1).astype(np.float32))
         self.centers = km.cluster_centers_.astype(np.float32)
 
     def words(self, desc: np.ndarray) -> np.ndarray:
@@ -141,16 +149,18 @@ class VideoHasher:
 
     def select(self, raw, static_px: float):
         """静止点を全点で除き、残りから反応の強い順に max_points 点を選ぶ。(ts, 座標, 大きさ, 向き, 視覚語) の列"""
-        W = [self.words(r[5]) if len(r[5]) else np.zeros(0, np.int64) for r in raw]
-        trees = [cKDTree(r[1]) if len(r[1]) else None for r in raw]
+        raw = [r for r in raw if len(r[1])]
+        W = [self.words(r[5]) for r in raw]
+        trees = [cKDTree(r[1]) for r in raw]
+        bound = np.nextafter(static_px, np.inf)
         out = []
         for i, (ts, p, sz, th, resp, _) in enumerate(raw):
             st = np.zeros(len(p), bool)
             if static_px > 0 and len(p):
                 for j in (i - 1, i + 1):
-                    if 0 <= j < len(raw) and trees[j] is not None:
+                    if 0 <= j < len(raw):
                         k = min(8, len(raw[j][1]))
-                        d, nb = trees[j].query(p, k=k, distance_upper_bound=static_px)
+                        d, nb = trees[j].query(p, k=k, distance_upper_bound=bound)
                         d, nb = d.reshape(len(p), k), nb.reshape(len(p), k)
                         ok = np.isfinite(d)
                         wj = np.append(W[j], -1)[np.where(ok, nb, len(W[j]))]
@@ -221,8 +231,7 @@ class VideoHasher:
         h, fi, ai = self.hashes(frames, c.pair_gap, c.pair_gap, False)
         if not len(h):
             return []
-        h, idx = np.unique(np.stack([h, fi * c.max_points + ai], 1), axis=0).T
-        fi, ai = idx // c.max_points, idx % c.max_points
+        idx = fi * c.max_points + ai
         ts = np.array([f[0] for f in frames])[fi]
         sz, th = point_table(frames, c.max_points)
         sz, th = sz[fi, ai], th[fi, ai]

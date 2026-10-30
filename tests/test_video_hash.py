@@ -107,7 +107,7 @@ class TestHashAndVote(unittest.TestCase):
     def test_model_save_load_roundtrip(self):
         h = VideoHasher()
         rng = np.random.default_rng(0)
-        h.train([rng.integers(0, 256, (500, 61)).astype(np.uint8)])
+        h.train([[rng.integers(0, 256, (300, 61)).astype(np.uint8) for _ in range(3)]])
         with tempfile.TemporaryDirectory() as d:
             path = os.path.join(d, "m.npz")
             h.save(path)
