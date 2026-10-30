@@ -40,6 +40,8 @@ dependencies = [
     "soundfile>=0.10.3",
     "cffi>=1.15.0",
     "pydub>=0.25.1",
+    # Python 3.13 で標準ライブラリから消えた audioop を pydub が使う
+    "audioop-lts>=0.2.1; python_version >= '3.13'",
     "ffmpeg-python>=0.2.0",
     # Numba
     "numba>=0.56.0",
