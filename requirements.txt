@@ -4,6 +4,7 @@ matplotlib>=3.5.0
 scipy>=1.7.0
 soundfile>=0.10.3
 pydub>=0.25.1
+audioop-lts>=0.2.1; python_version >= "3.13"
 ffmpeg-python>=0.2.0
 #sqlite3
 #hashlib2
