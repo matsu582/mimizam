@@ -643,6 +643,8 @@ class ElasticsearchBackend(DatabaseBackend):
         self._videos_index = videos_idx
         self._frame_fp_index = ffp_idx
         self._frame_desc_index = fdesc_idx
+        vhash_idx = f"{self.songs_index.rsplit('_', 1)[0]}_video_hashes"
+        self._video_hash_index = vhash_idx
 
         videos_body = {
             "settings": {
@@ -692,8 +694,25 @@ class ElasticsearchBackend(DatabaseBackend):
             }},
         }
 
+        vhash_body = {
+            "settings": {
+                "number_of_shards": 1,
+                "number_of_replicas": 0,
+            },
+            "mappings": {"properties": {
+                "hash": {"type": "long"},
+                "video_id": {"type": "keyword"},
+                "version": {"type": "short", "index": False},
+                "timestamp": {"type": "double", "index": False},
+                "anchor": {"type": "integer", "index": False},
+                "size": {"type": "double", "index": False},
+                "angle": {"type": "double", "index": False},
+            }},
+        }
+
         try:
             self._create_index_if_missing(videos_idx, videos_body)
+            self._create_index_if_missing(vhash_idx, vhash_body)
             self._create_index_if_missing(ffp_idx, ffp_body)
             self._create_index_if_missing(fdesc_idx, fdesc_body)
 
@@ -1031,6 +1050,10 @@ class ElasticsearchBackend(DatabaseBackend):
                 index=self._frame_desc_index,
                 body={"query": {"term": {"video_id": video_id}}},
             )
+            self.client.delete_by_query(
+                index=self._video_hash_index,
+                body={"query": {"term": {"video_id": video_id}}},
+            )
             return True
         except ElasticsearchException as e:
             self.logger.error(
@@ -1039,6 +1062,71 @@ class ElasticsearchBackend(DatabaseBackend):
             raise DatabaseError(
                 "Failed to delete video", original_error=e,
                 context={'video_id': video_id},
+            ) from e
+
+    def add_video_hashes(
+        self, video_id: str,
+        rows: List[Tuple[int, int, float, int, float, float]],
+    ) -> bool:
+        """Elasticsearchに映像の時間 3 点ハッシュを一括保存（既存分は置き換え）"""
+        try:
+            self._ensure_video_indices()
+            self.client.delete_by_query(
+                index=self._video_hash_index,
+                body={"query": {"term": {"video_id": video_id}}},
+            )
+            actions = (
+                {
+                    "_index": self._video_hash_index,
+                    "_source": {
+                        "hash": int(h), "video_id": video_id,
+                        "version": int(v), "timestamp": float(ts),
+                        "anchor": int(a), "size": float(s), "angle": float(th),
+                    },
+                }
+                for h, v, ts, a, s, th in rows
+            )
+            _, failed = bulk(self.client, actions, chunk_size=5000,
+                             refresh=self.config.es_refresh_on_write)
+            if failed:
+                raise DatabaseError(
+                    "Failed to add video hashes (bulk index failure)",
+                    context={'video_id': video_id, 'failed': len(failed)},
+                )
+            return True
+        except DatabaseError:
+            raise
+        except Exception as e:
+            self.logger.error(f"Elasticsearch video hash save error: {e}")
+            raise DatabaseError(
+                "Failed to add video hashes", original_error=e,
+                context={'video_id': video_id, 'count': len(rows)},
+            ) from e
+
+    def search_video_hashes(
+        self, hashes: List[int],
+    ) -> List[Tuple[int, str, int, float, int, float, float]]:
+        """Elasticsearchでハッシュの完全一致を引く（terms を分割して全件 scan）"""
+        try:
+            self._ensure_video_indices()
+            uniq = sorted({int(h) for h in hashes})
+            out: List[Tuple[int, str, int, float, int, float, float]] = []
+            for i in range(0, len(uniq), 10000):
+                for src in self._scan_sources(
+                    self._video_hash_index,
+                    {"query": {"terms": {"hash": uniq[i:i + 10000]}}},
+                ):
+                    out.append((
+                        int(src["hash"]), src["video_id"], int(src["version"]),
+                        float(src["timestamp"]), int(src["anchor"]),
+                        float(src["size"]), float(src["angle"]),
+                    ))
+            return out
+        except Exception as e:
+            self.logger.error(f"Elasticsearch video hash search error: {e}")
+            raise DatabaseError(
+                "Failed to search video hashes", original_error=e,
+                context={'count': len(hashes)},
             ) from e
 
     def add_frame_descriptors(
