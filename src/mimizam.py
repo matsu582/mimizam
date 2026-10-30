@@ -382,12 +382,18 @@ class Mimizam:
         # が渡されたのに使い回してしまう誤接続を防ぐための識別子）。
         if not hasattr(self, '_video_db_key'):
             self._video_db_key = None
+        # 映像の方式: "vlad"（V0: VLAD/PCA の候補検索＋RANSAC）か "hash"（時間 3 点ハッシュ）
+        if not hasattr(self, '_video_method'):
+            self._video_method = "vlad"
+        if not hasattr(self, '_video_hasher'):
+            self._video_hasher = None
 
     def configure_video(
         self,
         scene_eval_fps: Optional[float] = None,
         profile_frames: Optional[bool] = None,
         store_raw_descriptors: Optional[bool] = None,
+        method: Optional[str] = None,
     ) -> None:
         """映像指紋の実行時設定を行う
 
@@ -401,9 +407,16 @@ class Mimizam:
                 Trueにすると元映像なしでの指紋再生成
                 （rebuild_video_fingerprints）が可能になる。既定はFalseで
                 容量肥大を避けるため保存しない。
+            method: 映像の方式（Noneで変更なし）。"vlad" は V0（VLAD/PCA の
+                候補検索＋RANSAC）、"hash" は時間 3 点ハッシュ。方式ごとに DB の
+                中身が違うため、方式を変えたら映像を登録し直す。
         """
         from .video_fingerprinter import VideoFingerprintConfig
         self._ensure_video_system()
+        if method is not None:
+            if method not in ("vlad", "hash"):
+                raise ValueError(f"Unknown video method: {method}")
+            self._video_method = method
         if self._video_config is None:
             self._video_config = VideoFingerprintConfig()
         if scene_eval_fps is not None:
@@ -434,6 +447,102 @@ class Mimizam:
                 config=self._video_config
             )
         return self._video_fingerprinter
+
+    def _get_video_hasher(self):
+        """時間 3 点ハッシュの作成器を取得（遅延インポート）"""
+        self._ensure_video_system()
+        if self._video_hasher is None:
+            from .video_hash import VideoHasher
+            self._video_hasher = VideoHasher()
+        return self._video_hasher
+
+    @staticmethod
+    def _read_video_duration(file_path: str) -> float:
+        import cv2
+        cap = cv2.VideoCapture(file_path)
+        duration = cap.get(cv2.CAP_PROP_FRAME_COUNT) / max(
+            cap.get(cv2.CAP_PROP_FPS), 1
+        )
+        cap.release()
+        return duration
+
+    def _add_video_hash(
+        self, file_path: str, title: str, video_id: str, vdb,
+    ) -> str:
+        """時間 3 点ハッシュで映像を登録する（元の版＋横に縮めた版）"""
+        from .video_hash import detect, read_frames
+        hasher = self._get_video_hasher()
+        c = hasher.config
+        versions = read_frames(
+            file_path, c.db_step, c.db_long_side, c.db_stretch
+        )
+        if not versions[0]:
+            raise MimizamError(
+                "No frames could be read from the video",
+                context={'file_path': file_path},
+            )
+        raws = [detect(v) for v in versions]
+        if not hasher.is_trained:
+            self.logger.info("Video hash model not trained: training on this video")
+            hasher.train([[r[5] for r in raws[0]]])
+        rows = []
+        for ver, raw in enumerate(raws):
+            for h, ts, anchor, size, angle in hasher.db_rows(
+                hasher.select(raw, c.db_static_px)
+            ):
+                rows.append((h, ver, ts, anchor, size, angle))
+        vdb.add_video(Video(
+            id=video_id, title=title, file_path=file_path,
+            duration=self._read_video_duration(file_path),
+            frame_count=len(versions[0]),
+        ))
+        vdb.add_video_hashes(video_id, rows)
+        self.logger.info(
+            f"Video successfully added (hash): {video_id} - {title} "
+            f"({len(rows)} hashes)"
+        )
+        return video_id
+
+    def _rank_video_hash(self, query_file_path: str, vdb) -> List[Dict[str, Any]]:
+        """時間 3 点ハッシュでクエリを照合し、票の多い順に全候補を返す（判定前）"""
+        import numpy as np
+        from .video_hash import detect, read_frames, vote
+        hasher = self._get_video_hasher()
+        c = hasher.config
+        images = read_frames(query_file_path, c.query_step, c.query_long_side)[0]
+        frames = hasher.select(detect(images), c.query_static_px)
+        qh, qf, qa = hasher.query_hashes(frames)
+        if not len(qh):
+            return []
+        rows = vdb.search_video_hashes(np.unique(qh).tolist())
+        best = vote(c, frames, qh, qf, qa, rows)
+        ranked = sorted(best.items(), key=lambda kv: -kv[1]["votes"])
+        videos = vdb.backend.get_videos([vid for vid, _ in ranked])
+        qdur = images[-1][0] - images[0][0] + c.query_step if images else 0.0
+        out = []
+        for i, (vid, b) in enumerate(ranked):
+            nxt = ranked[i + 1][1]["votes"] if i + 1 < len(ranked) else 0.0
+            margin = b["votes"] - (nxt if i == 0 else ranked[0][1]["votes"])
+            out.append({
+                "video_id": vid,
+                "video": videos.get(vid),
+                # 1 位: 2 位との票の差の割合（0〜1）。2 位以下は 0
+                "similarity": float(max(margin, 0.0) / b["votes"]) if i == 0 else 0.0,
+                "votes": b["votes"],
+                "margin": float(margin),
+                "is_match": bool(i == 0 and margin > c.margin_threshold),
+                "match_details": {
+                    "method": "hash",
+                    "time_offset": b["offset"],
+                    "query_duration": qdur,
+                    "regions": [{
+                        "db_start": b["offset"],
+                        "db_end": b["offset"] + qdur,
+                        "frame_count": int(b["votes"]),
+                    }],
+                },
+            })
+        return out
 
     def _get_video_db(
         self,
@@ -545,6 +654,12 @@ class Mimizam:
             if video_id is None:
                 video_id = str(uuid.uuid4())
 
+            self._ensure_video_system()
+            if self._video_method == "hash":
+                return self._add_video_hash(
+                    file_path, title, video_id, self._get_video_db(video_db_path)
+                )
+
             vfp = self._get_video_fingerprinter()
             vdb = self._get_video_db(video_db_path)
 
@@ -577,12 +692,7 @@ class Mimizam:
                 )
 
             # DBに保存
-            import cv2
-            cap = cv2.VideoCapture(file_path)
-            duration = cap.get(cv2.CAP_PROP_FRAME_COUNT) / max(
-                cap.get(cv2.CAP_PROP_FPS), 1
-            )
-            cap.release()
+            duration = self._read_video_duration(file_path)
 
             video = Video(
                 id=video_id,
@@ -750,6 +860,20 @@ class Mimizam:
                 raise FileNotFoundError(
                     f"Video file not found: {query_file_path}"
                 )
+
+            self._ensure_video_system()
+            if self._video_method == "hash":
+                # 時間 3 点ハッシュ: use_frame_matching・detect_pip は使わない
+                # （PiP はハッシュそのもので照合する）。一致は 1 位だけ
+                if not self._get_video_hasher().is_trained:
+                    raise MimizamError(
+                        "Video hash model is not trained. Register a video with add_video() first",
+                        context={'query_file_path': query_file_path},
+                    )
+                ranked = self._rank_video_hash(
+                    query_file_path, self._get_video_db(video_db_path)
+                )
+                return [r for r in ranked if r["is_match"]][:top_k]
 
             vfp = self._get_video_fingerprinter()
             vdb = self._get_video_db(video_db_path)
@@ -1222,6 +1346,18 @@ class Mimizam:
         Returns:
             学習統計情報
         """
+        self._ensure_video_system()
+        if self._video_method == "hash":
+            from .video_hash import detect, read_frames
+            hasher = self._get_video_hasher()
+            c = hasher.config
+            descs = [[r[5] for r in detect(read_frames(path, c.db_step, c.db_long_side)[0])]
+                     for path in video_paths]
+            hasher.train(descs)
+            if model_path:
+                hasher.save(model_path)
+            return {"videos": len(video_paths),
+                    "frames": int(sum(len(v) for v in descs))}
         vfp = self._get_video_fingerprinter()
         stats = vfp.train_from_videos(video_paths)
         if model_path:
@@ -1235,6 +1371,10 @@ class Mimizam:
         Args:
             model_path: モデルファイルパス
         """
+        self._ensure_video_system()
+        if self._video_method == "hash":
+            self._get_video_hasher().load(model_path)
+            return
         vfp = self._get_video_fingerprinter()
         vfp.load_model(model_path)
 
@@ -1254,6 +1394,12 @@ class Mimizam:
         Returns:
             再生成統計: {"total": 件数, "success": 成功数, "skip": スキップ数}
         """
+        self._ensure_video_system()
+        if self._video_method == "hash":
+            raise MimizamError(
+                "rebuild_video_fingerprints is not supported with the hash "
+                "method. Register the videos again"
+            )
         vfp = self._get_video_fingerprinter()
         vdb = self._get_video_db(video_db_path)
 

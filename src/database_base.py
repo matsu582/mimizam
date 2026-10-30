@@ -283,6 +283,25 @@ class DatabaseBackend(ABC):
         """映像と関連指紋を削除"""
         raise NotImplementedError("This backend does not support video fingerprinting")
 
+    def add_video_hashes(
+        self, video_id: str,
+        rows: List[Tuple[int, int, float, int, float, float]],
+    ) -> bool:
+        """映像の時間 3 点ハッシュを保存（その映像の既存ハッシュは置き換える）
+
+        rows: [(ハッシュ, 版, 時刻, アンカー番号, アンカーの大きさ, 向き), ...]
+        """
+        raise NotImplementedError("This backend does not support video hashes")
+
+    def search_video_hashes(
+        self, hashes: List[int],
+    ) -> List[Tuple[int, str, int, float, int, float, float]]:
+        """ハッシュの完全一致で引く
+
+        Returns: [(ハッシュ, 映像ID, 版, 時刻, アンカー番号, 大きさ, 向き), ...]
+        """
+        raise NotImplementedError("This backend does not support video hashes")
+
     def add_frame_descriptors(
         self, video_id: str,
         frames: List[Tuple[int, float, bytes, int]],
