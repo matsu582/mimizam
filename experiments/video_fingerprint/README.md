@@ -1,6 +1,6 @@
 # 映像のハッシュ指紋の実験 script
 
-映像指紋を、音声と同じ「離散ハッシュを完全一致で引き、ずれの投票で確かめる」作りにできるかを試した script。RANSAC と生 AKAZE 記述子は使わない。結果は `docs/video_fingerprint_hash_experiment.md` にまとめた。製品コード（`src/`）は変えていない。
+映像指紋を、音声と同じ「離散ハッシュを完全一致で引き、ずれの投票で確かめる」作りにできるかを試した script。RANSAC と生 AKAZE 記述子は使わない。結果は `docs/video_fingerprint_hash_experiment.md` にまとめた。T3P の「DB 0.5 秒・クエリ 1 秒」は `src/video_hash.py` に入れた（`configure_video(method="hash")`）。
 
 ## 前提
 
@@ -76,6 +76,23 @@ $P an_th.py TF3P640Q960dx:40 S2_TF3P640Q960dx:40   # 1 位−2 位の閾値で�
 
 # クエリ 1 本の抽出時間（1 スレッド / フレームごとに N スレッド）
 env LONG=960 $P time_fixed.py; env LONG=960 N=8 $P time_par.py
+```
+
+DB は 0.5 秒ごと・クエリは 1 秒ごと（`src/` に入れた方式）と、ORB の比較:
+
+```bash
+# DB は 0.5 秒ごとのフレームを 2 枚先（1 秒後）とだけ組む。クエリは 0.5 秒のキャッシュを 1 枚おきに使って 1 秒ごとにする
+C="SUB=1 QSUB=2 F=2 QF=1 DBK=2 PRESTAT=1 NPTS=300 STAT=2.0 CDIR=$VFEXP_DIR/cache_fx640 QCDIR=$VFEXP_DIR/cache_fx960 QSTAT=3.0 DBX=s75,s56 FAST=3"
+env TAG=TF3P640Q960dxQS2 $C $P eval_t3.py; env TAG=S2_TF3P640Q960dxQS2 $C $S2 $P eval_t3.py
+
+# ORB（1 枚 NF 点まで。cache_fx{LONG}orb/ に出す）。点の大きさを SZS=0.06 倍にして、ハッシュの数を AKAZE にそろえる
+for L in 960 640; do env LONG=$L DET=orb $P extract_fixed.py; done
+B="SZS=0.06 PRESTAT=1 NPTS=300 STAT=2.0 CDIR=$VFEXP_DIR/cache_fx640orb QCDIR=$VFEXP_DIR/cache_fx960orb QSTAT=3.0 DBX=s75,s56 FAST=3"
+env TAG=TF3ORB_OS1 $B SUB=1 F=1 $P eval_t3.py
+env TAG=TF3ORB_OQS2 $B SUB=1 QSUB=2 F=2 QF=1 DBK=2 $P eval_t3.py
+
+# 検出器ごとの 1 枚あたりの時間、加工ごとの点の再現率と記述子の一致率（AKAZE と ORB）
+$P bench_det.py; $P cmp_orb.py
 ```
 
 T3 は `PRESTAT=1` を外したもの。長辺 1280 は `CDIR` を `cache_fx`、`STAT=4` にする。

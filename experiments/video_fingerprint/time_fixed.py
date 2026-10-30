@@ -3,10 +3,10 @@ import json, os, sys, time
 import numpy as np, cv2
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__))); sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "../../..")))
 os.environ.setdefault("LONG", "1280")
-from extract_fixed import akaze_frame, LONG
+from extract_fixed import akaze_frame, LONG, DET, NF
 from mimizam.src.video_fingerprinter import _create_akaze
 STEP = float(os.environ.get("STEP", 0.5))
-cv2.setNumThreads(1); akaze = _create_akaze()
+cv2.setNumThreads(1); akaze = _create_akaze() if DET == "akaze" else cv2.ORB.create(nfeatures=NF)
 meta = json.load(open(os.path.expanduser(os.environ.get("VFEXP_DIR", "~/vfexp") + "/q/meta.json")))
 seen, pick = set(), []
 for m in meta:
@@ -23,4 +23,4 @@ for m in pick[:10]:
     cap.release(); t1 = time.perf_counter()
     for img in imgs: akaze_frame(akaze, img)
     t2 = time.perf_counter(); R.append((len(imgs), t1 - t0, t2 - t1)); print(os.path.basename(m["file"]), *("%.2f" % x for x in R[-1]), flush=True)
-a = np.array(R); print("長辺 %d 中央値 frames=%d 読み出し %.2fs AKAZE 全面 %.2fs" % tuple([LONG, np.median(a[:, 0])] + list(np.median(a[:, 1:], 0))))
+a = np.array(R); print(DET, "長辺 %d 中央値 frames=%d 読み出し %.2fs AKAZE 全面 %.2fs" % tuple([LONG, np.median(a[:, 0])] + list(np.median(a[:, 1:], 0))))

@@ -18,6 +18,9 @@ DBV = os.environ.get("DBV", "bbb,ed,sintel,tos,sprite,agent327").split(",")
 DBX = [x for x in os.environ.get("DBX", "").split(",") if x]
 NPTS, WBITS = E("NPTS", 300), E("WBITS", 6)
 SUB = E("SUB", 1)  # フレームを SUB 枚に 1 枚だけ使う（STEP×SUB 秒ごと）
+QSUB, QF = E("QSUB", SUB), E("QF", E("F", 1))  # クエリだけ別の間隔・組む枚数にするとき（QSUB は SUB の倍数。DB の「QSUB/SUB 枚先」の組と照らす）
+DBK = {int(x) for x in os.environ.get("DBK", "").split(",") if x}  # DB で組む枚数の差（例 2 なら 2 枚先とだけ組む）。空なら 1〜F すべて
+SZS = E("SZS", 1.0)  # 点の大きさに掛ける倍率（ORB の大きさを AKAZE に近づける用）
 F, DTMAX, DTQ = E("F", 1), E("DTMAX", 4.0), E("DTQ", 0.2)  # 後ろ何枚まで・何秒まで組むか、Δt の刻み
 TR, TRL, TRW = E("TR", 3.0), E("TRL", -0.5), E("TRW", 2.0)  # 相手を取る半径（a の大きさの倍数）、大きさの比（log2）の下限と幅
 STAT = E("STAT", 4.0)  # 静止点とみなす距離（px）。0 なら除外しない
@@ -32,12 +35,13 @@ def tick(k, t0):
     t = time.perf_counter(); PT_S[k] = PT_S.get(k, 0) + t - t0; return t
 ONLYMEAS = E("ONLYMEAS", 0)  # 1 なら DB を作らず、1 枚あたりのハッシュ数だけ出す
 
-def frames(z, pre):
+def frames(z, pre, sub=SUB):
     if pre + "off" not in z: return []
     off, ts, d, kp = z[pre + "off"], z[pre + "ts"], z[pre + "desc"], z[pre + "kp"]
     out = []
-    for i in range(0, len(off) - 1, SUB):
+    for i in range(0, len(off) - 1, sub):
         dd, kk = d[off[i]:off[i + 1]], kp[off[i]:off[i + 1]]
+        if SZS != 1: kk = kk.copy(); kk[:, 2] *= SZS
         sel = np.argsort(-kk[:, 4])[:None if PRESTAT else NPTS]; out.append((float(ts[i]), dd[sel], kk[sel]))
     return out
 
@@ -138,18 +142,18 @@ def _pairs_nb(p, sz, th, w, st, pj, szj, wj, stj, dji, soft, TR, TRL, TRW, WBITS
                     H[K] = (base << 4 | c1) << 4 | b1; AI[K] = a; K += 1
     return H, AI
 
-def pairs_nb(F_, soft):
+def pairs_nb(F_, soft, f=F, km_=1):
     H_, FI, AI = [], [], []
     for i, (ts, p, sz, th, w, st) in enumerate(F_):
-        for j in range(i + 1, min(i + 1 + F, len(F_))):
+        for j in range(i + 1, min(i + 1 + f, len(F_))):
             tj, pj, szj, thj, wj, stj = F_[j]
             if tj - ts > DTMAX: break
-            h, a = _pairs_nb(p, sz, th, w.astype(np.int64), st, pj, szj, wj.astype(np.int64), stj, j - i, soft, float(TR), float(TRL), float(TRW), WBITS)
+            h, a = _pairs_nb(p, sz, th, w.astype(np.int64), st, pj, szj, wj.astype(np.int64), stj, (j - i) * km_, soft, float(TR), float(TRL), float(TRW), WBITS)
             H_.append(h); AI.append(a); FI.append(np.full(len(h), i, np.int32))
     if not H_: return np.zeros(0, np.int64), np.zeros(0, np.int32), np.zeros(0, np.int32)
     return np.concatenate(H_), np.concatenate(FI), np.concatenate(AI)
 
-def pairs(F_, trees, soft):
+def pairs(F_, trees, soft, f=F, km_=1, ks=()):
     """(ハッシュ, アンカーのフレーム番号, アンカー点番号) を返す。soft なら c・b の方向の隣の箱も作る（クエリ側）"""
     H_, FI, AI = [], [], []
     for i, (ts, p, sz, th, w, st) in enumerate(F_):
@@ -158,9 +162,10 @@ def pairs(F_, trees, soft):
         Ac, Cc, dqc, dirc, rqc = nbr(trees[i], p, sz, ia, p, sz, st)
         if not len(Ac): continue
         o = np.argsort(Ac, kind="stable"); Ac, Cc, dqc, dirc, rqc = Ac[o], Cc[o], dqc[o], dirc[o], rqc[o]
-        for j in range(i + 1, min(i + 1 + F, len(F_))):
+        for j in range(i + 1, min(i + 1 + f, len(F_))):
             tj, pj, szj, thj, wj, stj = F_[j]
             if tj - ts > DTMAX: break
+            if ks and (j - i) not in ks: continue
             Ab, Bb, dqb, dirb, rqb = nbr(trees[j], p, sz, ia, pj, szj, stj)
             if not len(Ab): continue
             # 同じアンカーの c と b を総当たりで組む
@@ -171,7 +176,7 @@ def pairs(F_, trees, soft):
             drc = (dirc[ic] - thA) % (2 * np.pi) / (2 * np.pi) * 16; drb = (dirb[ib] - thA) % (2 * np.pi) / (2 * np.pi) * 16
             fc, fb = np.floor(drc).astype(np.int64), np.floor(drb).astype(np.int64)
             nc_ = np.where(drc - fc >= 0.5, fc + 1, fc - 1) % 16; nb_ = np.where(drb - fb >= 0.5, fb + 1, fb - 1) % 16
-            base = (((w[A].astype(np.int64) << WBITS | w[Cc[ic]]) << WBITS | wj[Bb[ib]]) << 2 | (j - i - 1)) << 4 | dqc[ic].astype(np.int64)
+            base = (((w[A].astype(np.int64) << WBITS | w[Cc[ic]]) << WBITS | wj[Bb[ib]]) << 2 | ((j - i) * km_ - 1)) << 4 | dqc[ic].astype(np.int64)
             base = ((base << 4 | dqb[ib].astype(np.int64)) << 2 | rqc[ic].astype(np.int64)) << 2 | rqb[ib].astype(np.int64)
             for c_ in ([fc % 16, nc_] if soft else [fc % 16]):
                 for b_ in ([fb % 16, nb_] if soft else [fb % 16]):
@@ -195,7 +200,7 @@ else:
     t0 = time.perf_counter(); cols = {k: [] for k in ("h", "vid", "ts", "gf", "a")}; PT = []; nfr = 0; nst = []
     for vi, n in enumerate(DBV):
         for zz in [caches[n]] + [np.load(f"{C}/{n}__{x}.npz") for x in DBX]:
-            F_, trees = prep(km, frames(zz, "full_")); h, fi, ai = pairs(F_, trees, False)
+            F_, trees = prep(km, frames(zz, "full_")); h, fi, ai = pairs(F_, trees, False, F, 1, DBK)
             nst += [x[5].mean() for x in F_]
             cols["h"].append(h); cols["vid"].append(np.full(len(h), vi, np.int8)); cols["ts"].append(np.array([F_[i][0] for i in range(len(F_))], np.float32)[fi] if len(h) else np.zeros(0, np.float32))
             cols["gf"].append((fi + len(PT)).astype(np.int32)); cols["a"].append(ai)
@@ -245,8 +250,9 @@ def uniq_count(x, sh):
     return x[b[:-1]], np.diff(b)
 
 def score(fr):
-    F_, trees = prep(km, fr, QSTAT); t0 = time.perf_counter(); h, fi, ai = pairs_nb(F_, True) if FAST >= 3 else pairs(F_, trees, True); t0 = tick("ハッシュ作り", t0)
+    F_, trees = prep(km, fr, QSTAT); t0 = time.perf_counter(); h, fi, ai = pairs_nb(F_, True, QF, QSUB // SUB) if FAST >= 3 else pairs(F_, trees, True, QF, QSUB // SUB); t0 = tick("ハッシュ作り", t0)
     if not len(h): return {}, {}, 0, 0
+    if os.environ.get("DUMPH"): DUMPED.append(h.copy())
     if FAST >= 2: lo, hi = bs_tab(db["h"], TAB, TSH, h)
     else: lo = np.searchsorted(db["h"], h, "left"); hi = np.searchsorted(db["h"], h, "right")
     cnt = hi - lo
@@ -276,14 +282,14 @@ def score(fr):
     tick("映像ごとの最高", t0)
     return best, off, len(h), int(sel.sum())
 
-PT_S.clear()
+PT_S.clear(); DUMPED = []
 out = []; LIMIT = E("LIMIT", 0)
 ql = json.load(open(os.path.expanduser(os.environ.get("META", f"{H}/q/meta.json"))))
 for q in ql[::(len(ql) // LIMIT if LIMIT else 1)]:
     name = os.path.basename(q["file"])[:-4]; z = np.load(f"{QC}/{name}.npz")
-    t0 = time.perf_counter(); best, off, nh, nhit = score(frames(z, "full_"))
+    t0 = time.perf_counter(); best, off, nh, nhit = score(frames(z, "full_", QSUB))
     if "pip_off" in z and len(z["pip_off"]) > 1:
-        pb_, po, _, _ = score(frames(z, "pip_"))
+        pb_, po, _, _ = score(frames(z, "pip_", QSUB))
         for v, c in pb_.items():
             if c > best.get(v, 0): best[v] = c; off[v] = po[v]
     qs = time.perf_counter() - t0
@@ -292,7 +298,8 @@ for q in ql[::(len(ql) // LIMIT if LIMIT else 1)]:
                     off=float(off[top]) if best else None, pos_ok=bool(top is not None and abs(off[top] - q["start"]) <= OFF_S * 2 + 2), nhash=int(nh), nhit=nhit,
                     true_score=float(best.get(DBV.index(q["src"]), 0)) if q["positive"] and q["src"] in DBV else None))
 print("検索の区間ごとの時間（クエリ 1 本あたり ms）", {k: round(v / len(out) * 1000, 1) for k, v in PT_S.items()}, "合計", round(sum(PT_S.values()) / len(out) * 1000, 1), "実測の中央値", round(float(np.median([r['sec'] for r in out])) * 1000, 1), flush=True)
+if os.environ.get("DUMPH"): np.savez(os.environ["DUMPH"], *DUMPED)
 tag = os.environ.get("TAG", "TF3")
-json.dump(dict(variant=tag, params=dict(SUB=SUB, F=F, DTMAX=DTMAX, DTQ=DTQ, TR=TR, TRL=TRL, TRW=TRW, STAT=STAT, QCDIR=QC, QSTAT=QSTAT, PRESTAT=PRESTAT, FAST=FAST, NPTS=NPTS, WBITS=WBITS, DBX=DBX),
+json.dump(dict(variant=tag, params=dict(SUB=SUB, QSUB=QSUB, QF=QF, DBK=sorted(DBK), SZS=SZS, F=F, DTMAX=DTMAX, DTQ=DTQ, TR=TR, TRL=TRL, TRW=TRW, STAT=STAT, QCDIR=QC, QSTAT=QSTAT, PRESTAT=PRESTAT, FAST=FAST, NPTS=NPTS, WBITS=WBITS, DBX=DBX),
                train_s=train_s, index_s=index_s, db_bytes=db_bytes, n_entries=n_entries, results=out), open(f"{H}/res_{tag}.json", "w"))
 print(tag, "done", n_entries, flush=True)

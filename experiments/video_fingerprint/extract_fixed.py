@@ -8,7 +8,9 @@ from extract import pack
 from mimizam.src.video_fingerprinter import _create_akaze, normalize_frame
 STEP = float(os.environ.get("STEP", 0.5))
 LONG = int(os.environ.get("LONG", 1280))
-CF = os.path.expanduser(os.environ.get("VFEXP_DIR", "~/vfexp") + "/cache_fx" + ("" if LONG == 1280 else str(LONG))); os.makedirs(CF, exist_ok=True)
+DET = os.environ.get("DET", "akaze")  # akaze か orb（ORB は NF 点まで。出力は cache_fx{LONG}orb/）
+NF = int(os.environ.get("NF", 1500))
+CF = os.path.expanduser(os.environ.get("VFEXP_DIR", "~/vfexp") + "/cache_fx" + ("" if LONG == 1280 else str(LONG)) + ("" if DET == "akaze" else DET)); os.makedirs(CF, exist_ok=True)
 def akaze_frame(akaze, img):
     """extract.py と同じ（長辺だけ LONG に変える）"""
     g = normalize_frame(cv2.cvtColor(img, cv2.COLOR_BGR2GRAY), LONG, allow_upscale=True)
@@ -21,7 +23,7 @@ SQ = {"s75": 1 / 1.33, "s56": 1 / 1.78}
 def job(args):
     path, name, stretch = args
     if os.path.exists(f"{CF}/{name}.npz"): return name, 0, 0.0
-    cv2.setNumThreads(1); akaze = _create_akaze()
+    cv2.setNumThreads(1); akaze = _create_akaze() if DET == "akaze" else cv2.ORB.create(nfeatures=NF)
     cap = cv2.VideoCapture(path); fps = cap.get(cv2.CAP_PROP_FPS) or 24.0
     vers = {"": []} | ({k: [] for k in SQ} if stretch else {}); fi = 0; nxt = 0.0; t0 = time.perf_counter(); n = 0
     while cap.grab():
