@@ -20,7 +20,7 @@ from mimizam import (
 )
 from mimizam.src import pip_detector
 from mimizam.src.video_fingerprinter import (
-    KEYPOINT_COLS, split_raw_descriptor,
+    KEYPOINT_COLS, VLADEncoder, split_raw_descriptor,
 )
 
 
@@ -113,6 +113,7 @@ class TestSearchPipRegions(unittest.TestCase):
 
         m._match_and_rank.assert_called_once_with(
             vdb, fp.frame_fingerprints, fp.raw_descriptors, 5,
+            geom_top_k=None,
         )
         self.assertEqual(len(results), 1)
         self.assertEqual(results[0]["pip_region"]["pip_score"], 3.5)
@@ -220,8 +221,9 @@ class TestLimitPipRegions(unittest.TestCase):
 
 
 class _FakeKp:
-    def __init__(self, pt):
+    def __init__(self, pt, response=0.0):
         self.pt = pt
+        self.response = response
 
 
 class _FakeAkaze:
@@ -280,6 +282,10 @@ class TestPipRawDescriptorFormat(unittest.TestCase):
             )
 
         vfp.encoder.encode_video.side_effect = _encode
+        # AKAZE 抽出は本物の経路（_create_akaze は下でダミーに差し替える）
+        vfp.encoder.extract_frame_features.side_effect = (
+            VLADEncoder(cfg).extract_frame_features
+        )
 
         region = PipRegion(
             x=100, y=100, w=400, h=300, area_ratio=0.1, pip_score=3.0,
