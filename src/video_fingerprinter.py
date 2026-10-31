@@ -1243,7 +1243,7 @@ class VideoFingerprinter:
         )
         stretched = None
         if narrow:
-            size = (int(round(h * 16 / 9)), h)
+            size = (round(h * 16 / 9), h)
             stretched = self._fingerprint_frames(
                 [(fi, ts, cv2.resize(img, size)) for fi, ts, img in frames],
                 remove_static,

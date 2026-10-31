@@ -12,8 +12,6 @@ from unittest import mock
 
 import cv2
 import numpy as np
-
-from mimizam import Mimizam
 from mimizam.src import pip_detector
 from mimizam.src.video_fingerprinter import (
     FrameSelector,
@@ -22,6 +20,8 @@ from mimizam.src.video_fingerprinter import (
     grid_keypoint_order,
     static_point_masks,
 )
+
+from mimizam import Mimizam
 
 
 def _frames_with_static(n_frames, n_static, n_moving, seed=0):
