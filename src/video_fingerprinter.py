@@ -454,6 +454,7 @@ class FrameSelector:
         eval_stride = max(1, int(round(fps / eval_fps)))
 
         detector = self._create_scene_detector()
+        to_timecode = self._scene_timecode_factory(fps)
         accepted: List[Tuple[int, float, np.ndarray]] = []
         prev_accepted_hist: Optional[np.ndarray] = None
         last_accepted_idx = -interval_frames
@@ -499,8 +500,8 @@ class FrameSelector:
                 # 最初のフレームは常にシーン開始として採用
                 is_scene_change = True
                 first_eval = False
-                detector.process_frame(frame_idx, small)
-            elif detector.process_frame(frame_idx, small):
+                detector.process_frame(to_timecode(frame_idx), small)
+            elif detector.process_frame(to_timecode(frame_idx), small):
                 is_scene_change = True
             if prof_on:
                 prof["scene"] += time.perf_counter() - _t
@@ -578,6 +579,19 @@ class FrameSelector:
         """
         from scenedetect.detectors import ContentDetector
         return ContentDetector(threshold=self.config.scene_threshold)
+
+    @staticmethod
+    def _scene_timecode_factory(fps: float):
+        """process_frame に渡すフレーム位置の作り方を返す
+
+        PySceneDetect 0.7 以降はフレーム番号(int)ではなく FrameTimecode を受け取る。
+        """
+        import scenedetect
+        version = tuple(int(v) for v in scenedetect.__version__.split(".")[:2])
+        if version < (0, 7):
+            return lambda frame_idx: frame_idx
+        from scenedetect import FrameTimecode
+        return lambda frame_idx: FrameTimecode(frame_idx, fps)
 
     def _compute_histogram(self, frame: np.ndarray) -> np.ndarray:
         """HSVヒストグラムを計算（冗長判定用）
