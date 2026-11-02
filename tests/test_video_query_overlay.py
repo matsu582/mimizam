@@ -179,6 +179,38 @@ class TestNarrowQuerySearch(unittest.TestCase):
         self.assertIsNone(m._match_and_rank.call_args.kwargs["geom_top_k"])
         self.assertEqual([r["video_id"] for r in res], ["a"])
 
+    def test_narrow_query_without_frame_matching_merges_stretched(self):
+        m = Mimizam.__new__(Mimizam)
+        m.logger = logging.getLogger("test_narrow")
+        fp = VideoFingerprint(
+            frame_fingerprints=[(0, 0.0, "orig")], raw_descriptors=[],
+        )
+        st = VideoFingerprint(
+            frame_fingerprints=[(0, 0.0, "stretched")], raw_descriptors=[],
+        )
+        vfp = mock.MagicMock()
+        vfp.is_trained = True
+        vfp.config = types.SimpleNamespace(store_raw_descriptors=False)
+        vfp.fingerprint_query_video.return_value = (fp, st, True)
+        vdb = mock.MagicMock()
+        vdb.search_frame_candidates.side_effect = [
+            [{"video_id": "a", "similarity": 0.3}],
+            [{"video_id": "b", "similarity": 0.5}],
+        ]
+        m._get_video_fingerprinter = lambda: vfp
+        m._get_video_db = lambda _p=None: vdb
+        with mock.patch("os.path.exists", return_value=True):
+            res = m.search_video(
+                "q.mp4", top_k=5, detect_pip=False, use_frame_matching=False,
+            )
+        queried = [
+            c.args[0] for c in vdb.search_frame_candidates.call_args_list
+        ]
+        self.assertEqual(
+            queried, [fp.frame_fingerprints, st.frame_fingerprints]
+        )
+        self.assertEqual([r["video_id"] for r in res], ["b", "a"])
+
 
 if __name__ == "__main__":
     unittest.main()

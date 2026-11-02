@@ -799,6 +799,14 @@ class Mimizam:
                     time.perf_counter() - _t_ann, len(candidates),
                 )
                 results = candidates[:top_k]
+                if stretched_fp is not None:
+                    results = self._merge_pip_results(
+                        results,
+                        vdb.search_frame_candidates(
+                            stretched_fp.frame_fingerprints, top_k=top_k * 2
+                        ),
+                        top_k,
+                    )
             else:
                 results = self._match_and_rank(
                     vdb, fp.frame_fingerprints, fp.raw_descriptors, top_k,
