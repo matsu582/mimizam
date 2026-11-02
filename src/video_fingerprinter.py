@@ -121,6 +121,9 @@ _STATIC_MAX_HAMMING = 60
 _STATIC_MIN_FRACTION = 0.5
 _STATIC_MIN_OTHERS = 3
 _STATIC_MIN_KEEP = 20
+# 長いクエリでは連続する _STATIC_WINDOW 枚以下のまとまりごとに判定する。
+# 止まった点は全フレームの組で比べると二乗で増え、メモリを使い果たすため。
+_STATIC_WINDOW = 64
 _POPCOUNT = np.unpackbits(
     np.arange(256, dtype=np.uint8)[:, None], axis=1
 ).sum(1)
@@ -134,15 +137,35 @@ def static_point_masks(
 ) -> List[np.ndarray]:
     """キーフレームをまたいで止まっている点（重ねた文字・ロゴ）を見つける
 
-    全フレームの点を1本のKD木にまとめ、半径内の点の組を一度に取り出してから
-    ハミング距離をまとめて計算する。点 a が「相手を持つフレーム」の数は、
-    同じフレームに相手が何点あっても1と数える。
+    _STATIC_WINDOW 枚を超えるときは、連続するフレームをほぼ同じ枚数の
+    まとまり（各 _STATIC_WINDOW 枚以下）に分けて、まとまりごとに判定する。
 
     Args:
         frames: [(AKAZE記述子 uint8 (N×D), キーポイント座標 (N×2)), ...]
 
     Returns:
         フレームごとの bool 配列（True が止まっている点）
+    """
+    n = len(frames)
+    if n <= _STATIC_WINDOW:
+        return _static_point_masks_block(frames)
+    masks: List[np.ndarray] = []
+    n_blocks = -(-n // _STATIC_WINDOW)
+    for idx in np.array_split(np.arange(n), n_blocks):
+        masks.extend(
+            _static_point_masks_block([frames[i] for i in idx])
+        )
+    return masks
+
+
+def _static_point_masks_block(
+    frames: List[Tuple[np.ndarray, np.ndarray]],
+) -> List[np.ndarray]:
+    """static_point_masks の判定本体（与えたフレームの中だけで比べる）
+
+    全フレームの点を1本のKD木にまとめ、半径内の点の組を一度に取り出してから
+    ハミング距離をまとめて計算する。点 a が「相手を持つフレーム」の数は、
+    同じフレームに相手が何点あっても1と数える。
     """
     from scipy.spatial import cKDTree
 

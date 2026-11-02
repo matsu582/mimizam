@@ -53,6 +53,15 @@ class TestStaticPointMasks(unittest.TestCase):
         for m in masks:
             self.assertFalse(m.any())
 
+    def test_long_query_is_judged_per_window(self):
+        # 窓（64 枚）を超えても、窓ごとに同じ判定になる
+        frames = _frames_with_static(150, 30, 40)
+        masks = static_point_masks(frames)
+        self.assertEqual(len(masks), 150)
+        for m in masks:
+            self.assertTrue(m[:30].all())
+            self.assertFalse(m[30:].any())
+
     def test_no_removal_with_few_keyframes(self):
         masks = static_point_masks(_frames_with_static(3, 30, 40))
         for m in masks:
