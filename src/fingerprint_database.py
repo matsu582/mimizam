@@ -209,10 +209,15 @@ class FingerprintMatcher:
 
         # 頑健直線回帰（ハフ投票）の傾き（＝time_scale）の妥当域と各種パラメータ。
         self.slope_range = (0.25, 4.0)
-        self.line_fit_sample_size = 150      # ペア傾き算出のサンプル点上限（O(K^2)抑制）
+        self.line_fit_sample_size = 250      # ペア傾き算出のサンプル点上限（O(K^2)抑制）
         self.slope_log2_bin = 0.03           # 傾きヒストグラムのビン幅（log2空間）
-        self.slope_min_dq = 1.0              # 傾き算出に使う query 時間差の下限（秒）
+        self.slope_min_dq = 2.0              # 傾き算出に使う query 時間差の下限（秒）
         self.slope_top_candidates = 5        # インライア評価に回す傾き候補ビン数
+        # オクターブ・エイリアス判定: 候補傾きが別候補の約 1/2・1/3（またはその逆数）
+        # に当たり、かつ相手候補が同等以上に整列している場合、基本周期側を優先する。
+        self.slope_alias_ratios = (2.0, 3.0)          # 判定対象の整数比
+        self.slope_alias_log2_tol = 0.15              # log2空間での比の許容差
+        self.slope_alias_inlier_ratio = 0.6           # 「同等以上」とみなすインライア比
     
     def find_matches(self, query_fingerprints: List[Fingerprint], 
                     min_matches: int = 5, top_k: int = 10, 
@@ -376,8 +381,14 @@ class FingerprintMatcher:
         return candidates
 
     def _inliers_for_slope(self, pairs: List[Tuple[float, float]], slope: float
-                           ) -> Tuple[float, List[Tuple[float, float]]]:
-        """与えた傾きに対しオフセット最頻ビンを求め、整合インライアを返す"""
+                           ) -> Tuple[float, List[Tuple[float, float]], float]:
+        """与えた傾きに対しオフセット最頻ビンを求め、整合インライアを返す
+
+        Returns:
+            (offset, inlier_pairs, mean_abs_residual)
+            mean_abs_residual はインライアの直線当てはめ残差 |db-slope·q-offset| の平均
+            （インライアが無ければ inf）。僅差候補の決定的タイブレークに用いる。
+        """
         offsets = [db_time - slope * q_time for q_time, db_time in pairs]
         tol = self.time_tolerance
         offset_votes: Dict[int, List[float]] = {}
@@ -390,16 +401,46 @@ class FingerprintMatcher:
             pair for pair, off in zip(pairs, offsets)
             if abs(off - offset) <= tol
         ]
-        return offset, inliers
+        if inliers:
+            residual = float(np.mean([abs(off - offset) for off in offsets
+                                      if abs(off - offset) <= tol]))
+        else:
+            residual = float('inf')
+        return offset, inliers, residual
+
+    def _is_slope_alias(self, index: int,
+                        scored: List[Tuple[float, float, List[Tuple[float, float]], float]]
+                        ) -> bool:
+        """候補 index がオクターブ・エイリアス（別候補の約 1/2・1/3）かを判定する
+
+        自己相似の高い音源では、真の傾き s に対して s/2・s/3 付近にも整列する偽の
+        副クラスタが生じ、ピーク集合の僅かな揺れでインライア数が真値を上回ることが
+        ある（速度復元がオクターブ落ちする）。ある候補が「同等以上に整列した別候補の
+        整数分の1」に当たる場合、基本周期側を残すためエイリアスとして降格する。
+        """
+        s_i = scored[index][0]
+        n_i = len(scored[index][2])
+        if n_i <= 0:
+            return False
+        for j, (s_j, _off, inl_j, _res) in enumerate(scored):
+            if j == index:
+                continue
+            if len(inl_j) < n_i * self.slope_alias_inlier_ratio:
+                continue
+            for ratio in self.slope_alias_ratios:
+                if abs(math.log2(s_j / s_i) - math.log2(ratio)) < self.slope_alias_log2_tol:
+                    return True
+        return False
 
     def _fit_scale_offset(self, pairs: List[Tuple[float, float]]
                           ) -> Tuple[float, float, List[Tuple[float, float]]]:
         """支配直線 db≈slope·query+offset を推定し、整合するインライアを返す
 
         1. _estimate_slope_candidates で傾き候補（=time_scale）を得票上位から複数得る。
-        2. 各候補についてオフセット最頻ビン近傍（±time_tolerance）のインライアを数え、
-           インライアが最大になる傾きを採用する。粗量子化で偶発的に別倍率のビンが
-           競り勝っても、真の倍率が最も整合するため取り違えを是正できる。
+        2. 各候補についてオフセット最頻ビン近傍（±time_tolerance）のインライアを数える。
+        3. (エイリアスでない, インライア数, 残差の小ささ) の優先で決定的に採用する。
+           粗量子化で偶発的に別倍率のビンが競り勝っても、基本周期側を優先し、僅差は
+           残差で決定的にほどくことで、オクターブ落ち等の取り違えを是正する。
 
         Returns:
             (slope, offset, inlier_pairs)
@@ -408,13 +449,23 @@ class FingerprintMatcher:
             return 1.0, 0.0, []
 
         lo, hi = self.slope_range
-        best = (1.0, 0.0, [])
+        scored: List[Tuple[float, float, List[Tuple[float, float]], float]] = []
         for cand in self._estimate_slope_candidates(pairs):
             slope = min(max(cand, lo), hi)
-            offset, inliers = self._inliers_for_slope(pairs, slope)
-            if len(inliers) > len(best[2]):
-                best = (slope, offset, inliers)
-        return best
+            offset, inliers, residual = self._inliers_for_slope(pairs, slope)
+            scored.append((slope, offset, inliers, residual))
+
+        if not scored:
+            return 1.0, 0.0, []
+
+        def rank_key(idx: int) -> Tuple[int, int, float]:
+            slope, _off, inliers, residual = scored[idx]
+            not_alias = 0 if self._is_slope_alias(idx, scored) else 1
+            return (not_alias, len(inliers), -residual)
+
+        best_idx = max(range(len(scored)), key=rank_key)
+        slope, offset, inliers, _residual = scored[best_idx]
+        return slope, offset, inliers
 
     def _alignment_significance(self, aligned: int, total: int,
                                 db_span: Optional[float]) -> float:
