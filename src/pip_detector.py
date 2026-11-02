@@ -1,14 +1,17 @@
 """
 PiP（Picture-in-Picture）矩形検出
 
-映像フレームの時間分散マップと2D連結成分解析を用いて、
 フレーム内に重畳された別映像の矩形領域を検出する。
 
 検出アルゴリズム:
-  1. 複数フレームの画素値の時間分散を計算
-  2. 分散マップのプロジェクション（水平・垂直）から急変点を検出
-  3. 分散マップの二値化 + 連結成分解析で矩形候補を検出
-  4. 矩形内外の分散パターン差と境界の不連続性でPiPを判定
+  1. 時間分散マップのプロジェクション・2D連結成分解析で矩形候補を作る
+  2. 隣り合う画素（_CORR_GAP 画素離れ）の時間方向の相関を求める。PiP の辺では
+     内側と外側が別の映像なので相関が弱くなる
+  3. 相関の弱い縦線・横線の組み合わせも矩形候補に加える
+  4. 各候補の辺ごとに「辺の上の相関の弱さ − 近くの基準線の相関の弱さ」を求め、
+     辺の位置を前後 _EDGE_SHIFT 画素で合わせ直す。黒い背景など相関が使えない辺は
+     「内側が動き外側が止まっているか」（時間方向の標準偏差の差）で補う
+  5. フレームの端に接しない辺の最小値を pip_score とし、閾値以上を返す
 """
 
 import logging
@@ -23,8 +26,15 @@ logger = logging.getLogger(__name__)
 # PiP検出の内部処理用解像度（長辺）
 _ANALYSIS_LONG_SIDE = 480
 
-# PiP判定の閾値
-DEFAULT_PIP_SCORE_THRESHOLD = 0.5
+# PiP判定の閾値（辺の時間相関の弱さの差。辺のうち最も弱いもの）
+DEFAULT_PIP_SCORE_THRESHOLD = 0.4
+
+# 辺の時間相関の採点
+_CORR_GAP = 4          # 相関を取る画素の間隔
+_CORR_EPS = 25.0       # 動きの無い画素で相関が暴れないための分母の下駄（輝度の標準偏差）
+_EDGE_SHIFT = 4        # 辺の位置を合わせ直す幅（画素）
+_LINE_PEAKS = 12       # 縦線・横線の候補として拾う数（各方向）
+_STD_EPS = 2.0         # 標準偏差の差で補うときの分母の下駄
 
 
 @dataclass
@@ -70,56 +80,264 @@ def detect_pip_regions(
         resized = frames
         scale = 1.0
 
-    # 時間分散マップを計算
     gray_stack = np.array([
         cv2.cvtColor(f, cv2.COLOR_BGR2GRAY).astype(np.float32)
         for f in resized
     ])
     variance_map = np.var(gray_stack, axis=0)
-
-    # フレーム間差分の累積マップ（偽陽性フィルタ用）
-    diff_map = _compute_diff_map(resized)
-
-    # 矩形候補を検出（2手法の統合）
     rh, rw = variance_map.shape[:2]
-    candidates = []
 
-    # 手法1: プロジェクション方式
-    proj_rects = _detect_by_projection(
+    # 矩形候補: 分散マップの2手法と、相関の弱い線の組み合わせ
+    candidates = _detect_by_projection(
         variance_map, scale, min_area_ratio, max_area_ratio
     )
-    candidates.extend(proj_rects)
-
-    # 手法2: 2D連結成分解析
-    area_rects = _detect_by_2d_analysis(
+    candidates += _detect_by_2d_analysis(
         variance_map, scale, min_area_ratio, max_area_ratio
     )
-    candidates.extend(area_rects)
-
-    # 重複除去と包含候補の統合
+    candidates += _merge_contained_regions(
+        _deduplicate(list(candidates)), scale, rw, rh
+    )
+    weak_h, weak_v = _temporal_corr_weakness(gray_stack)
+    candidates += _corr_line_candidates(
+        weak_h, weak_v, scale, rh, rw, min_area_ratio, max_area_ratio
+    )
     raw_candidate_count = len(candidates)
-    candidates = _deduplicate(candidates)
-    candidates = _merge_contained_regions(candidates, scale, rw, rh)
 
-    # 偽陽性フィルタ
-    filtered = _filter_false_positives(
-        candidates, variance_map, diff_map, scale
-    )
-
-    # pip_score閾値でフィルタ
-    result = [
-        r for r in filtered if r.pip_score >= pip_score_threshold
+    rects = np.array([
+        (int(r.x * scale), int(r.y * scale),
+         int((r.x + r.w) * scale), int((r.y + r.h) * scale))
+        for r in candidates
+    ], dtype=np.int64).reshape(-1, 4)
+    rects = rects[
+        ((rects[:, 2] - rects[:, 0]) >= 10)
+        & ((rects[:, 3] - rects[:, 1]) >= 10)
     ]
-    result.sort(key=lambda r: r.pip_score, reverse=True)
+    if len(rects) == 0:
+        return []
+
+    lines = _LineMeans(weak_h, weak_v, gray_stack.std(axis=0))
+    scores, fitted = _score_rects(lines, rh, rw, rects)
+
+    frame_area = float(h * w)
+    result: List[PipRegion] = []
+    for i in np.argsort(-scores, kind="stable"):
+        if scores[i] < pip_score_threshold:
+            break
+        x1, y1, x2, y2 = fitted[i]
+        rx, ry = int(x1 / scale), int(y1 / scale)
+        region = PipRegion(
+            x=rx, y=ry,
+            w=int((x2 - x1) / scale), h=int((y2 - y1) / scale),
+            area_ratio=0.0, pip_score=float(scores[i]), method="edge_corr",
+        )
+        region.area_ratio = region.w * region.h / frame_area
+        if all(_iou(region, k) <= 0.5 for k in result):
+            result.append(region)
+        if len(result) >= 5:
+            break
 
     if result:
         logger.info(
             f"PiP rectangle detection: {len(result)} found "
-            f"(out of {raw_candidate_count} candidates, "
-            f"merged to {len(candidates)})"
+            f"(out of {raw_candidate_count} candidates)"
         )
 
-    return result[:5]
+    return result
+
+
+def _iou(a: PipRegion, b: PipRegion) -> float:
+    iw = max(0, min(a.x + a.w, b.x + b.w) - max(a.x, b.x))
+    ih = max(0, min(a.y + a.h, b.y + b.h) - max(a.y, b.y))
+    inter = iw * ih
+    return inter / (a.w * a.h + b.w * b.h - inter + 1e-9)
+
+
+def _temporal_corr_weakness(
+    gray_stack: np.ndarray,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """隣り合う画素の時間方向の相関の弱さ（1−相関）
+
+    Returns:
+        (weak_h[y, x]: 画素 x と x+_CORR_GAP の間, weak_v[y, x]: 画素 y と y+_CORR_GAP の間)
+    """
+    k = _CORR_GAP
+    g = gray_stack - gray_stack.mean(axis=0, keepdims=True)
+    v = (g * g).mean(axis=0)
+    ch = (g[:, :, :-k] * g[:, :, k:]).mean(axis=0) / (
+        np.sqrt(v[:, :-k] * v[:, k:]) + _CORR_EPS
+    )
+    cv = (g[:, :-k, :] * g[:, k:, :]).mean(axis=0) / (
+        np.sqrt(v[:-k, :] * v[k:, :]) + _CORR_EPS
+    )
+    return 1 - ch, 1 - cv
+
+
+def _line_peaks(profile: np.ndarray, n: int, sep: int = 6) -> List[int]:
+    """大きい順に n 個（sep 画素以内の重複は除く）の位置を昇順で返す"""
+    out: List[int] = []
+    for i in np.argsort(-profile):
+        if profile[i] <= 0:
+            break
+        if all(abs(int(i) - j) > sep for j in out):
+            out.append(int(i))
+        if len(out) >= n:
+            break
+    return sorted(out)
+
+
+def _corr_line_candidates(
+    weak_h: np.ndarray, weak_v: np.ndarray, scale: float,
+    rh: int, rw: int, min_area_ratio: float, max_area_ratio: float,
+) -> List[PipRegion]:
+    """相関の弱い縦線・横線を投影で拾い、その組み合わせを矩形候補にする"""
+    k = _CORR_GAP
+    o = k + 3
+
+    def contrast(d: np.ndarray, axis: int) -> np.ndarray:
+        pad = ((0, 0), (o, o)) if axis == 0 else ((o, o), (0, 0))
+        a = np.pad(d, pad, mode="edge")
+        if axis == 0:
+            left, right = a[:, :-2 * o], a[:, 2 * o:]
+        else:
+            left, right = a[:-2 * o, :], a[2 * o:, :]
+        return np.clip(d - np.minimum(left, right), 0, None)
+
+    xs = [p + k // 2 for p in _line_peaks(contrast(weak_h, 0).mean(0), _LINE_PEAKS)]
+    ys = [p + k // 2 for p in _line_peaks(contrast(weak_v, 1).mean(1), _LINE_PEAKS)]
+    rects: List[PipRegion] = []
+    for i, x1 in enumerate(xs):
+        for x2 in xs[i + 1:]:
+            for j, y1 in enumerate(ys):
+                for y2 in ys[j + 1:]:
+                    a = (x2 - x1) * (y2 - y1) / (rh * rw)
+                    if min_area_ratio <= a <= max_area_ratio:
+                        rects.append(PipRegion(
+                            int(x1 / scale), int(y1 / scale),
+                            int((x2 - x1) / scale), int((y2 - y1) / scale),
+                            a, 0.0, "corr",
+                        ))
+    return rects
+
+
+class _LineMeans:
+    """相関の弱さ・標準偏差の、任意の縦線分・横線分の平均を O(1) で返す累積和"""
+
+    def __init__(self, weak_h: np.ndarray, weak_v: np.ndarray, std: np.ndarray):
+        self.ch = np.vstack([
+            np.zeros((1, weak_h.shape[1])),
+            np.cumsum(weak_h, 0, dtype=np.float64),
+        ])
+        self.cv = np.hstack([
+            np.zeros((weak_v.shape[0], 1)),
+            np.cumsum(weak_v, 1, dtype=np.float64),
+        ])
+        self.sc = np.vstack([
+            np.zeros((1, std.shape[1])), np.cumsum(std, 0, dtype=np.float64),
+        ])
+        self.sr = np.hstack([
+            np.zeros((std.shape[0], 1)), np.cumsum(std, 1, dtype=np.float64),
+        ])
+        self.nh, self.nv = weak_h.shape[1], weak_v.shape[0]
+
+
+def _edge_scores(
+    lines: _LineMeans, axis: int, pos: np.ndarray,
+    a: np.ndarray, b: np.ndarray, valid: np.ndarray,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """辺ごとの採点を全候補まとめて行う（valid でない辺は nan）
+
+    辺の位置を前後 _EDGE_SHIFT で動かして相関の最も弱い位置を探し、そこから
+    _CORR_GAP+_EDGE_SHIFT+3 画素離れた左右（上下）の基準線のうち弱い方との差を返す。
+    """
+    k = _CORR_GAP
+    n = lines.nh if axis == 0 else lines.nv
+    cs = lines.ch if axis == 0 else lines.cv
+    sh = np.arange(-_EDGE_SHIFT, _EDGE_SHIFT + 1)
+    ps = pos[:, None] + sh[None, :]
+    ok = (ps >= 0) & (ps < n) & valid[:, None] & (b > a)[:, None]
+    psc = np.clip(ps, 0, n - 1)
+    aa = np.broadcast_to(a[:, None], ps.shape)
+    bb = np.broadcast_to(b[:, None], ps.shape)
+    den = np.maximum(bb - aa, 1)
+    if axis == 0:
+        v = (cs[bb, psc] - cs[aa, psc]) / den
+    else:
+        v = (cs[psc, bb] - cs[psc, aa]) / den
+    v = np.where(ok, v, -np.inf)
+    i = np.argmax(v, 1)
+    rows = np.arange(len(v))
+    best = v[rows, i]
+    any_ok = ok.any(1)
+    bp = np.where(any_ok, psc[rows, i], pos)
+    off = k + _EDGE_SHIFT + 3
+    rp = bp[:, None] + np.array([-off, off])[None, :]
+    rok = (rp >= 0) & (rp < n)
+    rpc = np.clip(rp, 0, n - 1)
+    a2 = np.broadcast_to(a[:, None], rp.shape)
+    b2 = np.broadcast_to(b[:, None], rp.shape)
+    d2 = np.maximum(b2 - a2, 1)
+    if axis == 0:
+        rv = (cs[b2, rpc] - cs[a2, rpc]) / d2
+    else:
+        rv = (cs[rpc, b2] - cs[rpc, a2]) / d2
+    ref = np.where(rok, rv, np.inf).min(1)
+    s = np.where(any_ok, best, -9.0) - ref
+    s = np.where(valid & rok.any(1), s, np.nan)
+    return s, bp
+
+
+def _score_rects(
+    lines: _LineMeans, rh: int, rw: int, rects: np.ndarray,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """rects: (N,4) の x1,y1,x2,y2（解析解像度）。点数と、辺を合わせ直した矩形を返す
+
+    フレームの端に接する辺は数えない。数えた辺が3本未満の候補は -9 とする。
+    """
+    k = _CORR_GAP
+    x1, y1, x2, y2 = (rects[:, i].astype(np.int64) for i in range(4))
+    my = (y2 - y1) // 8
+    mx = (x2 - x1) // 8
+    h = k // 2
+    sl, pl = _edge_scores(lines, 0, x1 - h, y1 + my, y2 - my, x1 >= k + 2)
+    sr, pr = _edge_scores(lines, 0, x2 - h, y1 + my, y2 - my, rw - x2 >= k + 2)
+    st, pt = _edge_scores(lines, 1, y1 - h, x1 + mx, x2 - mx, y1 >= k + 2)
+    sb, pb = _edge_scores(lines, 1, y2 - h, x1 + mx, x2 - mx, rh - y2 >= k + 2)
+    S = np.stack([sl, sr, st, sb], 1)
+
+    # 辺の内側が動き外側が止まっているほど大きい（黒い背景などで相関が使えない辺の補い）
+    o = k + 3
+    hs, ws = lines.sc.shape[0] - 1, lines.sr.shape[1] - 1
+
+    def vline(x, a, b):
+        x = np.clip(x, 0, ws - 1)
+        return (lines.sc[b, x] - lines.sc[a, x]) / np.maximum(b - a, 1)
+
+    def hline(y, a, b):
+        y = np.clip(y, 0, hs - 1)
+        return (lines.sr[y, b] - lines.sr[y, a]) / np.maximum(b - a, 1)
+
+    bl, bt, br, bb = pl + h, pt + h, pr + h, pb + h
+    pairs = [
+        (vline(bl + o, y1 + my, y2 - my), vline(bl - o - 1, y1 + my, y2 - my)),
+        (vline(br - o - 1, y1 + my, y2 - my), vline(br + o, y1 + my, y2 - my)),
+        (hline(bt + o, x1 + mx, x2 - mx), hline(bt - o - 1, x1 + mx, x2 - mx)),
+        (hline(bb - o - 1, x1 + mx, x2 - mx), hline(bb + o, x1 + mx, x2 - mx)),
+    ]
+    V = np.stack([(i - e) / (i + e + _STD_EPS) for i, e in pairs], 1)
+    S = np.where(np.isnan(S), S, np.fmax(S, V))
+
+    cnt = (~np.isnan(S)).sum(1)
+    with np.errstate(all="ignore"):
+        scores = np.where(
+            cnt >= 3,
+            np.nanmin(np.where(cnt[:, None] > 0, S, 0), 1),
+            -9.0,
+        )
+    fitted = np.stack([
+        np.where(np.isnan(sl), x1, pl + h), np.where(np.isnan(st), y1, pt + h),
+        np.where(np.isnan(sr), x2, pr + h), np.where(np.isnan(sb), y2, pb + h),
+    ], 1)
+    return scores, fitted
 
 
 def sample_frames_from_video(

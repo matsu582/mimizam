@@ -209,7 +209,7 @@ class FingerprintMatcher:
 
         # 頑健直線回帰（ハフ投票）の傾き（＝time_scale）の妥当域と各種パラメータ。
         self.slope_range = (0.25, 4.0)
-        self.line_fit_sample_size = 250      # ペア傾き算出のサンプル点上限（O(K^2)抑制）
+        self.line_fit_sample_size = 300      # ペア傾き算出のサンプル点上限（O(K^2)抑制）
         self.slope_log2_bin = 0.03           # 傾きヒストグラムのビン幅（log2空間）
         self.slope_min_dq = 2.0              # 傾き算出に使う query 時間差の下限（秒）
         self.slope_top_candidates = 5        # インライア評価に回す傾き候補ビン数
@@ -333,48 +333,40 @@ class FingerprintMatcher:
         if n < 2:
             return [1.0]
 
-        # O(K^2) に制限するための等間隔サンプリング（決定的）
+        # O(K^2) に制限するための等間隔サンプリング（決定的）。真の直線上のペアが
+        # 少数派でも上位ビンに残るよう、サンプル数は多めに取り numpy でまとめて計算する。
+        arr = np.asarray(pairs, dtype=np.float64)
         k = self.line_fit_sample_size
         if n > k:
-            stride = n / k
-            sample = [pairs[int(i * stride)] for i in range(k)]
-        else:
-            sample = pairs
+            arr = arr[(np.arange(k) * (n / k)).astype(np.int64)]
 
         lo, hi = self.slope_range
         log_lo = math.log2(lo)
         bin_w = self.slope_log2_bin
-        # 傾き精度確保のため query 時間差がこの秒数以上のペアを優先採用する
-        min_dq = self.slope_min_dq
+        ii, jj = np.triu_indices(len(arr), 1)
+        dq = arr[jj, 0] - arr[ii, 0]
+        dd = arr[jj, 1] - arr[ii, 1]
 
-        def collect(min_gap: float) -> List[float]:
-            out = []
-            m = len(sample)
-            for i in range(m):
-                qi, di = sample[i]
-                for j in range(i + 1, m):
-                    qj, dj = sample[j]
-                    dq = qj - qi
-                    if abs(dq) < min_gap:
-                        continue
-                    s = (dj - di) / dq
-                    if lo <= s <= hi:
-                        out.append(s)
-            return out
+        def collect(min_gap: float) -> np.ndarray:
+            keep = np.abs(dq) >= min_gap
+            s = dd[keep] / dq[keep]
+            return s[(s >= lo) & (s <= hi)]
 
-        slopes = collect(min_dq)
-        if not slopes:  # 短いクエリ等でペアが集まらない場合は制約を緩める
+        # 傾き精度確保のため query 時間差が slope_min_dq 秒以上のペアを優先採用する
+        slopes = collect(self.slope_min_dq)
+        if not len(slopes):  # 短いクエリ等でペアが集まらない場合は制約を緩める
             slopes = collect(1e-6)
-        if not slopes:
+        if not len(slopes):
             return [1.0]
 
         # log2 空間でヒストグラム投票。得票上位ビンの中央値を候補にする。
-        votes: Dict[int, List[float]] = {}
-        for s in slopes:
-            b = int((math.log2(s) - log_lo) / bin_w)
-            votes.setdefault(b, []).append(s)
-        ranked = sorted(votes.values(), key=len, reverse=True)
-        candidates = [float(np.median(v)) for v in ranked[: self.slope_top_candidates]]
+        # 同票のビンは、先に現れた傾きのビンを優先する。
+        bins = ((np.log2(slopes) - log_lo) / bin_w).astype(np.int64)
+        _, first, inverse, counts = np.unique(
+            bins, return_index=True, return_inverse=True, return_counts=True
+        )
+        ranked = np.lexsort((first, -counts))[: self.slope_top_candidates]
+        candidates = [float(np.median(slopes[inverse == r])) for r in ranked]
         # 恒等倍率(1.0)は変換なしの基準として常に評価対象へ含める
         if all(abs(c - 1.0) > bin_w for c in candidates):
             candidates.append(1.0)
