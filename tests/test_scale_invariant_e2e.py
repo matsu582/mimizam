@@ -7,6 +7,8 @@
 実質無効・速度探索が brute-force だったため、この不変性を回帰として固定する。
 """
 
+import json
+import os
 import unittest
 
 import numpy as np
@@ -123,3 +125,20 @@ class TestScaleInvariantMatchingE2E(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class TestSlopeEstimationRegression(unittest.TestCase):
+    """time_scale 推定が、真の直線上のペアが少数派でも正しい倍率を選ぶこと"""
+
+    def test_tempo_0_8_pairs_from_avx512_runner(self):
+        # AVX-512 の CI ランナーで rate=0.8 のクエリが返した (query_time, db_time) の組。
+        # 真の倍率 0.8 のペアは 699 組中 46 組しかなく、150 組の抜き出しでは
+        # 候補から漏れて 1.33 を選んでいた。
+        path = os.path.join(os.path.dirname(__file__), "data", "tempo_0_8_avx512_pairs.json")
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+        pairs = [tuple(p) for p in data["pairs"]]
+        matcher = create_mimizam_sqlite(':memory:').matcher
+        slope, _, inliers = matcher._fit_scale_offset(pairs)
+        self.assertAlmostEqual(slope, data["rate"], delta=0.12)
+        self.assertGreaterEqual(len(inliers), 40)
