@@ -229,6 +229,24 @@ class VideoFingerprintDatabase:
         ]
         return self.backend.add_frame_descriptors(video_id, frames_blob)
 
+    def add_video_hashes(
+        self, video_id: str,
+        rows: List[Tuple[int, int, float, int, float, float]],
+    ) -> bool:
+        """時間 3 点ハッシュを保存（その映像の既存分は置き換える）
+
+        Args:
+            video_id: 映像ID
+            rows: [(ハッシュ, 版, 時刻, アンカー番号, アンカーの大きさ, 向き), ...]
+        """
+        return self.backend.add_video_hashes(video_id, rows)
+
+    def search_video_hashes(
+        self, hashes: List[int],
+    ) -> List[Tuple[int, str, int, float, int, float, float]]:
+        """ハッシュの完全一致で引く。[(ハッシュ, 映像ID, 版, 時刻, アンカー番号, 大きさ, 向き), ...]"""
+        return self.backend.search_video_hashes(hashes)
+
     def get_frame_descriptors(
         self, video_id: str,
         frame_indices: Optional[List[int]] = None,

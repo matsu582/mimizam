@@ -81,6 +81,10 @@ with create_mimizam_sqlite("my_media.db") as mimizam:
 
     # Search by video (per-frame ANN voting -> precise matching, with PiP detection)
     results = mimizam.search_video("path/to/clip.mp4", top_k=5)
+    # To use the temporal 3-point hash method (experimental; the default is the method above).
+    # The DB contents differ per method, so re-register videos after switching.
+    # Build its visual-word model with train_video_model()
+    # mimizam.configure_video(method="hash")
     for result in results:
         print(result)
 ```
