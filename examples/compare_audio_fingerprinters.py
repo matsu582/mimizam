@@ -77,9 +77,7 @@ def compare_audio_fingerprinters(audio_path):
     try:
         from src.audio_fingerprinter import AudioFingerprinter
         
-        conservative_fp = AudioFingerprinter(
-            enable_adaptive_params=False
-        )
+        conservative_fp = AudioFingerprinter()
         result = measure_fingerprinter_performance(
             conservative_fp, audio_path, "AudioFingerprinter（保守的）"
         )

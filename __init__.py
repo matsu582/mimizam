@@ -32,7 +32,7 @@ from .src.fingerprint_database import (
     create_elasticsearch_config
 )
 from .src.database_base import DatabaseConfig, Song, Fingerprint, Video
-from .src.adaptive_parameters import AdaptiveParameterTuner,PerformanceMonitor
+from .src.performance_monitor import PerformanceMonitor
 from .src.time_alignment import dominant_time_offset
 
 # 映像系（video_fingerprinter/video_database/pip_detector）は opencv-contrib 等の
@@ -112,7 +112,6 @@ __all__ = [
     'create_elasticsearch_config',
     
     # 高度な機能
-    'AdaptiveParameterTuner',
     'PerformanceMonitor',
     'dominant_time_offset',
 ]

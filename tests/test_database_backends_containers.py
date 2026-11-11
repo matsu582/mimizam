@@ -411,8 +411,7 @@ class TestMimizamCrossBackendIntegration(unittest.TestCase):
             matcher_config={
                 'min_confidence': 0.1,
                 'max_results': 10,
-            },
-            enable_adaptive_params=False  # テストの一貫性のため
+            }
         )
         
         try:
@@ -481,8 +480,7 @@ class TestMimizamCrossBackendIntegration(unittest.TestCase):
             matcher_config={
                 'min_confidence': 0.1,
                 'max_results': 5,
-            },
-            enable_adaptive_params=False
+            }
         )
         
         try:
@@ -512,7 +510,6 @@ class TestMimizamCrossBackendIntegration(unittest.TestCase):
         custom_fingerprinter_config = {
             'n_fft': 1024,
             'hop_length': 256,
-            'enable_adaptive_params': False,
             'audible_only': True
         }
         

@@ -401,8 +401,7 @@ class TestMySQLContainers(TestAudioMixin, unittest.TestCase):
                 matcher_config={
                     'min_confidence': 0.1,
                     'max_results': 5,
-                },
-                enable_adaptive_params=False
+                }
             )
             
             try:
@@ -485,8 +484,7 @@ class TestMySQLContainers(TestAudioMixin, unittest.TestCase):
             
             mimizam = create_mimizam_mysql(
                 **mysql_config,
-                matcher_config=custom_matcher_config,
-                enable_adaptive_params=False
+                matcher_config=custom_matcher_config
             )
             
             try:

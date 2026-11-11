@@ -54,7 +54,6 @@ class Mimizam:
             'sr': 22050,
             'min_amplitude': -60,
             'peak_neighborhood_size': 10,
-            'enable_adaptive_params': True,
             'audible_only': False
         }
         
@@ -1036,6 +1035,7 @@ class Mimizam:
         skip_visual: bool = False,
         divergence_tolerance: float = 30.0,
         min_combined_score: float = 0.0,
+        min_audio_confidence: float = 0.0,
     ) -> List[Dict[str, Any]]:
         """動画を音声指紋と映像指紋の両方で検索し、結果を統合する
 
@@ -1055,6 +1055,8 @@ class Mimizam:
             skip_visual: 映像検索をスキップする
             divergence_tolerance: 音声DB区間と映像DB区間の乖離許容（秒）
             min_combined_score: これ未満の統合スコアを除外する閾値
+            min_audio_confidence: 統合前に音声候補を足切りする信頼度の閾値。
+                これ未満の音声候補は統合に使わない（映像の結果は残る）
 
         Returns:
             統合検索結果のリスト（combined_score 降順）。各要素は id / title /
@@ -1081,7 +1083,8 @@ class Mimizam:
                 audio = self._decode_audio_from_media(query_file_path)
                 query_fingerprints = self.fingerprinter.fingerprint_audio(audio)
                 raw_matches = self._search_fingerprints(
-                    query_fingerprints, min_confidence=0.0, top_k=top_k * 4,
+                    query_fingerprints, min_confidence=min_audio_confidence,
+                    top_k=top_k * 4,
                     source=query_file_path,
                 )
                 for match in raw_matches:

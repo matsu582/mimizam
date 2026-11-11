@@ -11,7 +11,6 @@
 - **High-Precision Audio Fingerprinting**: Robust fingerprint generation based on Shazam algorithms
 - **Video Fingerprinting**: Per-frame fingerprints via AKAZE features + VLAD + PCA, with partial-clip search using per-frame ANN voting
 - **Combined Audio + Video Search**: Evaluates audio and video matches with a unified score (with position-divergence checking)
-- **Adaptive Parameter Optimization**: Automatic parameter adjustment based on audio characteristics
 - **Multi-Database Support**: SQLite, MySQL, MariaDB, PostgreSQL, Elasticsearch (video-fingerprint ANN uses sqlite-vec / pgvector / Elasticsearch dense_vector / MariaDB native VECTOR)
 - **Real-time Audio Recognition**: Instantly identify songs from short audio clips
 - **Visualization**: Spectrogram and peak detection visualization
@@ -118,7 +117,7 @@ python examples/mimizam_demo.py
 ### Core Technologies
 
 1. **Spectrogram Generation**: Time-frequency analysis using Short-Time Fourier Transform (STFT)
-2. **Adaptive Peak Detection**: Dynamic threshold-based spectral peak extraction based on audio characteristics
+2. **Peak Detection and Density Control**: Local maxima above a fixed-reference dB threshold (0 dB ≈ full-scale sine), thinned with a 0.1 s sliding window (12 peaks/s, 3 targets per anchor). Peak times are refined to sub-frame precision by parabolic interpolation, and the time ratio is quantized into 24 levels. The same rules are used for the DB and queries
 3. **Scale-invariant Fingerprinting**: 32-bit bit-packed hashes derived from anchor + two-target peak triplets. Each hash encodes a time ratio `(t1-tA)/(t2-tA)` and frequency ratios `log2(f1/fA)`, `log2(f2/fA)`, making it inherently invariant to speed (time-stretch) and pitch (frequency-scale) changes. Not a cryptographic hash. (Replaces the former absolute `[f1][f2][Δt]` scheme; existing databases must be re-fingerprinted.)
 4. **Single-search Matching**: One database lookup (no time/freq scale brute-force), followed by robust line-fit regression `db ≈ slope·query + offset` via Hough voting to recover the time scale/offset and score confidence from aligned inliers
 
@@ -181,7 +180,7 @@ mimizam/
 │   ├── audio_fingerprinter.py        # Audio fingerprint generation
 │   ├── fingerprint_database.py       # Database management
 │   ├── database_backends.py          # Unified backend
-│   ├── adaptive_parameters.py        # Adaptive parameter adjustment
+│   ├── performance_monitor.py        # Processing time / count monitoring
 │   └── backends/                     # Individual backend implementations
 │   ├── video_fingerprinter.py        # Video fingerprint generation (AKAZE+VLAD+PCA)
 │   ├── video_database.py             # Video fingerprint database
@@ -257,8 +256,7 @@ fingerprinter = AudioFingerprinter(
 
 1. **Audio Quality**: Best results with high-quality audio (44.1kHz+)
 2. **Sample Length**: Better identification accuracy with 10+ seconds
-3. **Adaptive Parameters**: Use enable_adaptive_params=True for speedup
-4. **Database Selection**: SQLite for small scale, PostgreSQL for large scale
+3. **Database Selection**: SQLite for small scale, PostgreSQL for large scale
 
 ## Testing
 

@@ -22,16 +22,17 @@ from mimizam.src.audio_fingerprinter import AudioFingerprinter
 from mimizam.src.database_base import Song
 
 
-def _make_reference(sr: int = 22050, dur: float = 12.0) -> np.ndarray:
-    """倍音を含む音階状の合成信号（決定的）を生成する"""
-    t = np.linspace(0, dur, int(dur * sr), endpoint=False)
+def _make_reference(sr: int = 22050, dur: float = 12.0, note: float = 0.25) -> np.ndarray:
+    """0.25 秒ごとに音高が変わる、倍音つきの旋律の合成信号（決定的）を生成する"""
+    t = np.arange(int(dur * sr)) / sr
     sig = np.zeros_like(t)
-    notes = [220, 277, 330, 440, 554, 659]
-    for k in range(6):
-        seg = (t >= k * 2.0) & (t < (k + 1) * 2.0)
-        f0 = notes[k % len(notes)]
+    n = int(dur / note)
+    f0s = 220 * 2 ** (np.random.default_rng(3).integers(0, 24, n) / 12)
+    for k in range(n):
+        seg = (t >= k * note) & (t < (k + 1) * note)
+        env = np.exp(-(t[seg] - k * note) * 6)
         for h in range(1, 6):
-            sig[seg] += (1.0 / h) * np.sin(2 * np.pi * f0 * h * t[seg])
+            sig[seg] += env * (1.0 / h) * np.sin(2 * np.pi * f0s[k] * h * t[seg])
     sig += 0.005 * np.random.default_rng(7).standard_normal(len(t))
     return (sig / np.max(np.abs(sig))).astype(np.float32)
 
@@ -51,9 +52,10 @@ class TestScaleInvariantMatchingE2E(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.sig = _make_reference(cls.SR)
-        # 再現性のため適応パラメータは無効化し、ピーク保持数を十分確保する
-        cls.fp = AudioFingerprinter(enable_adaptive_params=False)
-        cls.fp.hash_generator.max_peaks_per_second = 60
+        # 実データと同じ既定値（適応なし・1 秒 12 ピーク・相手 3 件）で確かめる。
+        # 同じ音が 2 秒続く信号だとピークが少なく、浮動小数の差で倍率を取り違えるため、
+        # 音高が 0.25 秒ごとに変わる旋律を使う
+        cls.fp = AudioFingerprinter()
         cls.ref_fps = cls.fp.fingerprint_audio(cls.sig)
 
     def setUp(self):

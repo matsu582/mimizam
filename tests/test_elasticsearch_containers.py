@@ -61,8 +61,7 @@ class TestElasticsearchContainers(TestAudioMixin, unittest.TestCase):
                 matcher_config={
                     'min_confidence': 0.1,
                     'max_results': 5,
-                },
-                enable_adaptive_params=False
+                }
             )
 
             song_id = mimizam.add_song(
@@ -583,8 +582,7 @@ class TestElasticsearchContainers(TestAudioMixin, unittest.TestCase):
                 matcher_config={
                     'min_confidence': 0.1,
                     'max_results': 5,
-                },
-                enable_adaptive_params=False
+                }
             )
             
             try:
@@ -700,8 +698,7 @@ class TestElasticsearchContainers(TestAudioMixin, unittest.TestCase):
             
             mimizam = create_mimizam_elasticsearch(
                 **elasticsearch_config,
-                matcher_config=custom_matcher_config,
-                enable_adaptive_params=False
+                matcher_config=custom_matcher_config
             )
             
             try:

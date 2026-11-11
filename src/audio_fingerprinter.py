@@ -17,7 +17,7 @@ import pickle
 import logging
 import math
 import time
-from .adaptive_parameters import AdaptiveParameterTuner, PerformanceMonitor
+from .performance_monitor import PerformanceMonitor
 from .database_base import Fingerprint
 from .exceptions import AudioProcessingError, FingerprintGenerationError
 
@@ -98,6 +98,8 @@ def _numba_optimized_peak_detection(magnitude_db: np.ndarray, mask: np.ndarray,
 
 class SpectrogramAnalyzer:
     """スペクトログラム生成とピーク検出を処理"""
+
+    _DB_FLOOR = -120.0  # dB の下限（無音部分の値をそろえる）
     
     def __init__(self, 
                  n_fft: int = 2048, 
@@ -144,8 +146,13 @@ class SpectrogramAnalyzer:
         stft = librosa.stft(audio, n_fft=self.n_fft, hop_length=self.hop_length)
         magnitude = np.abs(stft)
         
-        # dBスケールに変換
-        magnitude_db = librosa.amplitude_to_db(magnitude, ref=np.max)
+        # dBスケールに変換（0dB ≒ フルスケールの正弦波）
+        # 基準をファイルごとの最大値にすると、映画全体（DB）と短い切り出し（クエリ）で
+        # 閾値 min_amplitude の意味がずれ、同じ音から同じピークが取れなくなるため固定値にする
+        magnitude_db = librosa.amplitude_to_db(
+            magnitude, ref=self.n_fft / 4.0, top_db=None
+        )
+        magnitude_db = np.maximum(magnitude_db, self._DB_FLOOR)
         
         # 周波数と時間軸を生成
         frequencies = librosa.fft_frequencies(sr=self.sr, n_fft=self.n_fft)
@@ -220,9 +227,12 @@ class SpectrogramAnalyzer:
         )
 
         n_freq = magnitude.shape[0]
+        n_time = magnitude.shape[1]
         peaks = [
             Peak(
-                time=np.float64(times[t_idx]),
+                time=self._interpolate_peak_time(
+                    magnitude, times, f_idx, t_idx, n_time
+                ),
                 frequency=self._interpolate_peak_frequency(
                     magnitude, frequencies, f_idx, t_idx, n_freq
                 ),
@@ -238,6 +248,28 @@ class SpectrogramAnalyzer:
                 logger.info(f"Peak amplitude range: {np.min(amplitudes):.2f} to {np.max(amplitudes):.2f} dB")
         return peaks
     
+    @staticmethod
+    def _interpolate_peak_time(magnitude: np.ndarray, times: np.ndarray,
+                               f_idx: int, t_idx: int, n_time: int) -> np.float64:
+        """放物線補間でピーク時刻をサブフレーム精度に補正する
+
+        フレーム(約23ms)単位の時刻のままだと、速度変化版でピーク時刻が最大
+        半フレームずれ、尺度不変ハッシュの時間比が量子化境界を跨ぎやすい。
+        同じ周波数ビンの前後フレームの dB 値で放物線を当てて補正する。
+        端のフレームと、上に凸でない場合はフレーム時刻を返す。
+        """
+        if t_idx <= 0 or t_idx >= n_time - 1:
+            return np.float64(times[t_idx])
+        a = float(magnitude[f_idx, t_idx - 1])
+        b = float(magnitude[f_idx, t_idx])
+        c = float(magnitude[f_idx, t_idx + 1])
+        denom = a - 2.0 * b + c
+        if denom >= 0.0:
+            return np.float64(times[t_idx])
+        delta = min(max(0.5 * (a - c) / denom, -0.5), 0.5)
+        hop = float(times[t_idx + 1] - times[t_idx])
+        return np.float64(times[t_idx] + delta * hop)
+
     @staticmethod
     def _interpolate_peak_frequency(magnitude: np.ndarray, frequencies: np.ndarray,
                                     f_idx: int, t_idx: int, n_freq: int) -> np.float64:
@@ -362,14 +394,14 @@ class HashGenerator:
     # 量子化粒度は STFT 分解能（n_fft=2048, sr=22050 → 約10.8Hz, hop=512 → 約23ms）
     # に合わせて粗くする。細かすぎるとピーク周波数/時刻の微小変動でビンが跨り、
     # 速度・ピッチ変化版がヒットしなくなるため。
-    _RT_LEVELS = 48          # 時間比 r∈(0,1) を 48 段階に量子化（≒0.02刻み）
+    _RT_LEVELS = 24          # 時間比 r∈(0,1) を 24 段階に量子化（≒0.04刻み）
     _FR_STEP_OCT = 0.1       # 周波数比 log2 の量子化刻み（オクターブ, ≒1.2半音）
     _FR_MAX_OCT = 4.0        # 周波数比のクランプ範囲（±4オクターブ）
     _FR_CENTER = 0x800       # 12bit中央（符号付き比の0点）
 
     def __init__(self, 
-                 target_zone_size: int = 5,
-                 max_peaks_per_second: int = 30,  # 1秒あたりの最大ピーク数（密度制御）
+                 target_zone_size: int = 3,
+                 max_peaks_per_second: int = 12,  # 1秒あたりの最大ピーク数（密度制御）
                  density_time_window: float = 0.1):  # 定数マップの時間窓（秒）
         """
         ハッシュジェネレータを初期化
@@ -423,7 +455,6 @@ class HashGenerator:
     def _generate_hashes_from_peaks(self, sorted_peaks: List[Peak], debug: bool, logger) -> List[Fingerprint]:
         """ソート済みピークからハッシュを生成"""
         fingerprints = []
-        seen_hashes = set()
         anchor_count = 0
         pairs_checked = 0
         valid_time_deltas = []
@@ -437,7 +468,9 @@ class HashGenerator:
             if debug and i < 5:
                 self._debug_anchor_info(i, anchor_peak, sorted_peaks, logger)
             
-            # ハッシュ生成
+            # ハッシュ生成（重複除去はアンカーごと。ファイル全体で共有すると、
+            # 同じハッシュの2回目以降の時刻が捨てられ、長い音源ほど照合できる区間が減る）
+            seen_hashes: set = set()
             new_fingerprints = self._create_fingerprints_from_targets(
                 anchor_peak, target_peaks, seen_hashes, valid_time_deltas
             )
@@ -605,23 +638,22 @@ class HashGenerator:
         return hashes
     
     def _filter_peaks_by_density(self, peaks: List[Peak], debug: bool = False) -> List[Peak]:
-        """周波数を考慮した定数マップ方式でピーク密度を制御する
+        """スライド窓でピーク密度を制御する
 
-        尺度不変ハッシュでは「時間方向のみで1ピークに潰す」旧方式が致命的だった。
-        速度・ピッチ変化で"生き残るピーク"が変わり三つ組が対応しなくなるためである
-        （同時刻の複数周波数ピークを潰すと、変化後に別の周波数が選ばれてしまう）。
+        各ピークについて、自身を中心とする幅 density_time_window の時間窓内で
+        振幅が上位K件（周波数をまたいで比較）に入る場合だけ残す。
+        K = 窓幅 × max_peaks_per_second（最低1）。
 
-        そこで時間窓ごとに振幅上位K件を"周波数をまたいで"保持する定数マップ方式に
-        する。窓内の強いピークは尺度変化しても概ね強いまま残るため、選択が安定し、
-        変換版でも同じ三つ組が再現されやすい。1秒あたりのピーク数は
-        max_peaks_per_second で概ね一定に保つ（K = 窓幅 × max_peaks_per_second）。
+        絶対時刻で区切るバケット方式は、速度・テンポ変化で区切りの境目が音の中の
+        別の位置に来るため、DB とクエリで残るピークが変わってしまう。スライド窓は
+        近くのピークとの強さの比較だけで決まるので、時間軸の伸縮に強い。
 
         Args:
             peaks: 検出されたスペクトルピークのリスト
             debug: デバッグログを有効にする
 
         Returns:
-            フィルタリングされたピークのリスト
+            フィルタリングされたピークのリスト（時刻昇順）
         """
         logger = logging.getLogger(__name__)
 
@@ -634,20 +666,20 @@ class HashGenerator:
         window = self.density_time_window
         peaks_per_window = max(1, int(round(self.max_peaks_per_second * window)))
 
-        # 時間窓ごとに振幅上位K件を保持（周波数をまたいで選択）
-        buckets: dict = {}
-        for peak in peaks:
-            b = int(float(peak.time) / window)
-            buckets.setdefault(b, []).append(peak)
+        ordered = sorted(peaks, key=lambda p: float(p.time))
+        times = np.fromiter((float(p.time) for p in ordered), dtype=np.float64, count=len(ordered))
+        amps = np.fromiter((float(p.amplitude) for p in ordered), dtype=np.float64, count=len(ordered))
+        lo = np.searchsorted(times, times - window / 2.0, side="left")
+        hi = np.searchsorted(times, times + window / 2.0, side="right")
 
         filtered_peaks: List[Peak] = []
-        for bucket_peaks in buckets.values():
-            if len(bucket_peaks) > peaks_per_window:
-                bucket_peaks.sort(key=lambda p: p.amplitude, reverse=True)
-                bucket_peaks = bucket_peaks[:peaks_per_window]
-            filtered_peaks.extend(bucket_peaks)
-
-        filtered_peaks.sort(key=lambda p: float(p.time))
+        for i, peak in enumerate(ordered):
+            # 同じ振幅は時刻の早いほうを強いとみなし、上限を超えて残さない
+            stronger = int(np.count_nonzero(amps[lo[i]:hi[i]] > amps[i])) + int(
+                np.count_nonzero(amps[lo[i]:i] == amps[i])
+            )
+            if stronger < peaks_per_window:
+                filtered_peaks.append(peak)
 
         if debug:
             logger.info(f"Final filtered peak count: {len(filtered_peaks)}")
@@ -664,7 +696,6 @@ class AudioFingerprinter:
                  sr: int = 22050,
                  min_amplitude: float = -60,
                  peak_neighborhood_size: int = 10,
-                 enable_adaptive_params: bool = True,
                  audible_only: bool = False,
                  enable_numba_optimization: bool = True,
                  enable_performance_monitor: bool = True):
@@ -677,11 +708,9 @@ class AudioFingerprinter:
             sr: サンプルレート
             min_amplitude: ピーク検出の最小振幅閾値
             peak_neighborhood_size: 局所最大値検出の近傍サイズ
-            enable_adaptive_params: 適応的パラメータ調整を有効にする
             audible_only: 可聴域(20Hz-20kHz)のみを使う場合True
             enable_numba_optimization: Numba JIT最適化を有効にする
             enable_performance_monitor: パフォーマンス計測を有効にする
-                （適応的パラメータ調整とは独立して動作する）
         """
         self.spectrogram_analyzer = SpectrogramAnalyzer(
             n_fft, hop_length, sr, enable_numba_optimization=enable_numba_optimization
@@ -690,12 +719,9 @@ class AudioFingerprinter:
         self.sr = sr
         self.min_amplitude = min_amplitude
         self.peak_neighborhood_size = peak_neighborhood_size
-        self.enable_adaptive_params = enable_adaptive_params
         self.audible_only = audible_only
         
-        # 適応的パラメータ調整器（計測とは独立）
-        self.parameter_tuner = AdaptiveParameterTuner() if enable_adaptive_params else None
-        # パフォーマンス計測器（適応的パラメータのON/OFFに依存しない）
+        # パフォーマンス計測器
         self.performance_monitor = PerformanceMonitor() if enable_performance_monitor else None
         
     def load_audio_with_pydub(self, file_path: str ) -> np.ndarray:
@@ -746,33 +772,8 @@ class AudioFingerprinter:
             logger.info(f"Audio amplitude range: {np.min(audio):.4f} to {np.max(audio):.4f}")
             logger.info(f"Audio RMS: {np.sqrt(np.mean(audio**2)):.4f}")
         
-        # 適応的パラメータ調整
-        if self.enable_adaptive_params and self.parameter_tuner:
-            characteristics = self.parameter_tuner.analyze_audio_characteristics(audio, self.sr)
-            adjusted_params = self.parameter_tuner.adjust_parameters(characteristics)
-            
-            if debug:
-                summary = self.parameter_tuner.get_parameter_summary(characteristics, adjusted_params)
-                logger.info(f"Adaptive parameter adjustment:\n{summary}")
-            
-            # パラメータを適用
-            min_amplitude = adjusted_params['min_amplitude']
-            peak_neighborhood_size = adjusted_params['peak_neighborhood_size']
-            
-            # 共有インスタンスを書き換えず、この呼び出し専用のHashGeneratorを作成
-            # （同一インスタンスを複数スレッドで使っても競合しないようにするため）
-            hash_generator = HashGenerator(
-                target_zone_size=adjusted_params['target_zone_size'],
-                max_peaks_per_second=adjusted_params['max_peaks_per_second'],
-            )
-        else:
-            min_amplitude = self.min_amplitude
-            peak_neighborhood_size = self.peak_neighborhood_size
-            hash_generator = self.hash_generator
-        
-
         fingerprints = self._process_audio_sequential(
-            audio, min_amplitude, peak_neighborhood_size, hash_generator, debug
+            audio, self.min_amplitude, self.peak_neighborhood_size, self.hash_generator, debug
         )
         
         # パフォーマンス監視
