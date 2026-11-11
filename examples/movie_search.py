@@ -35,6 +35,8 @@ DB区間が大きく離れている（隙間 > 30秒）場合は、別々の箇�
 --------------------
     位置乖離許容    30.0秒   音声DB区間と映像DB区間の隙間がこれを超えると乖離扱い
     統合スコア閾値  0.3      これ未満の統合スコアは結果から除外
+    音声信頼度閾値  0.5      これ未満の音声候補は統合に使わない
+                             （audio_from_video_search.py の既定と同じ）
 """
 
 import argparse
@@ -61,6 +63,12 @@ VIDEO_EXTENSIONS = {
 }
 
 
+# 統合前に音声候補を足切りする信頼度（audio_from_video_search.py の既定と同じ）。
+# ノイズで真の整列が崩れたクエリでは、ありえない倍率の偽の直線が信頼度 0.4 前後で
+# 出るため、これを統合スコアに入れない。
+AUDIO_MIN_CONFIDENCE = 0.5
+
+
 def setup_logging(verbose: bool = False) -> None:
     """ログ設定のセットアップ"""
     level = logging.DEBUG if verbose else logging.INFO
@@ -80,7 +88,7 @@ def create_mimizam_instance(args) -> Mimizam:
         "enable_adaptive_params": True,
     }
     matcher_config = {
-        "min_confidence": 0.1,
+        "min_confidence": AUDIO_MIN_CONFIDENCE,
         "max_results": args.top_k * 4,
     }
 
@@ -521,6 +529,7 @@ def search_single_file(
         video_db_path=video_db_path,
         skip_audio=skip_audio,
         skip_visual=skip_visual,
+        min_audio_confidence=AUDIO_MIN_CONFIDENCE,
     )
     logger.info(f"統合候補: {len(merged)} 件")
 
