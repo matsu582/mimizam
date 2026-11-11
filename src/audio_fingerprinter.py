@@ -227,9 +227,12 @@ class SpectrogramAnalyzer:
         )
 
         n_freq = magnitude.shape[0]
+        n_time = magnitude.shape[1]
         peaks = [
             Peak(
-                time=np.float64(times[t_idx]),
+                time=self._interpolate_peak_time(
+                    magnitude, times, f_idx, t_idx, n_time
+                ),
                 frequency=self._interpolate_peak_frequency(
                     magnitude, frequencies, f_idx, t_idx, n_freq
                 ),
@@ -245,6 +248,28 @@ class SpectrogramAnalyzer:
                 logger.info(f"Peak amplitude range: {np.min(amplitudes):.2f} to {np.max(amplitudes):.2f} dB")
         return peaks
     
+    @staticmethod
+    def _interpolate_peak_time(magnitude: np.ndarray, times: np.ndarray,
+                               f_idx: int, t_idx: int, n_time: int) -> np.float64:
+        """放物線補間でピーク時刻をサブフレーム精度に補正する
+
+        フレーム(約23ms)単位の時刻のままだと、速度変化版でピーク時刻が最大
+        半フレームずれ、尺度不変ハッシュの時間比が量子化境界を跨ぎやすい。
+        同じ周波数ビンの前後フレームの dB 値で放物線を当てて補正する。
+        端のフレームと、上に凸でない場合はフレーム時刻を返す。
+        """
+        if t_idx <= 0 or t_idx >= n_time - 1:
+            return np.float64(times[t_idx])
+        a = float(magnitude[f_idx, t_idx - 1])
+        b = float(magnitude[f_idx, t_idx])
+        c = float(magnitude[f_idx, t_idx + 1])
+        denom = a - 2.0 * b + c
+        if denom >= 0.0:
+            return np.float64(times[t_idx])
+        delta = min(max(0.5 * (a - c) / denom, -0.5), 0.5)
+        hop = float(times[t_idx + 1] - times[t_idx])
+        return np.float64(times[t_idx] + delta * hop)
+
     @staticmethod
     def _interpolate_peak_frequency(magnitude: np.ndarray, frequencies: np.ndarray,
                                     f_idx: int, t_idx: int, n_freq: int) -> np.float64:
@@ -369,7 +394,7 @@ class HashGenerator:
     # 量子化粒度は STFT 分解能（n_fft=2048, sr=22050 → 約10.8Hz, hop=512 → 約23ms）
     # に合わせて粗くする。細かすぎるとピーク周波数/時刻の微小変動でビンが跨り、
     # 速度・ピッチ変化版がヒットしなくなるため。
-    _RT_LEVELS = 48          # 時間比 r∈(0,1) を 48 段階に量子化（≒0.02刻み）
+    _RT_LEVELS = 24          # 時間比 r∈(0,1) を 24 段階に量子化（≒0.04刻み）
     _FR_STEP_OCT = 0.1       # 周波数比 log2 の量子化刻み（オクターブ, ≒1.2半音）
     _FR_MAX_OCT = 4.0        # 周波数比のクランプ範囲（±4オクターブ）
     _FR_CENTER = 0x800       # 12bit中央（符号付き比の0点）

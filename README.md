@@ -117,7 +117,7 @@ python examples/mimizam_demo.py
 ### Core Technologies
 
 1. **Spectrogram Generation**: Time-frequency analysis using Short-Time Fourier Transform (STFT)
-2. **Peak Detection and Density Control**: Local maxima above a fixed-reference dB threshold (0 dB ≈ full-scale sine), thinned with a 0.1 s sliding window (12 peaks/s, 3 targets per anchor). The same rules are used for the DB and queries
+2. **Peak Detection and Density Control**: Local maxima above a fixed-reference dB threshold (0 dB ≈ full-scale sine), thinned with a 0.1 s sliding window (12 peaks/s, 3 targets per anchor). Peak times are refined to sub-frame precision by parabolic interpolation, and the time ratio is quantized into 24 levels. The same rules are used for the DB and queries
 3. **Scale-invariant Fingerprinting**: 32-bit bit-packed hashes derived from anchor + two-target peak triplets. Each hash encodes a time ratio `(t1-tA)/(t2-tA)` and frequency ratios `log2(f1/fA)`, `log2(f2/fA)`, making it inherently invariant to speed (time-stretch) and pitch (frequency-scale) changes. Not a cryptographic hash. (Replaces the former absolute `[f1][f2][Δt]` scheme; existing databases must be re-fingerprinted.)
 4. **Single-search Matching**: One database lookup (no time/freq scale brute-force), followed by robust line-fit regression `db ≈ slope·query + offset` via Hough voting to recover the time scale/offset and score confidence from aligned inliers
 
