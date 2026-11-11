@@ -501,18 +501,6 @@ Examples:
     )
     
     parser.add_argument(
-        '--enable-adaptive',
-        action='store_true',
-        help='Enable adaptive fingerprint generation (default: disabled; must match the DB build setting)'
-    )
-
-    parser.add_argument(
-        '--disable-adaptive',
-        action='store_true',
-        help='Disable adaptive fingerprint generation (default; kept for compatibility)'
-    )
-
-    parser.add_argument(
         '--audible-only',
         action='store_true',
         help='Use only audible frequency range (20Hz-20kHz) for fingerprint generation'
@@ -535,7 +523,6 @@ Examples:
         
         # 指紋生成器設定を作成
         fingerprinter_config = {
-            'enable_adaptive_params': args.enable_adaptive and not args.disable_adaptive,
             'audible_only': args.audible_only
         }
         
@@ -574,10 +561,6 @@ Examples:
             logger.error("Database is empty!")
             logger.info("Run audio_from_video_fingerprinter.py first to add songs to the database")
             return 1
-        
-        # 適応指紋生成ステータス
-        if args.enable_adaptive and not args.disable_adaptive:
-            logger.info("Using adaptive fingerprinting for optimal performance...")
         
         # ターゲットがファイルかフォルダかを判断
         target_path = Path(args.target)

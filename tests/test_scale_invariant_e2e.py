@@ -55,7 +55,7 @@ class TestScaleInvariantMatchingE2E(unittest.TestCase):
         # 実データと同じ既定値（適応なし・1 秒 12 ピーク・相手 3 件）で確かめる。
         # 同じ音が 2 秒続く信号だとピークが少なく、浮動小数の差で倍率を取り違えるため、
         # 音高が 0.25 秒ごとに変わる旋律を使う
-        cls.fp = AudioFingerprinter(enable_adaptive_params=False)
+        cls.fp = AudioFingerprinter()
         cls.ref_fps = cls.fp.fingerprint_audio(cls.sig)
 
     def setUp(self):

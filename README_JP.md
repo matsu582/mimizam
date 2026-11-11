@@ -11,7 +11,6 @@
 - **高精度音声指紋生成**: Shazamアルゴリズムベースの指紋生成
 - **映像指紋生成**: AKAZE特徴量＋VLAD＋PCAによるフレーム単位指紋と、フレーム単位ANN投票による部分クリップ検索
 - **音声＋映像の統合検索**: 音声・映像の一致を統合スコアで評価（位置乖離チェック付き）
-- **適応パラメータ調整（既定は無効）**: 音声特性に応じた自動パラメータ調整。DB とクエリで値がずれるため既定では使わない
 - **マルチデータベース対応**: SQLite、MySQL、MariaDB、PostgreSQL、Elasticsearch（映像指紋のANNはsqlite-vec / pgvector / Elasticsearch dense_vector / MariaDBネイティブVECTORを使用）
 - **リアルタイム音声識別**: 短い音声クリップから楽曲を特定
 - **可視化機能**: スペクトログラムとピーク検出の可視化
@@ -182,7 +181,7 @@ mimizam/
 │   ├── audio_fingerprinter.py        # 音声指紋生成
 │   ├── fingerprint_database.py       # データベース管理
 │   ├── database_backends.py          # 統一バックエンド
-│   ├── adaptive_parameters.py        # 適応パラメータ調整
+│   ├── performance_monitor.py        # 処理時間・件数の記録
 │   └── backends/                     # 個別バックエンド実装
 │   ├── video_fingerprinter.py        # 映像指紋生成（AKAZE+VLAD+PCA）
 │   ├── video_database.py             # 映像指紋データベース
@@ -258,8 +257,7 @@ fingerprinter = AudioFingerprinter(
 
 1. **音声品質**: 高品質音声（44.1kHz以上）で最良結果
 2. **サンプル長**: 10秒以上で識別精度向上
-3. **適応パラメータ**: 既定は無効（`enable_adaptive_params=False`）。有効にする場合は DB 作成と検索で同じ設定にする
-4. **データベース選択**: 小規模ならSQLite、大規模ならPostgreSQL
+3. **データベース選択**: 小規模ならSQLite、大規模ならPostgreSQL
 
 ## テスト
 

@@ -17,7 +17,7 @@ import pickle
 import logging
 import math
 import time
-from .adaptive_parameters import AdaptiveParameterTuner, PerformanceMonitor
+from .performance_monitor import PerformanceMonitor
 from .database_base import Fingerprint
 from .exceptions import AudioProcessingError, FingerprintGenerationError
 
@@ -671,7 +671,6 @@ class AudioFingerprinter:
                  sr: int = 22050,
                  min_amplitude: float = -60,
                  peak_neighborhood_size: int = 10,
-                 enable_adaptive_params: bool = False,
                  audible_only: bool = False,
                  enable_numba_optimization: bool = True,
                  enable_performance_monitor: bool = True):
@@ -684,14 +683,9 @@ class AudioFingerprinter:
             sr: サンプルレート
             min_amplitude: ピーク検出の最小振幅閾値
             peak_neighborhood_size: 局所最大値検出の近傍サイズ
-            enable_adaptive_params: 適応的パラメータ調整を有効にする（既定は無効）。
-                音声 1 本ごとに値を決めるため、映画全体（DB）と短いクエリで値が
-                ずれ、照合が弱くなる。有効にする場合は DB とクエリの両方で同じ値に
-                なることを確かめること
             audible_only: 可聴域(20Hz-20kHz)のみを使う場合True
             enable_numba_optimization: Numba JIT最適化を有効にする
             enable_performance_monitor: パフォーマンス計測を有効にする
-                （適応的パラメータ調整とは独立して動作する）
         """
         self.spectrogram_analyzer = SpectrogramAnalyzer(
             n_fft, hop_length, sr, enable_numba_optimization=enable_numba_optimization
@@ -700,12 +694,9 @@ class AudioFingerprinter:
         self.sr = sr
         self.min_amplitude = min_amplitude
         self.peak_neighborhood_size = peak_neighborhood_size
-        self.enable_adaptive_params = enable_adaptive_params
         self.audible_only = audible_only
         
-        # 適応的パラメータ調整器（計測とは独立）
-        self.parameter_tuner = AdaptiveParameterTuner() if enable_adaptive_params else None
-        # パフォーマンス計測器（適応的パラメータのON/OFFに依存しない）
+        # パフォーマンス計測器
         self.performance_monitor = PerformanceMonitor() if enable_performance_monitor else None
         
     def load_audio_with_pydub(self, file_path: str ) -> np.ndarray:
@@ -756,33 +747,8 @@ class AudioFingerprinter:
             logger.info(f"Audio amplitude range: {np.min(audio):.4f} to {np.max(audio):.4f}")
             logger.info(f"Audio RMS: {np.sqrt(np.mean(audio**2)):.4f}")
         
-        # 適応的パラメータ調整
-        if self.enable_adaptive_params and self.parameter_tuner:
-            characteristics = self.parameter_tuner.analyze_audio_characteristics(audio, self.sr)
-            adjusted_params = self.parameter_tuner.adjust_parameters(characteristics)
-            
-            if debug:
-                summary = self.parameter_tuner.get_parameter_summary(characteristics, adjusted_params)
-                logger.info(f"Adaptive parameter adjustment:\n{summary}")
-            
-            # パラメータを適用
-            min_amplitude = adjusted_params['min_amplitude']
-            peak_neighborhood_size = adjusted_params['peak_neighborhood_size']
-            
-            # 共有インスタンスを書き換えず、この呼び出し専用のHashGeneratorを作成
-            # （同一インスタンスを複数スレッドで使っても競合しないようにするため）
-            hash_generator = HashGenerator(
-                target_zone_size=adjusted_params['target_zone_size'],
-                max_peaks_per_second=adjusted_params['max_peaks_per_second'],
-            )
-        else:
-            min_amplitude = self.min_amplitude
-            peak_neighborhood_size = self.peak_neighborhood_size
-            hash_generator = self.hash_generator
-        
-
         fingerprints = self._process_audio_sequential(
-            audio, min_amplitude, peak_neighborhood_size, hash_generator, debug
+            audio, self.min_amplitude, self.peak_neighborhood_size, self.hash_generator, debug
         )
         
         # パフォーマンス監視

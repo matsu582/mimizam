@@ -274,8 +274,7 @@ class TestMimizamIntegration(unittest.TestCase):
             matcher_config={
                 'min_confidence': 0.1,
                 'max_results': 5,
-            },
-            enable_adaptive_params=False  # テストの一貫性のため無効化
+            }
         )
         
         # テスト用音声データを生成
@@ -437,8 +436,7 @@ class TestMimizamIntegration(unittest.TestCase):
                 'max_results': 3,
             },
             n_fft=1024,
-            hop_length=256,
-            enable_adaptive_params=False
+            hop_length=256
         )
         
         try:

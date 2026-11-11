@@ -312,26 +312,6 @@ class HashGenerator:
         return fingerprints
 ```
 
-### AdaptiveParameterTuner との連携
-
-```python
-class AdaptiveParameterTuner:
-    """適応パラメータ調整"""
-    
-    def optimize_for_audio(self, audio: np.ndarray) -> dict:
-        """音声特性に応じたパラメータ調整"""
-        # 音声特性分析
-        characteristics = self._analyze_audio(audio)
-        
-        # パラメータ調整
-        if characteristics['complexity'] > 0.8:
-            return {'min_amplitude': -70, 'peak_neighborhood_size': 30}
-        elif characteristics['noise_level'] > 0.5:
-            return {'min_amplitude': -40, 'peak_neighborhood_size': 15}
-        else:
-            return {}  # デフォルト設定
-```
-
 ## 🔧 設定管理アーキテクチャ
 
 ### 階層的設定システム
@@ -395,24 +375,15 @@ fingerprinter = AudioFingerprinter(enable_numba_optimization=False)  # JIT無効
 - Numbaは必須依存だが、未導入環境でも純Pythonで動作する（速度が低下するのみ）
 - 最大ピーク数の上限（`rows*cols//4`）は共通の検出関数に実装されており、経路に依存しない
 
-### 適応的パラメータ調整（既定は無効）
+### 適応的パラメータ調整（削除済み）
 
-音声特性（静寂比率・エントロピー・音量・テンポ・長さ・音色）から、`min_amplitude`・`peak_neighborhood_size`・`target_zone_size`・`max_peaks_per_second` を音声 1 本ごとに決める機能です。既定では無効です。
+以前は、音声特性（静寂比率・エントロピー・音量・テンポ・長さ・音色）から `min_amplitude`・`peak_neighborhood_size`・`target_zone_size`・`max_peaks_per_second` を音声 1 本ごとに決める `AdaptiveParameterTuner` がありました。今は削除し、固定値（1 秒 12 ピーク・三つ組の相手 3 件）を DB とクエリの両方で使います。
 
-```python
-from mimizam import AudioFingerprinter
-
-# 既定は固定値（1 秒 12 ピーク・三つ組の相手 3 件）
-fingerprinter = AudioFingerprinter()
-
-# 有効にする場合は、DB 作成と検索の両方で同じ設定にする
-fingerprinter = AudioFingerprinter(enable_adaptive_params=True)
-```
-
-既定で無効にしている理由:
+削除した理由:
 - 照合には、DB とクエリで同じ音から同じ三つ組ができる必要がある。映画全体（DB）と 30 秒の切り出し（クエリ）では長さやテンポの検出値が違うため、ほぼ必ず別の値になる（例: DB は 3 件・12 ピーク、クエリは 5 件・15〜20 ピーク）
 - 実測（映画 10 本・クエリ 810 本、足切り 0.5）で、固定値にすると等速は 85→89/90 本、速度・テンポ変化は 117→271/480 本に増え、誤りは 0 のまま
 - テンポ検出がなくなる分、指紋の生成も速い（888 秒の映画で 4.4 秒 → 1.4 秒）
+- 120 秒以下の音源（映画の 90 秒切り出し 30 本）と音楽 26 曲でも、適応ありより固定値のほうが誤りが少なかった（別の音源が出た件数: 38→5、19→6）
 
 ### DB とクエリで指紋をそろえるための作り
 
@@ -433,12 +404,12 @@ fingerprinter = AudioFingerprinter(enable_adaptive_params=True)
 
 ### パフォーマンス監視
 
-処理時間とリソース使用量の監視（適応的パラメータ調整と連動）：
+処理時間とリソース使用量の監視：
 
 ```python
 from mimizam import AudioFingerprinter
 
-# パフォーマンス監視は適応的パラメータ調整と連動して自動有効化
+# パフォーマンス監視は既定で有効（enable_performance_monitor=True）
 fingerprinter = AudioFingerprinter()
 
 # パフォーマンス監視が自動的に有効化される
