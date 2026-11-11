@@ -374,6 +374,14 @@ class TestFingerprintConsistencyDbVsQuery(unittest.TestCase):
                 expected = got
             self.assertEqual(got, expected, f"shift={shift}")
 
+    def test_density_filter_limits_equal_amplitudes(self):
+        """同じ振幅のピークが並んでも、窓の上限を超えて残らない"""
+        hg = HashGenerator()
+        peaks = [self._peak(1.0 + 0.001 * k, 200.0 + 100 * k, -20.0) for k in range(10)]
+        kept = hg._filter_peaks_by_density(peaks)
+        self.assertEqual(len(kept), 1)
+        self.assertAlmostEqual(float(kept[0].time), 1.0)
+
     def test_db_level_independent_of_file_maximum(self):
         """dB 値は固定の基準で、同じ音なら別の場所に大きな音があっても変わらない"""
         from mimizam.src.audio_fingerprinter import SpectrogramAnalyzer

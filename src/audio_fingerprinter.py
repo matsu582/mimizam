@@ -649,7 +649,10 @@ class HashGenerator:
 
         filtered_peaks: List[Peak] = []
         for i, peak in enumerate(ordered):
-            stronger = int(np.count_nonzero(amps[lo[i]:hi[i]] > amps[i]))
+            # 同じ振幅は時刻の早いほうを強いとみなし、上限を超えて残さない
+            stronger = int(np.count_nonzero(amps[lo[i]:hi[i]] > amps[i])) + int(
+                np.count_nonzero(amps[lo[i]:i] == amps[i])
+            )
             if stronger < peaks_per_window:
                 filtered_peaks.append(peak)
 
