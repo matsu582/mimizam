@@ -257,7 +257,7 @@ fingerprinter = AudioFingerprinter(
 
 1. **Audio Quality**: Best results with high-quality audio (44.1kHz+)
 2. **Sample Length**: Better identification accuracy with 10+ seconds
-3. **Adaptive Parameters**: Use enable_adaptive_params=True for speedup
+3. **Adaptive Parameters**: Disabled by default (`enable_adaptive_params=False`). Per-file tuning makes the DB (whole track) and short queries use different values, which hurts speed/tempo-changed queries. If you enable it, use the same setting for building the DB and searching
 4. **Database Selection**: SQLite for small scale, PostgreSQL for large scale
 
 ## Testing

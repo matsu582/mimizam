@@ -342,5 +342,53 @@ class TestMoviePositionDivergence(unittest.TestCase):
         )
 
 
+
+class TestFingerprintConsistencyDbVsQuery(unittest.TestCase):
+    """DB（長い音源）とクエリ（短い切り出し）で同じ音から同じ指紋ができる"""
+
+    @staticmethod
+    def _peak(t, f, a):
+        return Peak(time=np.float64(t), frequency=np.float64(f), amplitude=np.float64(a))
+
+    def test_same_hash_at_different_times_kept(self):
+        """同じハッシュが別の時刻に再び出ても、2回目以降の時刻を捨てない"""
+        hg = HashGenerator()
+        pattern = [(0.0, 200.0, -10.0), (0.3, 400.0, -11.0), (0.7, 300.0, -12.0), (1.2, 500.0, -13.0)]
+        peaks = [self._peak(t + base, f, a) for base in (0.0, 10.0) for t, f, a in pattern]
+        fps = hg.generate_hashes(peaks)
+        times_by_hash = {}
+        for fp in fps:
+            times_by_hash.setdefault(fp.hash_value, set()).add(float(fp.time_offset))
+        self.assertTrue(any({0.0, 10.0} <= ts for ts in times_by_hash.values()))
+
+    def test_density_filter_independent_of_time_origin(self):
+        """密度制御で残るピークが、時刻の原点（切り出し位置）に依存しない"""
+        hg = HashGenerator()
+        rng = np.random.default_rng(0)
+        rel = [(float(t), float(f), float(a)) for t, f, a in zip(
+            np.sort(rng.uniform(0, 5, 200)), rng.uniform(100, 4000, 200), rng.uniform(-60, 0, 200))]
+        for shift in (0.0, 0.03, 0.05, 0.07, 12.34):
+            kept = hg._filter_peaks_by_density([self._peak(t + shift, f, a) for t, f, a in rel])
+            got = sorted((round(float(p.time) - shift, 6), float(p.frequency)) for p in kept)
+            if shift == 0.0:
+                expected = got
+            self.assertEqual(got, expected, f"shift={shift}")
+
+    def test_db_level_independent_of_file_maximum(self):
+        """dB 値は固定の基準で、同じ音なら別の場所に大きな音があっても変わらない"""
+        from mimizam.src.audio_fingerprinter import SpectrogramAnalyzer
+        sr = 22050
+        t = np.arange(512 * 86) / sr  # hop の整数倍にしてフレーム位置をそろえる
+        quiet = (0.01 * np.sin(2 * np.pi * 440 * t)).astype(np.float32)
+        loud = (0.9 * np.sin(2 * np.pi * 1000 * t)).astype(np.float32)
+        sa = SpectrogramAnalyzer(sr=sr)
+        alone, _, _ = sa.generate_spectrogram(quiet)
+        both, _, _ = sa.generate_spectrogram(np.concatenate([loud, quiet]))
+        n = alone.shape[1]
+        # 境目の影響がないフレーム同士で比べる
+        self.assertTrue(np.allclose(alone[:, 5:n - 5], both[:, -n + 5:-5], atol=1e-3))
+        # 0dB ≒ フルスケール正弦波なので、振幅 0.9 の音は 0dB 付近
+        self.assertAlmostEqual(float(both.max()), 20 * np.log10(0.9), delta=1.0)
+
 if __name__ == "__main__":
     unittest.main()

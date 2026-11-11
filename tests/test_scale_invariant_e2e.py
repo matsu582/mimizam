@@ -52,8 +52,11 @@ class TestScaleInvariantMatchingE2E(unittest.TestCase):
     def setUpClass(cls):
         cls.sig = _make_reference(cls.SR)
         # 再現性のため適応パラメータは無効化し、ピーク保持数を十分確保する
+        # （12 秒・6 音の合成信号は既定の 1 秒 12 ピーク・相手 3 件ではピークが少なすぎるため、
+        #   ハッシュと照合の尺度不変性を見るこのテストでは 60 ピーク・相手 5 件に固定する）
         cls.fp = AudioFingerprinter(enable_adaptive_params=False)
         cls.fp.hash_generator.max_peaks_per_second = 60
+        cls.fp.hash_generator.target_zone_size = 5
         cls.ref_fps = cls.fp.fingerprint_audio(cls.sig)
 
     def setUp(self):

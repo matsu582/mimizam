@@ -77,7 +77,7 @@ def setup_logging(verbose: bool = False) -> None:
 def create_mimizam_instance(args) -> Mimizam:
     """コマンドライン引数に基づいてMimizamインスタンスを作成する"""
     fingerprinter_config = {
-        "enable_adaptive_params": True,
+        "enable_adaptive_params": False,
     }
     matcher_config = {
         "min_confidence": 0.1,

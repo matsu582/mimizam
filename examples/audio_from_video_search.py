@@ -453,7 +453,6 @@ Examples:
   python audio_from_video_search.py /path/to/folder --database custom.db --details
   python audio_from_video_search.py /path/to/audio.mp3 --verbose --details
   python audio_from_video_search.py /path/to/folder --min-confidence 0.7 --details
-  python audio_from_video_search.py /path/to/video.mp4 --disable-adaptive --details
         """
     )
     
@@ -502,9 +501,15 @@ Examples:
     )
     
     parser.add_argument(
+        '--enable-adaptive',
+        action='store_true',
+        help='Enable adaptive fingerprint generation (default: disabled; must match the DB build setting)'
+    )
+
+    parser.add_argument(
         '--disable-adaptive',
         action='store_true',
-        help='Disable adaptive fingerprint generation (default: enable)'
+        help='Disable adaptive fingerprint generation (default; kept for compatibility)'
     )
 
     parser.add_argument(
@@ -530,7 +535,7 @@ Examples:
         
         # 指紋生成器設定を作成
         fingerprinter_config = {
-            'enable_adaptive_params': not args.disable_adaptive,
+            'enable_adaptive_params': args.enable_adaptive and not args.disable_adaptive,
             'audible_only': args.audible_only
         }
         
@@ -571,7 +576,7 @@ Examples:
             return 1
         
         # 適応指紋生成ステータス
-        if not args.disable_adaptive:
+        if args.enable_adaptive and not args.disable_adaptive:
             logger.info("Using adaptive fingerprinting for optimal performance...")
         
         # ターゲットがファイルかフォルダかを判断

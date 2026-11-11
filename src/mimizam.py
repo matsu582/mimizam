@@ -54,7 +54,7 @@ class Mimizam:
             'sr': 22050,
             'min_amplitude': -60,
             'peak_neighborhood_size': 10,
-            'enable_adaptive_params': True,
+            'enable_adaptive_params': False,
             'audible_only': False
         }
         

@@ -330,7 +330,7 @@ except Exception as e:
 fingerprinter = AudioFingerprinter(
     n_fft=1024,        # FFTサイズを小さく
     hop_length=512,    # ホップ長を大きく
-    enable_adaptive_params=True  # 適応パラメータ
+    enable_adaptive_params=False  # 適応パラメータ（既定は無効）
 )
 ```
 

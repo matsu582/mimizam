@@ -98,6 +98,8 @@ def _numba_optimized_peak_detection(magnitude_db: np.ndarray, mask: np.ndarray,
 
 class SpectrogramAnalyzer:
     """スペクトログラム生成とピーク検出を処理"""
+
+    _DB_FLOOR = -120.0  # dB の下限（無音部分の値をそろえる）
     
     def __init__(self, 
                  n_fft: int = 2048, 
@@ -144,8 +146,13 @@ class SpectrogramAnalyzer:
         stft = librosa.stft(audio, n_fft=self.n_fft, hop_length=self.hop_length)
         magnitude = np.abs(stft)
         
-        # dBスケールに変換
-        magnitude_db = librosa.amplitude_to_db(magnitude, ref=np.max)
+        # dBスケールに変換（0dB ≒ フルスケールの正弦波）
+        # 基準をファイルごとの最大値にすると、映画全体（DB）と短い切り出し（クエリ）で
+        # 閾値 min_amplitude の意味がずれ、同じ音から同じピークが取れなくなるため固定値にする
+        magnitude_db = librosa.amplitude_to_db(
+            magnitude, ref=self.n_fft / 4.0, top_db=None
+        )
+        magnitude_db = np.maximum(magnitude_db, self._DB_FLOOR)
         
         # 周波数と時間軸を生成
         frequencies = librosa.fft_frequencies(sr=self.sr, n_fft=self.n_fft)
@@ -368,8 +375,8 @@ class HashGenerator:
     _FR_CENTER = 0x800       # 12bit中央（符号付き比の0点）
 
     def __init__(self, 
-                 target_zone_size: int = 5,
-                 max_peaks_per_second: int = 30,  # 1秒あたりの最大ピーク数（密度制御）
+                 target_zone_size: int = 3,
+                 max_peaks_per_second: int = 12,  # 1秒あたりの最大ピーク数（密度制御）
                  density_time_window: float = 0.1):  # 定数マップの時間窓（秒）
         """
         ハッシュジェネレータを初期化
@@ -423,7 +430,6 @@ class HashGenerator:
     def _generate_hashes_from_peaks(self, sorted_peaks: List[Peak], debug: bool, logger) -> List[Fingerprint]:
         """ソート済みピークからハッシュを生成"""
         fingerprints = []
-        seen_hashes = set()
         anchor_count = 0
         pairs_checked = 0
         valid_time_deltas = []
@@ -437,7 +443,9 @@ class HashGenerator:
             if debug and i < 5:
                 self._debug_anchor_info(i, anchor_peak, sorted_peaks, logger)
             
-            # ハッシュ生成
+            # ハッシュ生成（重複除去はアンカーごと。ファイル全体で共有すると、
+            # 同じハッシュの2回目以降の時刻が捨てられ、長い音源ほど照合できる区間が減る）
+            seen_hashes: set = set()
             new_fingerprints = self._create_fingerprints_from_targets(
                 anchor_peak, target_peaks, seen_hashes, valid_time_deltas
             )
@@ -605,23 +613,22 @@ class HashGenerator:
         return hashes
     
     def _filter_peaks_by_density(self, peaks: List[Peak], debug: bool = False) -> List[Peak]:
-        """周波数を考慮した定数マップ方式でピーク密度を制御する
+        """スライド窓でピーク密度を制御する
 
-        尺度不変ハッシュでは「時間方向のみで1ピークに潰す」旧方式が致命的だった。
-        速度・ピッチ変化で"生き残るピーク"が変わり三つ組が対応しなくなるためである
-        （同時刻の複数周波数ピークを潰すと、変化後に別の周波数が選ばれてしまう）。
+        各ピークについて、自身を中心とする幅 density_time_window の時間窓内で
+        振幅が上位K件（周波数をまたいで比較）に入る場合だけ残す。
+        K = 窓幅 × max_peaks_per_second（最低1）。
 
-        そこで時間窓ごとに振幅上位K件を"周波数をまたいで"保持する定数マップ方式に
-        する。窓内の強いピークは尺度変化しても概ね強いまま残るため、選択が安定し、
-        変換版でも同じ三つ組が再現されやすい。1秒あたりのピーク数は
-        max_peaks_per_second で概ね一定に保つ（K = 窓幅 × max_peaks_per_second）。
+        絶対時刻で区切るバケット方式は、速度・テンポ変化で区切りの境目が音の中の
+        別の位置に来るため、DB とクエリで残るピークが変わってしまう。スライド窓は
+        近くのピークとの強さの比較だけで決まるので、時間軸の伸縮に強い。
 
         Args:
             peaks: 検出されたスペクトルピークのリスト
             debug: デバッグログを有効にする
 
         Returns:
-            フィルタリングされたピークのリスト
+            フィルタリングされたピークのリスト（時刻昇順）
         """
         logger = logging.getLogger(__name__)
 
@@ -634,20 +641,17 @@ class HashGenerator:
         window = self.density_time_window
         peaks_per_window = max(1, int(round(self.max_peaks_per_second * window)))
 
-        # 時間窓ごとに振幅上位K件を保持（周波数をまたいで選択）
-        buckets: dict = {}
-        for peak in peaks:
-            b = int(float(peak.time) / window)
-            buckets.setdefault(b, []).append(peak)
+        ordered = sorted(peaks, key=lambda p: float(p.time))
+        times = np.fromiter((float(p.time) for p in ordered), dtype=np.float64, count=len(ordered))
+        amps = np.fromiter((float(p.amplitude) for p in ordered), dtype=np.float64, count=len(ordered))
+        lo = np.searchsorted(times, times - window / 2.0, side="left")
+        hi = np.searchsorted(times, times + window / 2.0, side="right")
 
         filtered_peaks: List[Peak] = []
-        for bucket_peaks in buckets.values():
-            if len(bucket_peaks) > peaks_per_window:
-                bucket_peaks.sort(key=lambda p: p.amplitude, reverse=True)
-                bucket_peaks = bucket_peaks[:peaks_per_window]
-            filtered_peaks.extend(bucket_peaks)
-
-        filtered_peaks.sort(key=lambda p: float(p.time))
+        for i, peak in enumerate(ordered):
+            stronger = int(np.count_nonzero(amps[lo[i]:hi[i]] > amps[i]))
+            if stronger < peaks_per_window:
+                filtered_peaks.append(peak)
 
         if debug:
             logger.info(f"Final filtered peak count: {len(filtered_peaks)}")
@@ -664,7 +668,7 @@ class AudioFingerprinter:
                  sr: int = 22050,
                  min_amplitude: float = -60,
                  peak_neighborhood_size: int = 10,
-                 enable_adaptive_params: bool = True,
+                 enable_adaptive_params: bool = False,
                  audible_only: bool = False,
                  enable_numba_optimization: bool = True,
                  enable_performance_monitor: bool = True):
@@ -677,7 +681,10 @@ class AudioFingerprinter:
             sr: サンプルレート
             min_amplitude: ピーク検出の最小振幅閾値
             peak_neighborhood_size: 局所最大値検出の近傍サイズ
-            enable_adaptive_params: 適応的パラメータ調整を有効にする
+            enable_adaptive_params: 適応的パラメータ調整を有効にする（既定は無効）。
+                音声 1 本ごとに値を決めるため、映画全体（DB）と短いクエリで値が
+                ずれ、照合が弱くなる。有効にする場合は DB とクエリの両方で同じ値に
+                なることを確かめること
             audible_only: 可聴域(20Hz-20kHz)のみを使う場合True
             enable_numba_optimization: Numba JIT最適化を有効にする
             enable_performance_monitor: パフォーマンス計測を有効にする
