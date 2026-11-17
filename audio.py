@@ -22,7 +22,7 @@ from .src.fingerprint_database import (
     create_elasticsearch_config,
 )
 from .src.database_base import DatabaseConfig, Song, Fingerprint
-from .src.adaptive_parameters import AdaptiveParameterTuner, PerformanceMonitor
+from .src.performance_monitor import PerformanceMonitor
 from .src.time_alignment import dominant_time_offset
 
 __all__ = [
@@ -39,7 +39,6 @@ __all__ = [
     "create_mysql_config",
     "create_postgresql_config",
     "create_elasticsearch_config",
-    "AdaptiveParameterTuner",
     "PerformanceMonitor",
     "dominant_time_offset",
 ]

@@ -24,7 +24,7 @@ from .fingerprint_database import (
     create_elasticsearch_config
 )
 from .database_base import DatabaseConfig, Song, Fingerprint
-from .adaptive_parameters import AdaptiveParameterTuner, PerformanceMonitor
+from .performance_monitor import PerformanceMonitor
 from .exceptions import (
     MimizamError,
     DatabaseError, 
@@ -56,7 +56,6 @@ __all__ = [
     'HashGenerator',
     'Song',
     'DatabaseConfig',
-    'AdaptiveParameterTuner',
     'PerformanceMonitor',
     'MimizamError',
     'DatabaseError',

@@ -53,6 +53,34 @@ class TestSpectrogramAnalyzer(unittest.TestCase):
             self.assertGreaterEqual(peak.frequency, 0)
             self.assertLessEqual(peak.frequency, self.sr / 2)
 
+    def test_interpolate_peak_time(self):
+        """ピーク時刻を前後フレームの dB 値で放物線補間する（端と上に凸でない場合はフレーム時刻）"""
+        times = np.arange(5) * 0.02
+        magnitude = np.full((3, 5), -80.0)
+        magnitude[1, 1:4] = [-10.0, 0.0, -5.0]
+        t = SpectrogramAnalyzer._interpolate_peak_time(magnitude, times, 1, 2, 5)
+        # delta = 0.5*(a-c)/(a-2b+c) = 0.5*(-5)/(-15) = 1/6 フレーム（振幅の大きい後ろ側へ寄る）
+        self.assertAlmostEqual(float(t), 0.04 + 0.02 / 6, places=9)
+        self.assertEqual(float(SpectrogramAnalyzer._interpolate_peak_time(magnitude, times, 1, 0, 5)), 0.0)
+        self.assertEqual(float(SpectrogramAnalyzer._interpolate_peak_time(magnitude, times, 1, 4, 5)), 0.08)
+        flat = np.zeros((3, 5))
+        self.assertEqual(float(SpectrogramAnalyzer._interpolate_peak_time(flat, times, 1, 2, 5)), 0.04)
+
+    def test_detect_peaks_subframe_time(self):
+        """detect_peaks のピーク時刻がフレームの格子に限られず、隣のフレームまで半フレーム以内にある"""
+        rng = np.random.default_rng(0)
+        audio = rng.standard_normal(self.sr * 2) * 0.1
+        magnitude, frequencies, times = self.analyzer.generate_spectrogram(audio)
+        peaks = self.analyzer.detect_peaks(magnitude, frequencies, times)
+        self.assertGreater(len(peaks), 0)
+        hop = float(times[1] - times[0])
+        offgrid = 0
+        for peak in peaks:
+            k = int(np.argmin(np.abs(times - float(peak.time))))
+            self.assertLessEqual(abs(float(peak.time) - float(times[k])), hop / 2 + 1e-9)
+            offgrid += abs(float(peak.time) - float(times[k])) > 1e-9
+        self.assertGreater(offgrid, len(peaks) // 2)
+
 
 class TestHashGenerator(unittest.TestCase):
     """HashGeneratorのテストケース"""
@@ -274,8 +302,7 @@ class TestMimizamIntegration(unittest.TestCase):
             matcher_config={
                 'min_confidence': 0.1,
                 'max_results': 5,
-            },
-            enable_adaptive_params=False  # テストの一貫性のため無効化
+            }
         )
         
         # テスト用音声データを生成
@@ -437,8 +464,7 @@ class TestMimizamIntegration(unittest.TestCase):
                 'max_results': 3,
             },
             n_fft=1024,
-            hop_length=256,
-            enable_adaptive_params=False
+            hop_length=256
         )
         
         try:

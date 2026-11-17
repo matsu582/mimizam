@@ -976,8 +976,7 @@ class TestMimizamPerformanceIntegration(TestAudioMixin, unittest.TestCase):
                 matcher_config={
                     'min_confidence': 0.1,
                     'max_results': 10,
-                },
-                enable_adaptive_params=False
+                }
             )
             
             try:
@@ -1050,8 +1049,7 @@ class TestMimizamPerformanceIntegration(TestAudioMixin, unittest.TestCase):
         sqlite_config = self._create_sqlite_config()
         mimizam_sqlite = create_mimizam_sqlite(
             db_path=sqlite_config.file_path,
-            matcher_config={'min_confidence': 0.1, 'max_results': 5},
-            enable_adaptive_params=False
+            matcher_config={'min_confidence': 0.1, 'max_results': 5}
         )
         
         try:
@@ -1096,8 +1094,7 @@ class TestMimizamPerformanceIntegration(TestAudioMixin, unittest.TestCase):
             
             mimizam_mysql = create_mimizam_mysql(
                 **mysql_config,
-                matcher_config={'min_confidence': 0.1, 'max_results': 5},
-                enable_adaptive_params=False
+                matcher_config={'min_confidence': 0.1, 'max_results': 5}
             )
             
             try:

@@ -52,7 +52,6 @@ def create_mimizam_instance(args) -> Mimizam:
     
     # 指紋生成器の設定を準備
     fingerprinter_config = {
-        'enable_adaptive_params': determine_adaptive_setting(args),
         'audible_only': getattr(args, 'audible_only', False)
     }
     
@@ -102,21 +101,6 @@ def create_mimizam_instance(args) -> Mimizam:
     
     else:
         raise ValueError(f"Unsupported database type: {args.db_type}")
-
-
-def determine_adaptive_setting(args) -> bool:
-    """コマンドライン引数から適応パラメータ設定を決定する"""
-    # 優先順位: --no-adaptive > --enable-adaptive > デフォルト (True)
-    if args.enable_adaptive and args.no_adaptive:
-        logger = logging.getLogger(__name__)
-        logger.warning("Both --enable-adaptive and --no-adaptive specified. Using --no-adaptive.")
-        return False
-    elif args.no_adaptive:
-        return False
-    elif args.enable_adaptive:
-        return True
-    else:
-        return True  # デフォルトは有効
 
 
 class VideoAudioExtractor:
@@ -309,10 +293,6 @@ def initialize_fingerprinter(args) -> Mimizam:
     # Mimizamインスタンスを作成して返す
     mimizam = create_mimizam_instance(args)
     
-    # 設定をログ出力
-    enable_adaptive = determine_adaptive_setting(args)
-    logger.info(f"Adaptive parameters: {'ON' if enable_adaptive else 'OFF'}")
-    
     return mimizam
 
 
@@ -410,8 +390,7 @@ def main():
   python audio_from_video_fingerprinter.py /path/to/videos
   python audio_from_video_fingerprinter.py /path/to/videos --database custom.db
   python audio_from_video_fingerprinter.py /path/to/videos --recursive --verbose
-  python audio_from_video_fingerprinter.py /path/to/videos --no-adaptive --verbose
-  python audio_from_video_fingerprinter.py /path/to/videos --no-adaptive
+  python audio_from_video_fingerprinter.py /path/to/videos --verbose
         """
     )
     
@@ -471,18 +450,6 @@ def main():
         help='Enable verbose logging'
     )
     
-    parser.add_argument(
-        '--enable-adaptive',
-        action='store_true',
-        help='Enable adaptive parameter tuning'
-    )
-    
-    parser.add_argument(
-        '--no-adaptive',
-        action='store_true',
-        help='Disable adaptive parameter tuning (deprecated, use --enable-adaptive instead)'
-    )
-
     parser.add_argument(
         '--audible-only',
         action='store_true',

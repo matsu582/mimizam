@@ -79,8 +79,7 @@ class TestMimizamSQLite(unittest.TestCase):
             matcher_config={
                 'min_confidence': 0.1,
                 'max_results': 10,
-            },
-            enable_adaptive_params=False  # テストの一貫性のため無効化
+            }
         )
     
     def tearDown(self):

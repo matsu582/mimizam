@@ -101,7 +101,6 @@ with create_mimizam_sqlite(
     n_fft=4096,              # 高い周波数分解能
     hop_length=256,          # 細かい時間分解能
     min_amplitude=-70,       # 敏感な検出
-    enable_adaptive_params=True,  # 適応パラメータ
     debug=True               # デバッグ情報
 ) as mimizam:
     # 高精度で楽曲追加
@@ -122,8 +121,7 @@ with create_mimizam_sqlite(
     "fast.db",
     n_fft=1024,              # 小さなFFTサイズ
     hop_length=512,          # 大きなホップ長
-    min_amplitude=-40,       # 高い閾値
-    enable_adaptive_params=True
+    min_amplitude=-40       # 高い閾値
 ) as mimizam:
     # 高速で楽曲追加
     song_id = mimizam.add_song("music/song.wav", "楽曲", "アーティスト")

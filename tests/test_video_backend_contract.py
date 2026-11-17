@@ -129,6 +129,38 @@ class TestSearchMovieAllModalitiesFail(unittest.TestCase):
         self.assertEqual(result, [])
 
 
+class TestSearchMovieAudioMinConfidence(unittest.TestCase):
+    """search_movie が音声の足切りの閾値を音声検索へ渡すこと"""
+
+    def _run(self, **kwargs):
+        m = object.__new__(Mimizam)
+        m.logger = logging.getLogger("test.mimizam.movie.conf")
+        m._decode_audio_from_media = lambda path: np.zeros(10, dtype=np.float32)
+
+        class _FP:
+            def fingerprint_audio(self, audio):
+                return ["fp"]
+
+        m.fingerprinter = _FP()
+        seen = {}
+
+        def _search(fps, min_confidence, top_k, source=None):
+            seen["min_confidence"] = min_confidence
+            return []
+
+        m._search_fingerprints = _search
+        m.search_video = lambda *a, **k: []
+        with tempfile.NamedTemporaryFile(suffix=".mp4") as tf:
+            m.search_movie(tf.name, **kwargs)
+        return seen["min_confidence"]
+
+    def test_default_keeps_all_audio_candidates(self):
+        self.assertEqual(self._run(), 0.0)
+
+    def test_passes_min_audio_confidence(self):
+        self.assertEqual(self._run(min_audio_confidence=0.5), 0.5)
+
+
 class TestGetVideoDbCache(unittest.TestCase):
     """_get_video_db が後続の db_path を尊重して作り直すこと"""
 
