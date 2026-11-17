@@ -81,6 +81,9 @@ with create_mimizam_sqlite("my_media.db") as mimizam:
 
     # 映像で検索（フレーム単位ANN投票→精密照合、PiP矩形検出付き）
     results = mimizam.search_video("path/to/clip.mp4", top_k=5)
+    # 時間 3 点ハッシュ方式（試験導入。既定は上の方式）を使う場合。方式ごとに DB の中身が
+    # 違うため、切り替えたら映像を登録し直す。視覚語のモデルは train_video_model() で作る
+    # mimizam.configure_video(method="hash")
     for result in results:
         print(result)
 ```

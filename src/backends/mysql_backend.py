@@ -405,6 +405,23 @@ class MySQLBackend(DatabaseBackend):
             """)
 
             cursor.execute("""
+                CREATE TABLE IF NOT EXISTS video_hashes (
+                    hash BIGINT NOT NULL,
+                    video_id VARCHAR(255) NOT NULL,
+                    version SMALLINT NOT NULL,
+                    timestamp DOUBLE NOT NULL,
+                    anchor INT NOT NULL,
+                    size DOUBLE NOT NULL,
+                    angle DOUBLE NOT NULL,
+                    INDEX idx_video_hashes_hash (hash),
+                    INDEX idx_video_hashes_video (video_id),
+                    FOREIGN KEY (video_id) REFERENCES videos (id)
+                        ON DELETE CASCADE
+                ) ENGINE=InnoDB CHARACTER SET=utf8mb4
+                  COLLATE=utf8mb4_unicode_ci
+            """)
+
+            cursor.execute("""
                 CREATE TABLE IF NOT EXISTS frame_descriptors (
                     id BIGINT AUTO_INCREMENT PRIMARY KEY,
                     video_id VARCHAR(255) NOT NULL,
@@ -670,6 +687,66 @@ class MySQLBackend(DatabaseBackend):
             raise DatabaseError(
                 "Failed to delete video", original_error=e,
                 context={'video_id': video_id},
+            ) from e
+
+    def add_video_hashes(
+        self, video_id: str,
+        rows: List[Tuple[int, int, float, int, float, float]],
+    ) -> bool:
+        """MySQLに映像の時間 3 点ハッシュを一括保存（既存分は置き換え）"""
+        try:
+            self._create_video_tables()
+            cursor = self.connection.cursor()
+            cursor.execute(
+                "DELETE FROM video_hashes WHERE video_id = %s", (video_id,)
+            )
+            vals = [
+                (int(h), video_id, int(v), float(ts), int(a), float(s), float(th))
+                for h, v, ts, a, s, th in rows
+            ]
+            for i in range(0, len(vals), 10000):
+                cursor.executemany(
+                    """INSERT INTO video_hashes
+                        (hash, video_id, version, timestamp, anchor, size, angle)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)""",
+                    vals[i:i + 10000],
+                )
+            return True
+        except MySQLError as e:
+            self.logger.error(f"MySQL video hash save error: {e}")
+            raise DatabaseError(
+                "Failed to add video hashes", original_error=e,
+                context={'video_id': video_id, 'count': len(rows)},
+            ) from e
+
+    def search_video_hashes(
+        self, hashes: List[int],
+    ) -> List[Tuple[int, str, int, float, int, float, float]]:
+        """MySQLでハッシュの完全一致を引く"""
+        try:
+            self._create_video_tables()
+            cursor = self.connection.cursor()
+            uniq = sorted({int(h) for h in hashes})
+            out: List[Tuple[int, str, int, float, int, float, float]] = []
+            for i in range(0, len(uniq), 1000):
+                part = uniq[i:i + 1000]
+                cursor.execute(
+                    "SELECT hash, video_id, version, timestamp, anchor, size, "
+                    "angle FROM video_hashes WHERE hash IN ("
+                    + ", ".join(["%s"] * len(part)) + ")",
+                    part,
+                )
+                out.extend(
+                    (int(r[0]), r[1], int(r[2]), float(r[3]), int(r[4]),
+                     float(r[5]), float(r[6]))
+                    for r in cursor.fetchall()
+                )
+            return out
+        except MySQLError as e:
+            self.logger.error(f"MySQL video hash search error: {e}")
+            raise DatabaseError(
+                "Failed to search video hashes", original_error=e,
+                context={'count': len(hashes)},
             ) from e
 
     def add_frame_descriptors(
