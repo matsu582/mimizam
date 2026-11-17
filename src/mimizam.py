@@ -653,6 +653,7 @@ class Mimizam:
         frame_fingerprints: List[Tuple[int, float, np.ndarray]],
         raw_descriptors: Optional[List[Tuple[int, float, np.ndarray]]],
         top_k: int,
+        geom_top_k: Optional[int] = None,
     ) -> List[Dict[str, Any]]:
         """フレーム指紋から候補を絞り込み、幾何検証して実効スコア順に整列する
 
@@ -666,6 +667,7 @@ class Mimizam:
             frame_fingerprints: クエリのフレーム単位指紋
             raw_descriptors: 幾何検証用のクエリ生記述子（無ければ非幾何にフォールバック）
             top_k: ANN絞り込みの候補数（実際の返却は呼び出し側で切り詰める）
+            geom_top_k: クエリフレームごとに幾何照合するDBフレーム数（None で既定）
 
         Returns:
             実効スコア降順の結果リスト（時間整合区間が無い候補は含まれない）
@@ -684,6 +686,7 @@ class Mimizam:
         candidate_ids = [c["video_id"] for c in candidates]
         frame_results = vdb.search_video_with_frame_matching(
             frame_fingerprints, candidate_ids, query_raw=raw_descriptors,
+            geom_top_k=geom_top_k,
         )
 
         cand_map = {c["video_id"]: c for c in candidates}
@@ -727,6 +730,9 @@ class Mimizam:
           1. フレーム指紋のANN近傍投票で候補映像を絞り込み
           2. フレーム単位指紋で精密照合（時間整合区間を確認）
           3. PiP矩形検出 → 矩形内指紋でDB検索（PiP対策）
+        縦横比が 4:3 に近いクエリは、横に戻した版（幅=高さ×16/9）でも 1〜2 を行い、
+        幾何照合の枠を広げる（_geom_top_k_narrow）。クエリ側では、キーフレームを
+        またいで止まっている点（重ねた文字・ロゴ）を除いてから照合する。
 
         部分クリップでも該当フレームがANNで直接引けるため、
         25分全編に対する数分クリップの検索でも取りこぼしにくい。
@@ -763,10 +769,13 @@ class Mimizam:
 
             # 幾何検証（RANSAC）のためクエリ側は生AKAZE記述子＋キーポイント座標を
             # 保持する。VLAD/PCAコサインで候補を絞った後、最終判定を幾何整合で行う。
+            # 縦横比の狭いクエリは横に戻した版の指紋も作り、両方で検索する。
             prev_store_raw = vfp.config.store_raw_descriptors
             vfp.config.store_raw_descriptors = True
             try:
-                fp = vfp.fingerprint_video(query_file_path)
+                fp, stretched_fp, narrow = vfp.fingerprint_query_video(
+                    query_file_path
+                )
             finally:
                 vfp.config.store_raw_descriptors = prev_store_raw
             if fp is None:
@@ -775,6 +784,8 @@ class Mimizam:
                     "Failed to generate video fingerprint for query",
                     context={'query_file_path': query_file_path},
                 )
+            # 縦横比の狭いクエリは全経路で幾何照合の枠を広げる
+            geom_top_k = vdb._geom_top_k_narrow if narrow else None
 
             # Step 1+2: ANN近傍投票での候補絞り込み → フレーム単位の幾何検証。
             # 一連は通常経路とPiP経路で共通のため _match_and_rank に集約する。
@@ -788,15 +799,34 @@ class Mimizam:
                     time.perf_counter() - _t_ann, len(candidates),
                 )
                 results = candidates[:top_k]
+                if stretched_fp is not None:
+                    results = self._merge_pip_results(
+                        results,
+                        vdb.search_frame_candidates(
+                            stretched_fp.frame_fingerprints, top_k=top_k * 2
+                        ),
+                        top_k,
+                    )
             else:
                 results = self._match_and_rank(
-                    vdb, fp.frame_fingerprints, fp.raw_descriptors, top_k
+                    vdb, fp.frame_fingerprints, fp.raw_descriptors, top_k,
+                    geom_top_k=geom_top_k,
                 )[:top_k]
+                if stretched_fp is not None:
+                    stretched_results = self._match_and_rank(
+                        vdb, stretched_fp.frame_fingerprints,
+                        stretched_fp.raw_descriptors, top_k,
+                        geom_top_k=geom_top_k,
+                    )
+                    if stretched_results:
+                        results = self._merge_pip_results(
+                            results, stretched_results, top_k
+                        )
 
             # Step 3: PiP矩形検出 → 矩形内指紋でDB検索
             if detect_pip:
                 pip_results = self._search_pip_regions(
-                    query_file_path, vfp, vdb, top_k
+                    query_file_path, vfp, vdb, top_k, geom_top_k=geom_top_k,
                 )
                 if pip_results:
                     results = self._merge_pip_results(
@@ -1138,7 +1168,7 @@ class Mimizam:
         return merged[:top_k]
 
     def _search_pip_regions(
-        self, query_path, vfp, vdb, top_k
+        self, query_path, vfp, vdb, top_k, geom_top_k=None,
     ) -> List[Dict[str, Any]]:
         """PiP矩形内の指紋でDB検索する
 
@@ -1168,6 +1198,7 @@ class Mimizam:
                 entries = self._match_and_rank(
                     vdb, pip_fp.frame_fingerprints,
                     getattr(pip_fp, "raw_descriptors", None), top_k,
+                    geom_top_k=geom_top_k,
                 )
                 for e in entries:
                     # どのPiP矩形由来の一致かを保持する（表示・デバッグ用）

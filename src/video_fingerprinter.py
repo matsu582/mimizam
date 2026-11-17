@@ -112,6 +112,121 @@ def pack_raw_descriptors(
     return packed
 
 
+# 止まっている点の判定: 同じ位置（_STATIC_RADIUS px 以内）に似た記述子（ハミング距離
+# _STATIC_MAX_HAMMING 以下）の点が、ほかのキーフレームの _STATIC_MIN_FRACTION 以上
+# （かつ _STATIC_MIN_OTHERS 枚以上）にある点。除いた後に _STATIC_MIN_KEEP 点未満しか
+# 残らないフレーム（場面そのものが止まっている）では何も除かない。
+_STATIC_RADIUS = 3.0
+_STATIC_MAX_HAMMING = 60
+_STATIC_MIN_FRACTION = 0.5
+_STATIC_MIN_OTHERS = 3
+_STATIC_MIN_KEEP = 20
+# 長いクエリでは連続する _STATIC_WINDOW 枚以下のまとまりごとに判定する。
+# 止まった点は全フレームの組で比べると二乗で増え、メモリを使い果たすため。
+_STATIC_WINDOW = 64
+_POPCOUNT = np.unpackbits(
+    np.arange(256, dtype=np.uint8)[:, None], axis=1
+).sum(1)
+
+# 記述子が少なすぎるフレームは VLAD・幾何検証とも不安定なため使わない
+MIN_FRAME_DESCRIPTORS = 5
+
+
+def static_point_masks(
+    frames: List[Tuple[np.ndarray, np.ndarray]],
+) -> List[np.ndarray]:
+    """キーフレームをまたいで止まっている点（重ねた文字・ロゴ）を見つける
+
+    _STATIC_WINDOW 枚を超えるときは、連続するフレームをほぼ同じ枚数の
+    まとまり（各 _STATIC_WINDOW 枚以下）に分けて、まとまりごとに判定する。
+
+    Args:
+        frames: [(AKAZE記述子 uint8 (N×D), キーポイント座標 (N×2)), ...]
+
+    Returns:
+        フレームごとの bool 配列（True が止まっている点）
+    """
+    n = len(frames)
+    if n <= _STATIC_WINDOW:
+        return _static_point_masks_block(frames)
+    masks: List[np.ndarray] = []
+    n_blocks = -(-n // _STATIC_WINDOW)
+    for idx in np.array_split(np.arange(n), n_blocks):
+        masks.extend(
+            _static_point_masks_block([frames[i] for i in idx])
+        )
+    return masks
+
+
+def _static_point_masks_block(
+    frames: List[Tuple[np.ndarray, np.ndarray]],
+) -> List[np.ndarray]:
+    """static_point_masks の判定本体（与えたフレームの中だけで比べる）
+
+    全フレームの点を1本のKD木にまとめ、半径内の点の組を一度に取り出してから
+    ハミング距離をまとめて計算する。点 a が「相手を持つフレーム」の数は、
+    同じフレームに相手が何点あっても1と数える。
+    """
+    from scipy.spatial import cKDTree
+
+    n = len(frames)
+    lens = [len(d) for d, _ in frames]
+    masks = [np.zeros(m, dtype=bool) for m in lens]
+    if n < _STATIC_MIN_OTHERS + 1 or sum(lens) == 0:
+        return masks
+    desc = np.concatenate(
+        [np.asarray(d, dtype=np.uint8) for d, _ in frames if len(d)]
+    )
+    xy = np.concatenate(
+        [np.asarray(c, dtype=np.float64)[:, :2] for d, c in frames if len(d)]
+    )
+    fid = np.repeat(np.arange(n), lens)
+    pairs = cKDTree(xy).query_pairs(_STATIC_RADIUS, output_type="ndarray")
+    if len(pairs):
+        a, b = pairs[:, 0], pairs[:, 1]
+        keep = fid[a] != fid[b]
+        a, b = a[keep], b[keep]
+        dist = _POPCOUNT[np.bitwise_xor(desc[a], desc[b])].sum(1)
+        keep = dist <= _STATIC_MAX_HAMMING
+        a, b = a[keep], b[keep]
+        key = np.unique(np.concatenate([a * n + fid[b], b * n + fid[a]]))
+        hit = np.bincount(key // n, minlength=len(desc))
+    else:
+        hit = np.zeros(len(desc), dtype=int)
+    is_static = hit >= max(_STATIC_MIN_OTHERS, _STATIC_MIN_FRACTION * (n - 1))
+    start = 0
+    for i, cnt in enumerate(lens):
+        m = is_static[start:start + cnt]
+        if cnt and (~m).sum() >= _STATIC_MIN_KEEP:
+            masks[i] = m.copy()
+        start += cnt
+    return masks
+
+
+def grid_keypoint_order(
+    coords: np.ndarray, response: np.ndarray, grid: int,
+) -> np.ndarray:
+    """点を grid×grid のマスごとに response 上位から交互に並べる順序を返す
+
+    マスは点の座標の最小〜最大で等分する。各マスの1位、各マスの2位…の順に並べ、
+    同じ順位の中では response の大きい順にする。
+    """
+    if len(coords) == 0:
+        return np.arange(0)
+
+    def cell(v: np.ndarray) -> np.ndarray:
+        lo, hi = v.min(), v.max()
+        return np.minimum(
+            ((v - lo) / max(hi - lo, 1e-6) * grid).astype(int), grid - 1
+        )
+
+    c = cell(coords[:, 1]) * grid + cell(coords[:, 0])
+    order = np.lexsort((-response, c))
+    cs = c[order]
+    rank = np.arange(len(order)) - np.searchsorted(cs, cs, side="left")
+    return order[np.lexsort((-response[order], rank))]
+
+
 def split_raw_descriptor(
     arr: np.ndarray,
 ) -> Tuple[np.ndarray, np.ndarray]:
@@ -257,6 +372,25 @@ class VideoFingerprintConfig:
     # 既定は最も確度の高い1件のみ。偽陽性の下位矩形が結果を汚すのを防ぐ。
     pip_max_regions: int = 1
 
+    # キーフレームの最大間隔（秒、0で無効）。ヒストグラムが似ていて採用されない
+    # 場面が続いても、前回採用からこの秒数が経てば必ず採用する。動きの少ない長い
+    # 場面でもキーフレームが途切れず、部分クリップと時間がそろいやすくなる。
+    max_keyframe_interval: float = 5.0
+
+    # 幾何検証に使う点の並べ方。画面を keypoint_grid×keypoint_grid のマスに分け、
+    # マスごとの response 上位から交互に並べる（0で AKAZE の出力順のまま）。
+    # 幾何検証は先頭 _geom_max_desc 点だけを使うため、点が画面の一部（上端や
+    # 字幕の帯）に偏らないようにする。DB 登録とクエリで同じ並べ方にする。
+    keypoint_grid: int = 4
+
+    # クエリ側で、キーフレームをまたいで同じ位置に同じ記述子が出る点（重ねた
+    # 文字・ロゴ）を VLAD と幾何検証の両方から除くか。DB 側には適用しない。
+    remove_static_query_points: bool = True
+
+    # 縦横比（幅/高さ）がこの値未満のクエリは、16:9 を縮めた映像の可能性があるため
+    # 横に戻した版（高さはそのまま、幅を高さ×16/9）でも検索する（0で無効）
+    narrow_aspect_ratio: float = 1.45
+
 
 @dataclass
 class VideoFrameInfo:
@@ -335,12 +469,15 @@ class FrameSelector:
 
         fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
         interval_frames = max(1, int(self.config.sample_interval * fps))
+        max_gap = self.config.max_keyframe_interval
+        max_interval_frames = max_gap * fps if max_gap > 0 else None
 
         # 評価間隔: scene_eval_fps でフレームを評価（精度と速度のバランス）
         eval_fps = self.config.scene_eval_fps or 8.0
         eval_stride = max(1, int(round(fps / eval_fps)))
 
         detector = self._create_scene_detector()
+        to_timecode = self._scene_timecode_factory(fps)
         accepted: List[Tuple[int, float, np.ndarray]] = []
         prev_accepted_hist: Optional[np.ndarray] = None
         last_accepted_idx = -interval_frames
@@ -386,8 +523,8 @@ class FrameSelector:
                 # 最初のフレームは常にシーン開始として採用
                 is_scene_change = True
                 first_eval = False
-                detector.process_frame(frame_idx, small)
-            elif detector.process_frame(frame_idx, small):
+                detector.process_frame(to_timecode(frame_idx), small)
+            elif detector.process_frame(to_timecode(frame_idx), small):
                 is_scene_change = True
             if prof_on:
                 prof["scene"] += time.perf_counter() - _t
@@ -419,6 +556,12 @@ class FrameSelector:
                     )
                     should_accept = corr < 0.95
                 else:
+                    should_accept = True
+                if (
+                    not should_accept
+                    and max_interval_frames is not None
+                    and frame_idx - last_accepted_idx >= max_interval_frames
+                ):
                     should_accept = True
                 if prof_on:
                     prof["dedup"] += time.perf_counter() - _t
@@ -459,6 +602,19 @@ class FrameSelector:
         """
         from scenedetect.detectors import ContentDetector
         return ContentDetector(threshold=self.config.scene_threshold)
+
+    @staticmethod
+    def _scene_timecode_factory(fps: float):
+        """process_frame に渡すフレーム位置の作り方を返す
+
+        PySceneDetect 0.7 以降はフレーム番号(int)ではなく FrameTimecode を受け取る。
+        """
+        import scenedetect
+        version = tuple(int(v) for v in scenedetect.__version__.split(".")[:2])
+        if version < (0, 7):
+            return lambda frame_idx: frame_idx
+        from scenedetect import FrameTimecode
+        return lambda frame_idx: FrameTimecode(frame_idx, fps)
 
     def _compute_histogram(self, frame: np.ndarray) -> np.ndarray:
         """HSVヒストグラムを計算（冗長判定用）
@@ -533,6 +689,24 @@ class VLADEncoder:
              [(インデックス, タイムスタンプ, キーポイント座標(N×2)), ...])
             3つ目は幾何検証(RANSAC)用のキーポイント画素座標。
         """
+        per_frame, per_frame_kpts, _ = self.extract_frame_features(frames)
+        all_descriptors = [desc for _, _, desc in per_frame]
+        return all_descriptors, per_frame, per_frame_kpts
+
+    def extract_frame_features(
+        self, frames: List[Tuple[int, float, np.ndarray]]
+    ) -> Tuple[
+        List[Tuple[int, float, np.ndarray]],
+        List[Tuple[int, float, np.ndarray]],
+        List[Tuple[int, float, np.ndarray]],
+    ]:
+        """フレーム群からAKAZE記述子・キーポイント座標・response を抽出
+
+        Returns:
+            ([(インデックス, タイムスタンプ, 記述子)],
+             [(インデックス, タイムスタンプ, キーポイント座標(N×2))],
+             [(インデックス, タイムスタンプ, response(N,))])
+        """
         workers = self._resolve_workers(len(frames))
         if workers <= 1:
             results = [self._extract_frame_descriptor(f) for f in frames]
@@ -544,17 +718,17 @@ class VLADEncoder:
                     executor.map(self._extract_frame_descriptor, frames)
                 )
 
-        all_descriptors = []
         per_frame = []
         per_frame_kpts = []
+        per_frame_resp = []
         for res in results:
             if res is not None:
-                fidx, ts, desc, kpts = res
-                all_descriptors.append(desc)
+                fidx, ts, desc, kpts, resp = res
                 per_frame.append((fidx, ts, desc))
                 per_frame_kpts.append((fidx, ts, kpts))
+                per_frame_resp.append((fidx, ts, resp))
 
-        return all_descriptors, per_frame, per_frame_kpts
+        return per_frame, per_frame_kpts, per_frame_resp
 
     def _resolve_workers(self, num_frames: int) -> int:
         """並列ワーカー数を決定（0指定時はCPU数から自動算出）"""
@@ -573,8 +747,8 @@ class VLADEncoder:
 
     def _extract_frame_descriptor(
         self, frame: Tuple[int, float, np.ndarray]
-    ) -> Optional[Tuple[int, float, np.ndarray, np.ndarray]]:
-        """1フレームからAKAZE記述子とキーポイント座標を抽出
+    ) -> Optional[Tuple[int, float, np.ndarray, np.ndarray, np.ndarray]]:
+        """1フレームからAKAZE記述子・キーポイント座標・response を抽出
 
         キーポイント座標(N×2)は幾何検証(RANSAC)で使う。正規化後の画素座標なので
         DB側と同一の正規化長辺で抽出すれば、そのまま対応点の座標として使える。
@@ -593,7 +767,8 @@ class VLADEncoder:
             kpts = np.array(
                 [kp.pt for kp in kps], dtype=np.float32
             ).reshape(-1, 2)
-            return (fidx, ts, desc, kpts)
+            resp = np.array([kp.response for kp in kps], dtype=np.float32)
+            return (fidx, ts, desc, kpts, resp)
         return None
 
     def train(
@@ -1023,13 +1198,15 @@ class VideoFingerprinter:
         return stats
 
     def fingerprint_video(
-        self, video_path: str
+        self, video_path: str, remove_static: bool = False,
     ) -> Optional[VideoFingerprint]:
         """
         映像ファイルから指紋を生成
 
         Args:
             video_path: 映像ファイルパス
+            remove_static: キーフレームをまたいで止まっている点を除くか
+                （クエリ用。DB 登録では使わない）
 
         Returns:
             VideoFingerprint。生成不可の場合None
@@ -1049,27 +1226,10 @@ class VideoFingerprinter:
             logger.warning(f"Failed to select frames: {video_path}")
             return None
 
-        prof_on = self.config.profile_frames
-        _t = time.perf_counter() if prof_on else 0.0
-        _, per_frame, per_frame_kpts = self.encoder.extract_descriptors(
-            frames
-        )
-        if prof_on:
-            logger.info(
-                f"Fingerprint aggregation breakdown[s]: akaze(descriptor extraction×{len(frames)}"
-                f" frames)={time.perf_counter() - _t:.1f}"
-            )
-        if not per_frame:
+        fp = self._fingerprint_frames(frames, remove_static)
+        if fp is None:
             logger.warning(f"Failed to extract descriptors: {video_path}")
             return None
-
-        fp = self.encoder.encode_video(per_frame)
-        if self.config.store_raw_descriptors:
-            # 幾何検証用にキーポイント座標を記述子の先頭2列へ結合して保持する
-            # （N×(2+D)）。保存レイヤは列数を問わないため後方互換。
-            fp.raw_descriptors = pack_raw_descriptors(
-                per_frame, per_frame_kpts
-            )
         dims = (
             fp.frame_fingerprints[0][2].shape[0]
             if fp.frame_fingerprints else 0
@@ -1081,6 +1241,128 @@ class VideoFingerprinter:
             f"{dims} dimensions)"
         )
         return fp
+
+    def fingerprint_query_video(
+        self, video_path: str
+    ) -> Tuple[Optional[VideoFingerprint], Optional[VideoFingerprint], bool]:
+        """
+        検索クエリ用の指紋を生成
+
+        全画面の指紋に加え、縦横比が narrow_aspect_ratio 未満のクエリは同じ
+        キーフレームを横に戻した版（幅=高さ×16/9）の指紋も作る。16:9 を縮めた
+        映像・左右を切った映像・元から 4:3 の映像は事前に区別できないため、
+        両方で検索する。どちらも remove_static_query_points に従って止まって
+        いる点を除く。
+
+        Returns:
+            (全画面の指紋, 横に戻した版の指紋 or None, 縦横比が狭いか)
+        """
+        if not self.is_trained:
+            raise RuntimeError(
+                "Model is not trained. "
+                "Call train_from_videos() first"
+            )
+        if not os.path.exists(video_path):
+            logger.error(f"Video not found: {video_path}")
+            return None, None, False
+
+        frames = self.frame_selector.select_keyframes(video_path)
+        if not frames:
+            logger.warning(f"Failed to select frames: {video_path}")
+            return None, None, False
+
+        remove_static = self.config.remove_static_query_points
+        fp = self._fingerprint_frames(frames, remove_static)
+        h, w = frames[0][2].shape[:2]
+        narrow = (
+            self.config.narrow_aspect_ratio > 0
+            and w / h < self.config.narrow_aspect_ratio
+        )
+        stretched = None
+        if narrow:
+            size = (round(h * 16 / 9), h)
+            stretched = self._fingerprint_frames(
+                [(fi, ts, cv2.resize(img, size)) for fi, ts, img in frames],
+                remove_static,
+            )
+        return fp, stretched, narrow
+
+    def _fingerprint_frames(
+        self,
+        frames: List[Tuple[int, float, np.ndarray]],
+        remove_static: bool,
+        min_descriptors_before_mask: int = 1,
+    ) -> Optional[VideoFingerprint]:
+        """フレーム群から AKAZE を抽出し、点を整えて指紋にする"""
+        prof_on = self.config.profile_frames
+        _t = time.perf_counter() if prof_on else 0.0
+        per_frame, per_frame_kpts, per_frame_resp = (
+            self.encoder.extract_frame_features(frames)
+        )
+        if prof_on:
+            logger.info(
+                f"Fingerprint aggregation breakdown[s]: akaze(descriptor extraction×{len(frames)}"
+                f" frames)={time.perf_counter() - _t:.1f}"
+            )
+        keep = [
+            i for i, (_, _, d) in enumerate(per_frame)
+            if len(d) >= min_descriptors_before_mask
+        ]
+        per_frame, per_frame_kpts = self._prepare_keypoints(
+            [per_frame[i] for i in keep],
+            [per_frame_kpts[i] for i in keep],
+            [per_frame_resp[i] for i in keep],
+            remove_static,
+        )
+        if not per_frame:
+            return None
+
+        fp = self.encoder.encode_video(per_frame)
+        if self.config.store_raw_descriptors:
+            # 幾何検証用にキーポイント座標を記述子の先頭2列へ結合して保持する
+            # （N×(2+D)）。保存レイヤは列数を問わないため後方互換。
+            fp.raw_descriptors = pack_raw_descriptors(
+                per_frame, per_frame_kpts
+            )
+        return fp
+
+    def _prepare_keypoints(
+        self,
+        per_frame: List[Tuple[int, float, np.ndarray]],
+        per_frame_kpts: List[Tuple[int, float, np.ndarray]],
+        per_frame_resp: List[Tuple[int, float, np.ndarray]],
+        remove_static: bool,
+    ) -> Tuple[
+        List[Tuple[int, float, np.ndarray]],
+        List[Tuple[int, float, np.ndarray]],
+    ]:
+        """止まっている点を除き、点が少ないフレームを捨て、格子順に並べる
+
+        止まっている点の判定は、除く前の全フレームで行う。格子順は除いた後の
+        点で決める（DB 登録とクエリで同じ並べ方になる）。
+        """
+        masks: Optional[List[np.ndarray]] = None
+        if remove_static:
+            masks = static_point_masks([
+                (d, k) for (_, _, d), (_, _, k) in zip(per_frame, per_frame_kpts)
+            ])
+        grid = self.config.keypoint_grid
+        out_desc: List[Tuple[int, float, np.ndarray]] = []
+        out_kpts: List[Tuple[int, float, np.ndarray]] = []
+        for i, ((fidx, ts, desc), (_, _, kpts), (_, _, resp)) in enumerate(
+            zip(per_frame, per_frame_kpts, per_frame_resp)
+        ):
+            if masks is not None and masks[i].any():
+                keep = ~masks[i]
+                desc, kpts, resp = desc[keep], kpts[keep], resp[keep]
+            if len(desc) < MIN_FRAME_DESCRIPTORS:
+                continue
+            if grid > 0:
+                order = grid_keypoint_order(kpts, resp, grid)
+                desc, kpts = desc[order], kpts[order]
+            out_desc.append((fidx, ts, desc))
+            out_kpts.append((fidx, ts, kpts))
+        return out_desc, out_kpts
 
     def rebuild_from_descriptors(
         self,
@@ -1167,10 +1449,6 @@ class VideoFingerprinter:
             pip_regions, self.config.pip_max_regions
         )
 
-        results = []
-        target = self.config.normalize_long_side
-        akaze = _create_akaze()
-
         cap = cv2.VideoCapture(video_path)
         if not cap.isOpened():
             return []
@@ -1186,55 +1464,34 @@ class VideoFingerprinter:
             step = len(sample_indices) // 60
             sample_indices = sample_indices[::step][:60]
 
+        sampled: List[Tuple[int, np.ndarray]] = []
+        for fidx in sample_indices:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, fidx)
+            ret, frame = cap.read()
+            if ret:
+                sampled.append((fidx, frame))
+        cap.release()
+
+        results = []
         for region in pip_regions:
-            per_frame_desc = []
-            per_frame_kpts = []
-
-            for fidx in sample_indices:
-                cap.set(cv2.CAP_PROP_POS_FRAMES, fidx)
-                ret, frame = cap.read()
-                if not ret:
-                    continue
-
+            crops = []
+            for fidx, frame in sampled:
                 fh, fw = frame.shape[:2]
                 cx1 = max(0, min(region.x, fw - 1))
                 cy1 = max(0, min(region.y, fh - 1))
                 cx2 = min(region.x + region.w, fw)
                 cy2 = min(region.y + region.h, fh)
-
                 if cx2 - cx1 < 30 or cy2 - cy1 < 30:
                     continue
+                # 矩形内は正規化解像度へアップスケールして抽出する（全画面と同じ経路）
+                crops.append((fidx, fidx / fps, frame[cy1:cy2, cx1:cx2]))
 
-                crop = frame[cy1:cy2, cx1:cx2]
-                gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
-
-                # 正規化解像度にアップスケール
-                if target > 0:
-                    gray = normalize_frame(
-                        gray, target, allow_upscale=True
-                    )
-
-                kps, desc = akaze.detectAndCompute(gray, None)
-                if desc is not None and len(desc) >= 5:
-                    ts = fidx / fps
-                    per_frame_desc.append(
-                        (fidx, ts, desc.astype(np.float32))
-                    )
-                    # 幾何検証(RANSAC)用にキーポイント座標(N×2)も保持する
-                    coords = np.array(
-                        [kp.pt for kp in kps], dtype=np.float32
-                    ).reshape(-1, KEYPOINT_COLS)
-                    per_frame_kpts.append((fidx, ts, coords))
-
-            if not per_frame_desc:
+            fp = self._fingerprint_frames(
+                crops, self.config.remove_static_query_points,
+                min_descriptors_before_mask=MIN_FRAME_DESCRIPTORS,
+            )
+            if fp is None:
                 continue
-
-            fp = self.encoder.encode_video(per_frame_desc)
-            if self.config.store_raw_descriptors:
-                # 通常経路と同じN×(2+D)形式で保持し、幾何検証経路と整合させる
-                fp.raw_descriptors = pack_raw_descriptors(
-                    per_frame_desc, per_frame_kpts
-                )
             results.append((region, fp))
 
             logger.info(
@@ -1245,7 +1502,6 @@ class VideoFingerprinter:
                 f"{fp.descriptor_count} descriptors)"
             )
 
-        cap.release()
         return results
 
     def save_model(self, path: str) -> None:

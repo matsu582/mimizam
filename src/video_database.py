@@ -63,6 +63,9 @@ class VideoFingerprintDatabase:
         # top_k を上げると短い一致断片（ANNで上位に埋もれるDBフレーム）の取りこぼしが
         # 減る。1フレームで _geom_max_hits 件見つかれば打ち切るため速度影響は限定的。
         self._geom_top_k = 10
+        # 縦横比の狭い（4:3 に近い）クエリの幾何照合の枠。重ねた文字の帯などで
+        # VLAD 順位が下がりやすいため、通常より多くの DB フレームを照合する。
+        self._geom_top_k_narrow = 30
         self._geom_min_inliers = 15
         self._geom_ransac_thresh = 5.0
         # 速度対策。1クエリフレームで幾何一致が _geom_max_hits 件見つかったら、
@@ -347,6 +350,7 @@ class VideoFingerprintDatabase:
         candidate_video_ids: List[str],
         threshold: float = 0.5,
         query_raw: Optional[List[Tuple[int, float, np.ndarray]]] = None,
+        geom_top_k: Optional[int] = None,
     ) -> List[Dict]:
         """
         フレーム単位マッチングで精密照合（PiP対策）
@@ -365,12 +369,14 @@ class VideoFingerprintDatabase:
             candidate_video_ids: 候補映像IDリスト
             threshold: 最低類似度閾値
             query_raw: クエリの生記述子（[(fidx, ts, N×(2+D)), ...]）。幾何検証に使う
+            geom_top_k: クエリフレームごとに幾何照合するDBフレーム数（None で _geom_top_k）
 
         Returns:
             [{"video_id": ..., "frame_similarity": ...,
               "match_details": {...}, ...}, ...]
         """
         results = []
+        geom_k = geom_top_k or self._geom_top_k
 
         if not query_frame_fps:
             return results
@@ -462,7 +468,7 @@ class VideoFingerprintDatabase:
                 # DBフレームだけなので、その和集合に限定して整形する（未使用フレーム
                 # のuint8変換を省く）。
                 db_fidx_arr = [f for f, _, _ in db_frame_vecs]
-                order = np.argsort(-sims, axis=1)[:, :self._geom_top_k]
+                order = np.argsort(-sims, axis=1)[:, :geom_k]
                 needed_fidx = sorted(
                     {db_fidx_arr[int(j)] for j in np.unique(order)}
                 )
@@ -499,6 +505,7 @@ class VideoFingerprintDatabase:
                     "db_ts_arr": db_ts_arr,
                     "sims": sims,
                     "db_geom_by_fidx": db_geom_by_fidx,
+                    "geom_top_k": geom_k,
                 })
 
             def _verify(item: dict):
@@ -665,7 +672,7 @@ class VideoFingerprintDatabase:
         frame_matches, geom_scores = self._build_geometric_matches(
             geom_query_fps, item["db_frame_vecs"], item["db_ts_arr"],
             item["sims"], query_geom_by_fidx, item["db_geom_by_fidx"],
-            matcher,
+            matcher, top_k=item.get("geom_top_k"),
         )
         if self._geom_diag:
             self._log_geom_diagnostics(item["vid_id"], frame_matches)
@@ -851,7 +858,8 @@ class VideoFingerprintDatabase:
         """幾何検証用にキーポイント座標(float32)と記述子(uint8)へ整形する
 
         BFマッチは記述子数の二乗で重くなるため、1フレームあたり _geom_max_desc 件
-        （先頭N件）に制限する。座標と記述子は同じ行で対応するため揃えて切り詰める。
+        （先頭N件）に制限する。点は登録・検索時に画面の格子順へ並べてあるため
+        （keypoint_grid）、先頭N件は画面全体から選ばれる。座標と記述子は同じ行で対応するため揃えて切り詰める。
 
         Args:
             kpt: キーポイント座標(N×2)
@@ -877,6 +885,7 @@ class VideoFingerprintDatabase:
         query_geom_by_fidx: Dict[int, Tuple[np.ndarray, np.ndarray]],
         db_geom_by_fidx: Dict[int, Tuple[np.ndarray, np.ndarray]],
         matcher: Optional["cv2.BFMatcher"] = None,
+        top_k: Optional[int] = None,
     ) -> Tuple[List[Dict], List[float]]:
         """ANN上位候補にRANSAC幾何検証を掛けフレーム一致候補を構築する
 
@@ -893,11 +902,12 @@ class VideoFingerprintDatabase:
             query_geom_by_fidx: クエリfidx→(座標float32, 記述子uint8)(整形済み)
             db_geom_by_fidx: DBフレームfidx→(座標float32, 記述子uint8)(整形済み)
             matcher: 全ペアで共有するBFMatcher（Noneなら都度生成）
+            top_k: 幾何照合するDBフレーム数（None で _geom_top_k）
 
         Returns:
             (frame_matches, geom_scores)
         """
-        top_k = self._geom_top_k
+        top_k = top_k or self._geom_top_k
         min_inl = self._geom_min_inliers
         max_hits = self._geom_max_hits
         sat = self._geom_inlier_saturation
